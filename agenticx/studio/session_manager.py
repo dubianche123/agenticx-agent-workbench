@@ -1,0 +1,4422 @@
+#!/usr/bin/env python3
+"""Session manager for Studio service mode.
+
+Author: Damon Li
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import inspect
+import json
+import logging
+import mimetypes
+import os
+import re
+import shutil
+import time
+import uuid
+from copy import deepcopy
+from datetime import datetime
+from pathlib import Path
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from agenticx.cli.config_manager import ConfigManager
+from agenticx.runtime.assistant_output import (
+    parse_assistant_output,
+    sanitize_suggested_questions,
+)
+from agenticx.runtime.truncated_final import (
+    ACTION_INTENT_RE,
+    detect_suspected_truncated_final,
+)
+from agenticx.runtime.token_budget import TOKEN_BUDGET_SCRATCHPAD_KEY
+from agenticx.runtime.permission_mode import (
+    global_permission_mode,
+    normalize_permission_mode,
+)
+from agenticx.runtime.turn_lifecycle import (
+    TurnAlreadyRunning,
+    TurnCheckpointMissing,
+    TurnLifecycleStore,
+)
+from agenticx.studio.chat_attachments import materialize_message_lists_image_uploads
+from agenticx.studio.enterprise_actions import (
+    _ENTERPRISE_CONTEXT_METADATA_KEY,
+    copy_enterprise_context_marker,
+    enterprise_context_marker_for_persistence,
+    restore_enterprise_context_marker,
+)
+from agenticx.studio.session_purpose import (
+    ENVIRONMENT_ASSISTANT_PURPOSE,
+    normalize_session_purpose,
+    normalize_session_purpose_scope,
+    session_has_purpose,
+)
+
+_log = logging.getLogger(__name__)
+
+DEFAULT_MAX_TASKSPACES = 20
+MIN_MAX_TASKSPACES = 5
+MAX_MAX_TASKSPACES = 100
+TASKSPACE_CATALOG_VERSION = 1
+
+
+def _resolve_max_taskspaces() -> int:
+    raw = str(os.getenv("AGX_MAX_TASKSPACES", "")).strip()
+    if not raw:
+        try:
+            global_data = ConfigManager._load_yaml(ConfigManager.GLOBAL_CONFIG_PATH)
+            project_data = ConfigManager._load_yaml(ConfigManager.PROJECT_CONFIG_PATH)
+            merged = ConfigManager._deep_merge(global_data, project_data)
+            cfg_val: Any = ConfigManager._get_nested(merged, "runtime.max_taskspaces")
+        except Exception:
+            cfg_val = None
+        if cfg_val is not None:
+            raw = str(cfg_val).strip()
+    if not raw:
+        raw = str(DEFAULT_MAX_TASKSPACES)
+    try:
+        value = int(raw)
+    except ValueError:
+        value = DEFAULT_MAX_TASKSPACES
+    return max(MIN_MAX_TASKSPACES, min(MAX_MAX_TASKSPACES, value))
+
+_INTERRUPTED_PLACEHOLDER_MARKERS = ("（已中断）", "(已中断)")
+
+
+def _assistant_metadata(msg: Dict[str, Any]) -> Dict[str, Any]:
+    raw = msg.get("metadata")
+    return raw if isinstance(raw, dict) else {}
+
+
+def _visible_assistant_body(content: str) -> str:
+    """Return canonical visible body for completion / stall checks."""
+    return parse_assistant_output(str(content or "")).visible_body.strip()
+
+
+#: 这些 assistant 行不是「这一轮的答复」，只是记录发生了什么，不能拿来判定该轮已完成。
+#: - interrupted-partial：流断在半路时留下的残句
+#: - llm-init-failed：模型都没初始化起来，写这一行只是为了让用户回头知道当时发生了什么
+_NON_REPLY_ASSISTANT_SOURCES = {"interrupted-partial", "llm-init-failed"}
+
+
+def _messages_last_turn_has_completed_reply(messages: List[Dict[str, Any]]) -> bool:
+    """Pure helper: whether the last user turn has a completed assistant reply."""
+    if not messages:
+        return False
+    last_user_idx = -1
+    for idx, msg in enumerate(messages):
+        if str(msg.get("role", "")).strip() == "user":
+            last_user_idx = idx
+    if last_user_idx < 0:
+        return False
+    tail = messages[last_user_idx + 1 :]
+
+    saw_turn_terminal_marker = False
+    last_reply_idx = -1
+    for idx, msg in enumerate(tail):
+        if str(msg.get("role", "")).strip() != "assistant":
+            continue
+        meta = _assistant_metadata(msg)
+        if str(meta.get("source", "") or "").strip() in _NON_REPLY_ASSISTANT_SOURCES:
+            continue
+        content = str(msg.get("content", "") or "")
+        parsed = parse_assistant_output(content)
+        visible = parsed.visible_body.strip()
+        turn_terminal = meta.get("turn_terminal")
+        if turn_terminal is True or turn_terminal is False:
+            saw_turn_terminal_marker = True
+            if turn_terminal is True and visible and not any(
+                marker in visible for marker in _INTERRUPTED_PLACEHOLDER_MARKERS
+            ):
+                last_reply_idx = idx
+            continue
+
+    if saw_turn_terminal_marker:
+        if last_reply_idx < 0:
+            return False
+        for msg in tail[last_reply_idx + 1 :]:
+            if str(msg.get("role", "")).strip() != "assistant":
+                continue
+            tool_calls = msg.get("tool_calls")
+            if isinstance(tool_calls, list) and tool_calls:
+                return False
+        return True
+
+    # Legacy rows (no turn_terminal markers in this user turn).
+    for idx, msg in enumerate(tail):
+        if str(msg.get("role", "")).strip() != "assistant":
+            continue
+        meta = _assistant_metadata(msg)
+        if str(meta.get("source", "") or "").strip() in _NON_REPLY_ASSISTANT_SOURCES:
+            continue
+        content = str(msg.get("content", "") or "")
+        visible = _visible_assistant_body(content)
+        is_reply = bool(visible) and not any(
+            marker in visible for marker in _INTERRUPTED_PLACEHOLDER_MARKERS
+        )
+        if is_reply:
+            last_reply_idx = idx
+    if last_reply_idx < 0:
+        return False
+
+    # A visible reply followed by a new assistant tool_calls message is only a
+    # preamble; the turn kept running and has not truly completed yet.
+    for msg in tail[last_reply_idx + 1 :]:
+        if str(msg.get("role", "")).strip() != "assistant":
+            continue
+        tool_calls = msg.get("tool_calls")
+        if isinstance(tool_calls, list) and tool_calls:
+            return False
+    return True
+
+
+_DEFERRAL_BODY_RE = re.compile(r"我先|让我先|接下来|稍等|正在|马上")
+
+# Explicit handoff / step-entry phrases that promise next-step work without doing it.
+# Strict: short, declarative "I'm now starting X" patterns only — DO NOT add generic
+# narrative connectors like 「接下来」 or 「下面」 alone, they appear in normal prose.
+_HANDOFF_BODY_RE = re.compile(
+    r"我现在进入第[一二三四五六七八九十0-9]+[项步阶段点]"  # 我现在进入第二项 / 第3步
+    r"|现在开始(?:进行|优化|处理|执行|动手)"               # 现在开始优化
+    r"|让我开始(?:进行|优化|处理|执行|动手)"                # 让我开始处理
+    r"|我(?:现在)?去(?:读取|加载|执行|处理|优化|改|看)"     # 我现在去读取 / 我去看
+    r"|我来(?:试试|看看|读取|加载|执行|改|优化)"            # 我来试试 / 我来优化
+    r"|接下来我(?:就|来|去|会)(?:读取|执行|改|优化|开始)",  # 接下来我去执行
+)
+
+# Mid-turn incomplete handoff after tools already ran (Path D).
+_MIDTURN_HANDOFF_RE = re.compile(
+    r"让我(?:搜索|查找|读取|打开|看看|定位)|我(?:再|继续)?(?:搜索|查找|读取)"
+)
+_MIDTURN_INCOMPLETE_ENDINGS = frozenset({":", "：", "…"})
+_MIDTURN_COMPLETED_ENDINGS = frozenset({".", "。", "!", "！", "?", "？"})
+
+# Body length cap for path C — beyond this, treat the message as a real reply.
+_HANDOFF_BODY_MAX_CHARS = 300
+_MIDTURN_HANDOFF_BODY_MAX_CHARS = 220
+
+
+def _turn_has_any_tool_row(tail: List[Dict[str, Any]]) -> bool:
+    """True if the messages after the last user include any role=tool row."""
+    for msg in tail:
+        if str(msg.get("role", "")).strip() == "tool":
+            return True
+    return False
+
+
+def _extract_assistant_reasoning(content: str) -> str:
+    return parse_assistant_output(str(content or "")).reasoning.strip()
+
+
+def _messages_last_turn_promised_action_without_followthrough(
+    messages: List[Dict[str, Any]],
+) -> bool:
+    """Assistant promised tool/file work in reasoning but ended without tool_calls."""
+    if not messages:
+        return False
+    last_user_idx = -1
+    for idx, msg in enumerate(messages):
+        if str(msg.get("role", "")).strip() == "user":
+            last_user_idx = idx
+    if last_user_idx < 0:
+        return False
+    tail = messages[last_user_idx + 1 :]
+    if not tail:
+        return False
+    last = tail[-1]
+    if str(last.get("role", "")).strip() != "assistant":
+        return False
+    tool_calls = last.get("tool_calls")
+    if isinstance(tool_calls, list) and tool_calls:
+        return False
+    raw_sq = last.get("suggested_questions")
+    if isinstance(raw_sq, list) and any(str(x).strip() for x in raw_sq):
+        return False
+    content = str(last.get("content", "") or "")
+    if "</followups>" in content.lower():
+        return False
+    reasoning = str(last.get("reasoning") or "").strip() or _extract_assistant_reasoning(content)
+    body = _visible_assistant_body(content)
+
+    # Path A (existing): reasoning promises action + short / deferring body.
+    if reasoning and ACTION_INTENT_RE.search(reasoning):
+        if _DEFERRAL_BODY_RE.search(body) and len(body) < 220:
+            return True
+        if body and body.rstrip()[-1:] in {":", "：", ",", "，", ";", "；", "、", "—", "…"}:
+            return True
+
+    # Path B/C (new): explicit handoff in body, regardless of reasoning.
+    # Requires no tool rows after the last user turn — already guarded above by
+    # asserting the *last* message is assistant; but a deferred turn may still
+    # have an earlier tool call in the same turn, so we tighten here.
+    if body and _HANDOFF_BODY_RE.search(body) and len(body) < _HANDOFF_BODY_MAX_CHARS:
+        if not _turn_has_any_tool_row(tail):
+            return True
+
+    # Path D: tools already ran this turn, then a short incomplete "I'll search/read…"
+    # stub with no further tool_calls (e.g. 「让我搜索一下这个HTML文件：」).
+    if (
+        body
+        and _turn_has_any_tool_row(tail)
+        and len(body) < _MIDTURN_HANDOFF_BODY_MAX_CHARS
+        and _MIDTURN_HANDOFF_RE.search(body)
+    ):
+        ending = body.rstrip()[-1:] if body.rstrip() else ""
+        if ending in _MIDTURN_INCOMPLETE_ENDINGS:
+            return True
+        if ending not in _MIDTURN_COMPLETED_ENDINGS:
+            return True
+
+    metadata = _assistant_metadata(last)
+    if not _turn_has_any_tool_row(tail) and detect_suspected_truncated_final(
+        visible_body=body,
+        reasoning_text=reasoning,
+        had_tool_calls_this_round=False,
+        executed_tool_names=(),
+        finish_reason=str(metadata.get("model_finish_reason") or ""),
+    ):
+        return True
+
+    return False
+
+
+# Titles that should be replaced by the first real user message (case-insensitive ASCII).
+_PLACEHOLDER_SESSION_TITLE_CF: frozenset[str] = frozenset(
+    x.casefold()
+    for x in (
+        "微信会话",
+        "微信对话",
+        "微信聊天",
+        "飞书会话",
+        "飞书对话",
+        "新对话",
+        "新会话",
+        "new chat",
+        "new conversation",
+    )
+)
+
+# One-shot flag in StudioSession.scratchpad: after first Meta assistant FINAL we may call LLM titling.
+LLM_TITLE_SCRATCH_KEY = "__agx_llm_title_done__"
+
+from agenticx.cli.studio import StudioSession
+from agenticx.runtime.session_mode import (
+    READ_FILES_SCRATCH_PREFIX,
+    normalize_session_mode,
+    is_code_dev,
+    get_session_phase,
+)
+
+
+def _harness_list_fields(session: StudioSession) -> dict[str, Any]:
+    if not is_code_dev(session):
+        return {}
+    scratch = getattr(session, "scratchpad", None) or {}
+    read_count = 0
+    if isinstance(scratch, dict):
+        read_count = sum(1 for k in scratch if str(k).startswith(READ_FILES_SCRATCH_PREFIX))
+    return {
+        "harness_phase": get_session_phase(session),
+        "read_files_count": read_count,
+    }
+from agenticx.memory.session_store import SessionStore, session_fts_enabled
+from agenticx.runtime import AsyncClarifyGate, AsyncConfirmGate, ConfirmGate
+from agenticx.runtime.team_manager import AgentTeamManager, SubAgentContext
+from agenticx.utils.atomic_writer import atomic_write_json
+from agenticx.studio.session_event_hub import SessionEventHub
+
+EventEmitter = Callable[[Any], Awaitable[None]]
+SummarySink = Callable[[str, SubAgentContext], Awaitable[None]]
+
+
+def normalize_session_avatar_binding(avatar_id: Optional[str]) -> Optional[str]:
+    """Collapse empty string to None so meta vs avatar-bound sessions compare consistently."""
+    s = (avatar_id or "").strip()
+    return s or None
+
+
+def managed_session_binding_matches_avatar_query(
+    managed: "ManagedSession",
+    *,
+    query_avatar_id: Optional[str],
+) -> bool:
+    """Enforce session isolation: Meta panes omit avatar_id (expect unbound); avatar panes must match."""
+    stored = normalize_session_avatar_binding(managed.avatar_id)
+    q = normalize_session_avatar_binding(query_avatar_id)
+    if q is None:
+        return stored is None
+    return stored == q
+
+
+@dataclass
+class ManagedSession:
+    session_id: str
+    studio_session: StudioSession
+    confirm_gate: AsyncConfirmGate = field(default_factory=AsyncConfirmGate)
+    sub_confirm_gates: Dict[str, AsyncConfirmGate] = field(default_factory=dict)
+    clarify_gate: AsyncClarifyGate = field(default_factory=AsyncClarifyGate)
+    sub_clarify_gates: Dict[str, AsyncClarifyGate] = field(default_factory=dict)
+    team_manager: Optional[AgentTeamManager] = None
+    updated_at: float = field(default_factory=time.time)
+    created_at: float = field(default_factory=time.time)
+    avatar_id: Optional[str] = None
+    avatar_name: Optional[str] = None
+    session_name: Optional[str] = None
+    pinned: bool = False
+    archived: bool = False
+    taskspaces: list[dict[str, str]] = field(default_factory=list)
+    execution_state: str = "idle"  # idle | running | interrupted | failed
+    event_hub: SessionEventHub | None = None
+    # Server-owned routing metadata.  Dedicated sessions are kept out of the
+    # ordinary history/recovery surface by purpose, not by their display name.
+    purpose: Optional[str] = None
+    purpose_scope: Optional[str] = None
+
+    def get_confirm_gate(self, agent_id: str = "meta") -> AsyncConfirmGate:
+        if not agent_id or agent_id == "meta":
+            return self.confirm_gate
+        return self.sub_confirm_gates.setdefault(agent_id, AsyncConfirmGate())
+
+    def get_clarify_gate(self, agent_id: str = "meta") -> AsyncClarifyGate:
+        if not agent_id or agent_id == "meta":
+            return self.clarify_gate
+        return self.sub_clarify_gates.setdefault(agent_id, AsyncClarifyGate())
+
+    def get_or_create_team(
+        self,
+        *,
+        llm_factory: Callable[[], Any],
+        event_emitter: Optional[EventEmitter] = None,
+        summary_sink: Optional[SummarySink] = None,
+        confirm_gate_factory: Optional[Callable[[str], ConfirmGate]] = None,
+    ) -> AgentTeamManager:
+        if self.team_manager is None:
+            self.team_manager = AgentTeamManager(
+                llm_factory=llm_factory,
+                base_session=self.studio_session,
+                owner_session_id=self.session_id,
+                event_emitter=event_emitter,
+                summary_sink=summary_sink,
+                confirm_gate_factory=confirm_gate_factory,
+            )
+        else:
+            self.team_manager.llm_factory = llm_factory
+            self.team_manager.base_session = self.studio_session
+            self.team_manager.owner_session_id = self.session_id
+            self.team_manager.event_emitter = event_emitter
+            self.team_manager.summary_sink = summary_sink
+            if confirm_gate_factory is not None:
+                self.team_manager.confirm_gate_factory = confirm_gate_factory
+        return self.team_manager
+
+
+_PREVIEW_KIND_TEXT = "text"
+_PREVIEW_KIND_MARKDOWN = "markdown"
+_PREVIEW_KIND_CODE = "code"
+_PREVIEW_KIND_IMAGE = "image"
+_PREVIEW_KIND_PDF = "pdf"
+_PREVIEW_KIND_OFFICE = "office"
+_PREVIEW_KIND_BINARY = "binary"
+
+_MARKDOWN_EXTS = frozenset({".md", ".markdown", ".mdx", ".mmd"})
+_TEXT_EXTS = frozenset({".txt", ".csv", ".log", ".jsonl", ".ndjson"})
+_CODE_EXTS = frozenset(
+    {
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".json",
+        ".yaml",
+        ".yml",
+        ".toml",
+        ".sh",
+        ".bash",
+        ".xml",
+        ".html",
+        ".css",
+        ".rs",
+    }
+)
+_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".ico"})
+_PDF_EXTS = frozenset({".pdf"})
+_OFFICE_EXTS = frozenset({".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx"})
+
+_MIME_BY_EXT: dict[str, str] = {
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    ".mdx": "text/markdown",
+    ".mmd": "text/markdown",
+    ".py": "text/x-python",
+    ".ts": "text/typescript",
+    ".tsx": "text/typescript",
+    ".js": "text/javascript",
+    ".jsx": "text/javascript",
+    ".json": "application/json",
+    ".jsonl": "application/jsonl",
+    ".ndjson": "application/x-ndjson",
+    ".log": "text/plain",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".toml": "application/toml",
+    ".sh": "text/x-shellscript",
+    ".bash": "text/x-shellscript",
+    ".rs": "text/rust",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".bmp": "image/bmp",
+    ".svg": "image/svg+xml",
+    ".ico": "image/x-icon",
+    ".pdf": "application/pdf",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xls": "application/vnd.ms-excel",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+}
+
+
+def _guess_preview_mime(path: Path) -> str:
+    ext = path.suffix.lower()
+    mime, _encoding = mimetypes.guess_type(str(path))
+    if mime:
+        return mime
+    return _MIME_BY_EXT.get(ext, "application/octet-stream")
+
+
+def _guess_preview_kind(path: Path, mime_type: str) -> str:
+    ext = path.suffix.lower()
+    if ext in _MARKDOWN_EXTS or mime_type == "text/markdown":
+        return _PREVIEW_KIND_MARKDOWN
+    if ext in _TEXT_EXTS:
+        return _PREVIEW_KIND_TEXT
+    if ext in _CODE_EXTS:
+        return _PREVIEW_KIND_CODE
+    if ext in _IMAGE_EXTS or mime_type.startswith("image/"):
+        return _PREVIEW_KIND_IMAGE
+    if ext in _PDF_EXTS or mime_type == "application/pdf":
+        return _PREVIEW_KIND_PDF
+    if ext in _OFFICE_EXTS:
+        return _PREVIEW_KIND_OFFICE
+    if mime_type.startswith("text/"):
+        return _PREVIEW_KIND_TEXT
+    if mime_type in ("application/json", "application/xml", "application/javascript"):
+        return _PREVIEW_KIND_CODE
+    return _PREVIEW_KIND_BINARY
+
+
+def _is_textual_preview_kind(kind: str) -> bool:
+    return kind in (_PREVIEW_KIND_TEXT, _PREVIEW_KIND_MARKDOWN, _PREVIEW_KIND_CODE)
+
+
+def classify_taskspace_file(path: Path) -> dict[str, Any]:
+    """Classify a taskspace file for workspace preview (pure helper for tests/runtime)."""
+    mime_type = _guess_preview_mime(path)
+    preview_kind = _guess_preview_kind(path, mime_type)
+    is_binary = not _is_textual_preview_kind(preview_kind)
+    # Desktop WorkspaceFilePreview renders text/image plus PDF/Office (pdf.js / docx).
+    preview_supported = preview_kind in (
+        _PREVIEW_KIND_TEXT,
+        _PREVIEW_KIND_MARKDOWN,
+        _PREVIEW_KIND_CODE,
+        _PREVIEW_KIND_IMAGE,
+        _PREVIEW_KIND_PDF,
+        _PREVIEW_KIND_OFFICE,
+    )
+    return {
+        "mime_type": mime_type,
+        "preview_kind": preview_kind,
+        "is_binary": is_binary,
+        "preview_supported": preview_supported,
+    }
+
+
+class SessionManager:
+    _META_TASKSPACE_SCOPE = "meta"
+
+    def __init__(self, *, ttl_seconds: int = 3600) -> None:
+        from agenticx.studio.turn_limiter import TurnLimiter
+
+        self.ttl_seconds = ttl_seconds
+        self._sessions: Dict[str, ManagedSession] = {}
+        self._interrupt_requests: set[str] = set()
+        self._continuation_locks: Dict[str, asyncio.Lock] = {}
+        # The lifecycle store's thread RLock is re-entrant on this event-loop
+        # thread. Track async rewind transactions explicitly so a concurrent
+        # synchronous begin_turn cannot write while compensation is pending.
+        self._turn_mutations: set[str] = set()
+        self.turn_limiter = TurnLimiter.from_env()
+        self._session_store = SessionStore()
+        from agenticx.utils.agx_home import agx_home
+
+        self._sessions_root = str(agx_home() / "sessions")
+        self._taskspaces_root = str(agx_home() / "taskspaces")
+        # Turn checkpoints are kept in the same private session root as the
+        # durable chat snapshots, but the lifecycle implementation is isolated
+        # so session management stays independent of filesystem semantics.
+        self.turn_lifecycle = TurnLifecycleStore(self._sessions_root)
+        # Alias retained for integrations that call the shorter plan term.
+        self.turn_store = self.turn_lifecycle
+        self._schedule_fts_backfill()
+
+    def _taskspace_limit(self) -> int:
+        return _resolve_max_taskspaces()
+
+    def _schedule_fts_backfill(self) -> None:
+        """Fire-and-forget: index historical messages.json files on first startup."""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+        if loop.is_running():
+            loop.create_task(self._run_fts_backfill())
+
+    async def _run_fts_backfill(self) -> None:
+        try:
+            result = await self._session_store.backfill_from_sessions_root(
+                self._sessions_root, overwrite=False
+            )
+            if result.get("indexed", 0) > 0:
+                _log.info("[session_fts] backfill: %s", result)
+        except Exception as exc:
+            _log.debug("[session_fts] backfill error (non-fatal): %s", exc)
+
+    def _persisted_session_has_permission_mode(self, session_id: str) -> bool:
+        """Whether a persisted session already owns an explicit permission mode."""
+
+        try:
+            metadata = self._session_store._load_latest_session_metadata_sync(session_id)
+        except Exception:
+            return False
+        if not isinstance(metadata, dict):
+            return False
+        return bool(
+            normalize_permission_mode(metadata.get("permission_mode"), fallback="")
+        )
+
+    def create(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        *,
+        session_id: Optional[str] = None,
+        permission_mode: Optional[str] = None,
+        purpose: Optional[str] = None,
+        purpose_scope: Optional[str] = None,
+    ) -> ManagedSession:
+        sid = (session_id or "").strip() or str(uuid.uuid4())
+        persisted = bool(session_id and self._session_exists_in_persistence(sid))
+        requested_purpose = normalize_session_purpose(purpose) or None
+        requested_purpose_scope = normalize_session_purpose_scope(purpose_scope) or None
+        requested_permission_mode = normalize_permission_mode(
+            permission_mode,
+            fallback="",
+        )
+        # The environment assistant owns an independent security picker.  A
+        # brand-new dedicated session must start in per-action confirmation,
+        # regardless of the ordinary Settings default; an already persisted
+        # explicit mode is restored below and remains authoritative.
+        default_permission_mode = (
+            "ask"
+            if requested_purpose == ENVIRONMENT_ASSISTANT_PURPOSE
+            else global_permission_mode()
+        )
+        studio_session = StudioSession(
+            provider_name=provider,
+            model_name=model,
+            permission_mode=requested_permission_mode or None,
+        )
+        # Tool-side document publication and lineage checks use the managed
+        # session identity rather than accepting actor/session values from
+        # tool arguments.  Bind it as soon as the session is materialized so
+        # direct SessionManager callers have the same fence as the HTTP path.
+        setattr(studio_session, "_session_id", sid)
+        self._restore_persisted_state(sid, studio_session)
+        if not normalize_permission_mode(
+            getattr(studio_session, "permission_mode", None),
+            fallback="",
+        ):
+            studio_session.permission_mode = (
+                requested_permission_mode or default_permission_mode
+            )
+        managed = ManagedSession(
+            session_id=sid,
+            studio_session=studio_session,
+            purpose=requested_purpose,
+            purpose_scope=requested_purpose_scope,
+        )
+        self._restore_managed_metadata(sid, managed)
+        # A persisted marker is authoritative when materializing an existing
+        # session.  For a brand-new session retain the explicitly requested
+        # marker after the metadata restore (which is normally empty).
+        if managed.purpose is None and requested_purpose:
+            managed.purpose = requested_purpose
+        if managed.purpose_scope is None and requested_purpose_scope:
+            managed.purpose_scope = requested_purpose_scope
+        if (
+            managed.purpose == ENVIRONMENT_ASSISTANT_PURPOSE
+            and not requested_permission_mode
+            and not self._persisted_session_has_permission_mode(sid)
+        ):
+            # Old dedicated shells may predate the session-bound mode.  Keep
+            # their first materialization fail-closed instead of inheriting the
+            # ordinary global default.
+            studio_session.permission_mode = "ask"
+        self._ensure_default_taskspace(managed)
+        # Per-session workspaces: do not pull avatar/meta global_workspaces into new sessions.
+        self.align_meta_session_workspace(managed)
+        active_taskspace_id = str(
+            getattr(managed.studio_session, "active_taskspace_id", None) or ""
+        ).strip()
+        if active_taskspace_id and not any(
+            str(item.get("id", "")).strip() == active_taskspace_id
+            for item in managed.taskspaces
+            if isinstance(item, dict)
+        ):
+            managed.studio_session.active_taskspace_id = None
+        self._sessions[sid] = managed
+        # Old persisted sessions predate the session-bound mode.  Snapshot the
+        # current global default once when such a session is first materialized;
+        # later Settings changes must not silently change its policy.
+        if persisted and not requested_permission_mode and not self._persisted_session_has_permission_mode(sid):
+            self._persist_session_state(sid, studio_session)
+        return managed
+
+    def get(self, session_id: str, *, touch: bool = False) -> Optional[ManagedSession]:
+        managed = self._sessions.get(session_id)
+        if managed is None and self._session_exists_in_persistence(session_id):
+            managed = self.create(session_id=session_id)
+        if managed is None:
+            return None
+        if touch:
+            managed.updated_at = time.time()
+        return managed
+
+    def get_if_loaded(self, session_id: str) -> Optional[ManagedSession]:
+        """Return the in-memory session without materializing it from persistence.
+
+        Unlike ``get()``, never triggers ``create()`` for a session that has not
+        been touched yet this process — used by callers (e.g. the background
+        supervisor) that must scan every historical session but only care about
+        ones already resident in memory, to avoid an O(n) full-disk restore.
+        """
+        return self._sessions.get(session_id)
+
+    def session_scratchpad_flag(self, session_id: str, key: str) -> bool:
+        """Cheap persisted scratchpad boolean lookup, without full session restore.
+
+        A single indexed SQLite read (``scratchpad`` table, PK session_id+key)
+        instead of the multi-file ``create()``/``_restore_persisted_state()``
+        pipeline (messages, todos, agent_messages, context refs, taskspace
+        sync). Used to pre-filter sessions before deciding whether the full
+        materialization is actually needed.
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        try:
+            data = self._session_store._load_scratchpad_sync(sid)
+        except Exception:
+            return False
+        from agenticx.runtime.scratchpad_utils import scratchpad_truthy
+
+        return scratchpad_truthy(data.get(key))
+
+    def touch(self, session_id: str) -> bool:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        managed.updated_at = time.time()
+        return True
+
+    def persist(self, session_id: str) -> bool:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        return self._persist_session_state(session_id, managed.studio_session)
+
+    async def persist_async(self, session_id: str) -> bool:
+        """Persist session state off the asyncio event loop (SQLite + FTS + snapshots)."""
+        from agenticx.studio.blocking_io import run_in_persist_pool
+
+        return await run_in_persist_pool(self.persist, session_id)
+
+    def begin_turn(
+        self,
+        session_id: str,
+        turn_id: str | None = None,
+        *,
+        client_turn_id: str | None = None,
+        workspace_roots: list[str] | None = None,
+        explicit_paths: list[str] | None = None,
+    ):
+        """Create a durable pre-turn checkpoint and bind private paths to session."""
+
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError(f"unknown session_id: {session_id}")
+        if str(session_id or "").strip() in self._turn_mutations:
+            raise TurnAlreadyRunning("session turn state is being restored")
+        # SubAgentRunStore persists the run record/index below the same
+        # private session root as TurnLifecycleStore.  Pass only that exact
+        # session-owned directory; the lifecycle store validates it again
+        # before admitting the paths into the checkpoint.
+        lifecycle_root = getattr(self.turn_lifecycle, "root", None)
+        internal_history_root = (
+            Path(str(lifecycle_root or self._sessions_root))
+            / str(session_id).strip()
+            / "subagent_runs"
+        )
+        handle = self.turn_lifecycle.begin(
+            session_id,
+            turn_id,
+            client_turn_id=client_turn_id,
+            session=managed.studio_session,
+            workspace_roots=workspace_roots,
+            explicit_paths=explicit_paths or (),
+            internal_history_roots=[str(internal_history_root)],
+        )
+        setattr(managed.studio_session, "_active_turn_id", handle.turn_id)
+        setattr(managed.studio_session, "_private_workspace_root", str(handle.private.root))
+        setattr(managed.studio_session, "_private_execution_root", str(handle.private.scratch))
+        setattr(managed.studio_session, "_private_logs_root", str(handle.private.logs))
+        return handle
+
+    def finalize_turn(
+        self,
+        session_id: str,
+        turn_id: str | None = None,
+        *,
+        status: str = "completed",
+        reason: str | None = None,
+        deliverables: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any] | None:
+        """Capture the post-turn file state and release its writer lease."""
+
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return None
+        tid = str(turn_id or getattr(managed.studio_session, "_active_turn_id", "") or "").strip()
+        if not tid:
+            return None
+        effective_deliverables = deliverables
+        if effective_deliverables is None:
+            pending = getattr(managed.studio_session, "_turn_deliverables", None)
+            effective_deliverables = pending if isinstance(pending, list) else ()
+        result = self.turn_lifecycle.finalize(
+            session_id,
+            tid,
+            session=managed.studio_session,
+            status=status,
+            reason=reason,
+            deliverables=effective_deliverables or (),
+        )
+        try:
+            delattr(managed.studio_session, "_turn_deliverables")
+        except AttributeError:
+            pass
+        if str(getattr(managed.studio_session, "_active_turn_id", "") or "") == tid:
+            for attr in ("_active_turn_id", "_private_workspace_root", "_private_execution_root", "_private_logs_root"):
+                try:
+                    delattr(managed.studio_session, attr)
+                except AttributeError:
+                    pass
+        return result
+
+    def abort_turn(
+        self,
+        session_id: str,
+        turn_id: str | None = None,
+        *,
+        reason: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Mark a failed turn unavailable and release its writer lease.
+
+        ``TurnLifecycleStore.abort`` is the preferred failure transaction.  A
+        small compatibility fallback is kept for stores from the first
+        rollout, where only ``finalize`` existed.  Failure checkpoints are
+        deliberately marked incomplete so a persistence error can never make
+        the UI offer an undo whose chat snapshot was not durable.
+        """
+
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return None
+        sid = str(session_id or "").strip()
+        tid = str(
+            turn_id
+            or getattr(managed.studio_session, "_active_turn_id", "")
+            or ""
+        ).strip()
+        if not sid or not tid:
+            return None
+        failure_reason = str(reason or "turn finalization failed").strip()
+        lifecycle_abort = getattr(self.turn_lifecycle, "abort", None)
+        result: dict[str, Any] | None = None
+        abort_error: BaseException | None = None
+        if callable(lifecycle_abort):
+            try:
+                # The transaction worker may add optional keywords while old
+                # stores accept only (session_id, turn_id, reason).  Bind only
+                # parameters present in the installed implementation rather
+                # than catching an arbitrary TypeError from inside it.
+                try:
+                    parameters = inspect.signature(lifecycle_abort).parameters
+                except (TypeError, ValueError):
+                    parameters = {}
+                accepts_kwargs = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                )
+                kwargs: dict[str, Any] = {}
+                if accepts_kwargs or "session" in parameters:
+                    kwargs["session"] = managed.studio_session
+                if accepts_kwargs or "reason" in parameters:
+                    kwargs["reason"] = failure_reason
+                if accepts_kwargs or "status" in parameters:
+                    kwargs["status"] = "failed"
+                raw_result = lifecycle_abort(sid, tid, **kwargs)
+                if inspect.isawaitable(raw_result):
+                    # A synchronous manager cannot safely leave a coroutine
+                    # un-awaited. Treat this as unavailable and use the
+                    # compatibility path below; lifecycle abort is expected
+                    # to be synchronous just like finalize().
+                    raw_result.close() if hasattr(raw_result, "close") else None
+                    raise RuntimeError("turn lifecycle abort must be synchronous")
+                if isinstance(raw_result, dict):
+                    result = raw_result
+            except BaseException as exc:  # noqa: BLE001
+                abort_error = exc
+                _log.warning(
+                    "turn lifecycle abort failed session=%s turn=%s",
+                    sid,
+                    tid,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        if result is None and not callable(lifecycle_abort):
+            try:
+                raw_result = self.turn_lifecycle.finalize(
+                    sid,
+                    tid,
+                    session=managed.studio_session,
+                    status="failed",
+                    reason=failure_reason,
+                )
+                if isinstance(raw_result, dict):
+                    result = raw_result
+            except BaseException as exc:  # noqa: BLE001
+                abort_error = exc
+                _log.warning(
+                    "failed-turn fallback finalization failed session=%s turn=%s",
+                    sid,
+                    tid,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        # A legacy finalize() can return a completed-looking manifest even
+        # though the caller is handling a durable persistence failure. Rewrite
+        # it as explicitly unavailable when possible, and always release a
+        # stale manifest lease after the runtime has stopped.
+        if result is not None:
+            result["status"] = "failed"
+            result["checkpoint_complete"] = False
+            result["incomplete_reason"] = failure_reason
+            try:
+                write_manifest = getattr(self.turn_lifecycle, "_write_manifest", None)
+                if callable(write_manifest):
+                    write_manifest(result)
+            except BaseException as exc:  # noqa: BLE001
+                abort_error = abort_error or exc
+                _log.warning(
+                    "failed-turn unavailable marker could not be persisted session=%s turn=%s",
+                    sid,
+                    tid,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+        elif result is None:
+            # If the installed abort hook returns no manifest (including a
+            # legacy hook that only releases its own durable row), inspect the
+            # row once more and release any remaining root keys.  This runs
+            # only after the caller has stopped the producer, and never admits
+            # a new writer while a runtime is still active.
+            try:
+                read_manifest = getattr(self.turn_lifecycle, "_read_manifest", None)
+                release_manifest = getattr(self.turn_lifecycle, "_release_manifest_locks", None)
+                write_manifest = getattr(self.turn_lifecycle, "_write_manifest", None)
+                manifest = read_manifest(sid, tid) if callable(read_manifest) else None
+                if manifest is not None and callable(release_manifest):
+                    if str(manifest.get("status", "") or "").strip().lower() == "running":
+                        manifest["status"] = "failed"
+                        manifest["checkpoint_complete"] = False
+                        manifest["incomplete_reason"] = failure_reason
+                        if callable(write_manifest):
+                            with contextlib.suppress(BaseException):
+                                write_manifest(manifest)
+                    release_manifest(manifest)
+            except BaseException:
+                _log.warning(
+                    "stale failed-turn lease cleanup failed session=%s turn=%s",
+                    sid,
+                    tid,
+                    exc_info=True,
+                )
+
+        try:
+            if str(getattr(managed.studio_session, "_active_turn_id", "") or "") == tid:
+                for attr in (
+                    "_active_turn_id",
+                    "_private_workspace_root",
+                    "_private_execution_root",
+                    "_private_logs_root",
+                    "_turn_deliverables",
+                ):
+                    try:
+                        delattr(managed.studio_session, attr)
+                    except AttributeError:
+                        pass
+        except Exception:
+            _log.debug("failed-turn session binding cleanup failed", exc_info=True)
+        return result
+
+    async def persist_and_finalize_turn(
+        self,
+        session_id: str,
+        *,
+        status: str = "completed",
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist chat and then terminalize its checkpoint as one failure-aware step."""
+
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return {
+                "ok": False,
+                "error": "session not found",
+                "checkpoint_available": False,
+            }
+        requested_status = str(status or "completed").strip().lower() or "completed"
+        failure_reason = str(reason or "turn finalization failed").strip()
+        turn_id = str(getattr(managed.studio_session, "_active_turn_id", "") or "").strip()
+        try:
+            persisted = await self.persist_async(session_id)
+            if persisted is False:
+                raise RuntimeError("session persistence returned false")
+        except BaseException as exc:  # noqa: BLE001
+            detail = f"session persistence failed: {exc}"
+            self.abort_turn(session_id, turn_id, reason=detail)
+            return {
+                "ok": False,
+                "error": detail,
+                "checkpoint_available": False,
+                "exception": exc,
+            }
+
+        try:
+            manifest = self.finalize_turn(
+                session_id,
+                status=requested_status,
+                reason=reason,
+            )
+        except TurnCheckpointMissing as exc:
+            detail = f"turn checkpoint unavailable: {exc}"
+            self.abort_turn(session_id, turn_id, reason=detail)
+            return {
+                "ok": False,
+                "error": detail,
+                "checkpoint_available": False,
+                "exception": exc,
+            }
+        except BaseException as exc:  # noqa: BLE001
+            detail = f"turn checkpoint finalization failed: {exc}"
+            self.abort_turn(session_id, turn_id, reason=detail)
+            return {
+                "ok": False,
+                "error": detail,
+                "checkpoint_available": False,
+                "exception": exc,
+            }
+
+        if not isinstance(manifest, dict):
+            detail = "turn checkpoint finalization returned no manifest"
+            self.abort_turn(session_id, turn_id, reason=detail)
+            return {"ok": False, "error": detail, "checkpoint_available": False}
+        if manifest.get("checkpoint_complete") is False:
+            detail = str(
+                manifest.get("incomplete_reason")
+                or "turn checkpoint is incomplete"
+            )
+            # finalize() may already have released its normal lease.  The
+            # abort hook updates its durable status when available and keeps
+            # the fallback manifest visibly unavailable.
+            self.abort_turn(session_id, turn_id, reason=detail)
+            return {
+                "ok": False,
+                "error": detail,
+                "checkpoint_available": False,
+                "manifest": manifest,
+            }
+        return {
+            "ok": True,
+            "error": "",
+            "checkpoint_available": True,
+            "manifest": manifest,
+        }
+
+    def list_turns(self, session_id: str) -> list[dict[str, Any]]:
+        return self.turn_lifecycle.list_turns(session_id)
+
+    async def rewind_turn(self, session_id: str, turn_id: str) -> dict[str, Any]:
+        """Restore files and the persisted chat boundary for a selected turn."""
+
+        sid = str(session_id or "").strip()
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError(f"unknown session_id: {session_id}")
+        if sid in self._turn_mutations:
+            raise TurnAlreadyRunning("session turn state is being restored")
+        state = str(getattr(managed, "execution_state", "idle") or "idle").strip().lower()
+        if state == "running":
+            raise RuntimeError("cannot rewind while a turn is running")
+
+        # ``TurnLifecycleStore`` protects its synchronous portions with a
+        # thread lock, but the transaction deliberately awaits persistence.
+        # Keep an async session marker across that await so a same-loop chat
+        # cannot begin a new checkpoint while files/chat are only half
+        # restored.  ``begin_turn`` checks this marker synchronously.
+        self._turn_mutations.add(sid)
+
+        # The lifecycle transaction persists the restored chat through this
+        # callback.  Mark the managed session idle before that callback so the
+        # durable metadata cannot advertise a running turn after a successful
+        # undo.  Restore the in-memory state if the transaction compensates.
+        previous_state = state
+        managed.execution_state = "idle"
+
+        async def _persist() -> bool:
+            return await self.persist_async(session_id)
+        try:
+            result = await self.turn_lifecycle.rewind_async(
+                sid,
+                turn_id,
+                session=managed.studio_session,
+                persist_async=_persist,
+            )
+        except BaseException:
+            managed.execution_state = previous_state
+            managed.updated_at = time.time()
+            raise
+        finally:
+            self._turn_mutations.discard(sid)
+        managed.execution_state = "idle"
+        managed.updated_at = time.time()
+        return result
+
+    def set_execution_state(
+        self,
+        session_id: str,
+        state: str,
+        *,
+        preserve_event_hub: bool = False,
+    ) -> None:
+        """Update execution state, optionally keeping the terminal event hub alive."""
+        managed = self._sessions.get(session_id)
+        if managed is not None:
+            managed.execution_state = state
+            managed.updated_at = time.time()
+            hub = managed.event_hub
+            preserve_interrupted_hub = state == "interrupted" and hub is not None
+            if (
+                state in {"idle", "interrupted", "failed"}
+                and not preserve_interrupted_hub
+                and not preserve_event_hub
+            ):
+                self.clear_event_hub(session_id)
+
+    def ensure_event_hub(self, session_id: str) -> SessionEventHub:
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError(f"unknown session_id: {session_id}")
+        hub = managed.event_hub
+        if hub is None or hub.is_closed or hub.is_runtime_done:
+            managed.event_hub = SessionEventHub(session_id)
+        return managed.event_hub
+
+    def get_event_hub(self, session_id: str) -> SessionEventHub | None:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return None
+        hub = managed.event_hub
+        if hub is None or hub.is_closed:
+            return None
+        return hub
+
+    def clear_event_hub(self, session_id: str) -> None:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return
+        hub = managed.event_hub
+        if hub is not None:
+            hub.close()
+        managed.event_hub = None
+
+    def _normalize_execution_state_for_listing(self, session_id: str, state: Any) -> str:
+        """Normalize execution_state for session list display.
+
+        Stale ``interrupted`` metadata (no active interrupt request, or the last
+        user turn already has a completed assistant reply on disk) is shown as
+        ``idle`` so the history badge does not contradict a finished answer.
+        """
+        raw = str(state or "idle").strip().lower()
+        if raw not in {"idle", "running", "interrupted", "failed"}:
+            raw = "idle"
+        if self.should_interrupt(session_id):
+            return "interrupted"
+        # Fast path: a plain ``idle`` session always normalizes back to ``idle``
+        # regardless of the on-disk last-turn check below (both the completed and
+        # non-completed branches return ``idle`` when raw == "idle"). Short-circuit
+        # here so session listing does NOT read the full messages.json for every
+        # idle session — this was the dominant O(n) cold-start disk cost.
+        if raw == "idle":
+            return "idle"
+        if raw == "running":
+            # Stale ``running`` metadata (finalize persist lag, pane switch, or
+            # hub-mode off-loop timing) must not keep the history spinner after the
+            # turn already produced a terminal assistant payload (followups / SQ).
+            if self._last_turn_has_terminal_assistant_reply(session_id):
+                return "idle"
+            # When the session is NOT live in this process (no in-memory runtime /
+            # active stream), a ``running`` flag is necessarily stale disk residue
+            # — there is nothing actually executing. Accept a plain visible reply
+            # body as terminal so a finished-but-no-followups answer does not show
+            # a permanent false spinner. Live in-memory sessions keep the strict
+            # check above so a mid-turn (thinking-only partial, tools still running)
+            # turn is never prematurely cleared.
+            if self._sessions.get(session_id) is None and self._last_turn_has_completed_reply(
+                session_id
+            ):
+                return "idle"
+            return "running"
+        if raw == "failed":
+            return "failed"
+        # 真正的「陈旧」判定就是上面这一句：磁盘上最后一轮确实产出了可见回复，说明
+        # 只是状态位没刷新，降级成 idle。
+        if self._last_turn_has_completed_reply(session_id):
+            return "idle"
+        # 这里原本还有一句无条件的 `if raw == "interrupted": return "idle"`，等于把
+        # 上面那个磁盘检查变成死代码——interrupted 永远回不来，一轮跑挂的会话在历史里
+        # 和正常跑完的长得一模一样。用户看到的是「有问题没答案，但看着像结束了」。
+        return raw
+
+    def request_interrupt(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        self._interrupt_requests.add(sid)
+        return True
+
+    def get_continuation_lock(self, session_id: str) -> asyncio.Lock:
+        """Return the process-local single-flight lock for session recovery."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            raise ValueError("session_id is required")
+        return self._continuation_locks.setdefault(sid, asyncio.Lock())
+
+    def clear_interrupt(self, session_id: str) -> None:
+        sid = str(session_id or "").strip()
+        if sid:
+            self._interrupt_requests.discard(sid)
+
+    def should_interrupt(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        return bool(sid and sid in self._interrupt_requests)
+
+    async def wait_for_interrupted_runtime(
+        self,
+        session_id: str,
+        *,
+        timeout_seconds: float = 2.0,
+        poll_interval_seconds: float = 0.02,
+    ) -> bool:
+        """Wait until a session's previous event hub completes finalization."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return True
+        hub = self.get_event_hub(sid)
+        if hub is None:
+            return True
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.0, float(timeout_seconds))
+        interval = max(0.001, float(poll_interval_seconds))
+        while loop.time() < deadline:
+            current_hub = self.get_event_hub(sid)
+            if current_hub is None or current_hub is not hub:
+                return True
+            await asyncio.sleep(interval)
+        return False
+
+    def _messages_for_execution_state_check(self, session_id: str) -> list[dict]:
+        """Prefer in-memory chat_history so listing reflects a just-finished turn."""
+        managed = self._sessions.get(session_id)
+        if managed is not None:
+            hist = getattr(managed.studio_session, "chat_history", None) or []
+            if hist:
+                return [m for m in hist if isinstance(m, dict)]
+        try:
+            return self._load_messages_snapshot(session_id)
+        except Exception:
+            return []
+
+    def _last_turn_has_terminal_assistant_reply(self, session_id: str) -> bool:
+        """True when the last user turn already has a strong terminal assistant.
+
+        New-format rows require ``metadata.turn_terminal is True`` plus a
+        non-empty canonical visible body. Legacy rows (no marker) may use
+        visible body plus sanitized suggested_questions as a compatibility
+        signal. SQ-only / followups-only / tool prefaces never clear running.
+        """
+        try:
+            messages = self._messages_for_execution_state_check(session_id)
+        except Exception:
+            return False
+        if not messages:
+            return False
+        last_user_idx = -1
+        for idx, msg in enumerate(messages):
+            if str(msg.get("role", "")).strip() == "user":
+                last_user_idx = idx
+        if last_user_idx < 0:
+            return False
+        saw_marker = False
+        for msg in messages[last_user_idx + 1 :]:
+            if str(msg.get("role", "")).strip() != "assistant":
+                continue
+            meta = _assistant_metadata(msg)
+            if str(meta.get("source", "") or "").strip() == "interrupted-partial":
+                continue
+            content = str(msg.get("content", "") or "")
+            parsed = parse_assistant_output(content)
+            visible = parsed.visible_body.strip()
+            turn_terminal = meta.get("turn_terminal")
+            if turn_terminal is True or turn_terminal is False:
+                saw_marker = True
+                if turn_terminal is True and visible:
+                    return True
+                continue
+        if saw_marker:
+            return False
+        for msg in messages[last_user_idx + 1 :]:
+            if str(msg.get("role", "")).strip() != "assistant":
+                continue
+            meta = _assistant_metadata(msg)
+            if str(meta.get("source", "") or "").strip() == "interrupted-partial":
+                continue
+            content = str(msg.get("content", "") or "")
+            parsed = parse_assistant_output(content)
+            if parsed.malformed:
+                continue
+            visible = parsed.visible_body.strip()
+            if not visible:
+                continue
+            sq = sanitize_suggested_questions(
+                msg.get("suggested_questions"),
+                visible,
+            )
+            if sq:
+                return True
+        return False
+
+    def _last_turn_has_completed_reply(self, session_id: str) -> bool:
+        """True when the persisted messages show the last user turn already
+        produced a visible assistant reply (reasoning stripped), suggested_questions,
+        or a closed ``</followups>`` terminal marker.
+
+        Used at startup so a session left at ``running`` in metadata (e.g. the
+        client SSE was aborted on a pane switch and the off-loop finalize persist
+        never flushed ``idle``) is NOT mislabeled ``interrupted`` when its answer
+        was in fact written to disk — that mismatch shows a completed reply under
+        a stale "已中断" badge that only a restart used to surface.
+        """
+        try:
+            messages = self._messages_for_execution_state_check(session_id)
+        except Exception:
+            return False
+        return _messages_last_turn_has_completed_reply(messages)
+
+    def scan_interrupted_sessions(self) -> list[str]:
+        """Scan persisted sessions for those left in 'running' state.
+
+        Called at startup to detect sessions that were interrupted by a crash.
+        Marks them as 'interrupted' and returns their session IDs. Sessions whose
+        last turn already has a completed assistant reply on disk are normalized
+        to 'idle' instead — they finished, only the state flag lagged.
+        """
+        interrupted: list[str] = []
+        for row in self._iter_running_session_rows_for_scan():
+            sid = str(row.get("session_id", "")).strip()
+            meta = row.get("metadata")
+            if not isinstance(meta, dict):
+                continue
+            completed = self._last_turn_has_completed_reply(sid)
+            next_state = "idle" if completed else "interrupted"
+            if not completed:
+                interrupted.append(sid)
+            try:
+                self._session_store._save_session_summary_sync(
+                    sid,
+                    str(row.get("summary", "")),
+                    {**meta, "execution_state": next_state},
+                )
+            except Exception:
+                pass
+        if interrupted:
+            _log.info("Found %d interrupted sessions on startup: %s", len(interrupted), interrupted[:5])
+        return interrupted
+
+    def _iter_running_session_rows_for_scan(self) -> list[dict]:
+        try:
+            rows = self._session_store._list_latest_sessions_sync(limit=0)
+        except Exception:
+            return []
+        out: list[dict] = []
+        for row in rows:
+            if not str(row.get("session_id", "")).strip():
+                continue
+            meta = row.get("metadata")
+            if not isinstance(meta, dict):
+                continue
+            # Environment assistant recovery is owned by its panel.  It must
+            # never surface as an ordinary startup recovery candidate.
+            if normalize_session_purpose(meta.get("purpose")):
+                continue
+            if str(meta.get("execution_state", "idle")).strip() == "running":
+                out.append(row)
+        return out
+
+    def incremental_persist(self, session_id: str) -> bool:
+        """Lightweight mid-turn persist: only flush messages + agent_messages.
+
+        Skips SQLite summary / FTS / context-refs to minimize I/O overhead
+        during active tool loops.  Called by AgentRuntime between tool calls
+        to guard against crash data loss.
+        """
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        session = managed.studio_session
+        critical_ok = self._persist_core_snapshots(session_id, session)
+        # Keep the server-owned fence durable even while a long tool turn is
+        # still running.  This sidecar is private session state and never
+        # enters the model-visible scratchpad or message snapshots.
+        self._persist_enterprise_context_marker(session_id, session)
+        return critical_ok
+
+    @staticmethod
+    def _close_mcp_hub_sync(managed: ManagedSession) -> None:
+        """No-op: MCP children are now process-level resources owned by GlobalMcpManager.
+        They are closed once at server shutdown via GlobalMcpManager.close_all()."""
+
+    def delete(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        self._interrupt_requests.discard(sid)
+        existed_in_persistence = self._session_exists_in_persistence(sid)
+        managed = self._sessions.pop(sid, None)
+        if managed is not None:
+            if managed.event_hub is not None:
+                managed.event_hub.close()
+                managed.event_hub = None
+            if managed.team_manager is not None:
+                managed.team_manager.shutdown_now()
+            # MCP hub is global; do NOT kill child processes on session delete.
+        purged = self._purge_session_state(sid)
+        if managed is not None and not existed_in_persistence:
+            return True
+        return purged and existed_in_persistence
+
+    def list_sessions(
+        self,
+        avatar_id: str | None = None,
+        *,
+        purpose: str | None = None,
+        purpose_scope: str | None = None,
+    ) -> list[dict]:
+        """List sessions while keeping dedicated-purpose sessions isolated.
+
+        The default (ordinary) listing intentionally excludes every recognized
+        dedicated purpose.  Callers that own a dedicated surface must opt in
+        with its purpose and, where applicable, its opaque scope.
+        """
+        requested_purpose = normalize_session_purpose(purpose) or None
+        requested_scope = normalize_session_purpose_scope(purpose_scope) or None
+        result = []
+        seen_session_ids: set[str] = set()
+        for sid, managed in self._sessions.items():
+            if getattr(managed, "archived", False):
+                continue
+            if avatar_id and getattr(managed, "avatar_id", None) != avatar_id:
+                continue
+            managed_purpose = normalize_session_purpose(
+                getattr(managed, "purpose", None)
+            )
+            if requested_purpose:
+                if not session_has_purpose(managed, requested_purpose, requested_scope):
+                    continue
+            elif managed_purpose:
+                continue
+            hist = getattr(managed.studio_session, "chat_history", None) or []
+            # Lazy-create UX: hide ordinary memory-only shells until the user
+            # sends a message.  An explicitly requested dedicated listing may
+            # need to inspect its persisted empty shell.
+            if not requested_purpose and not self._session_has_listable_chat_history(hist):
+                continue
+            seen_session_ids.add(sid)
+            result.append({
+                "session_id": sid,
+                "avatar_id": getattr(managed, "avatar_id", None),
+                "avatar_name": getattr(managed, "avatar_name", None),
+                "session_name": getattr(managed, "session_name", None),
+                "updated_at": managed.updated_at,
+                "created_at": getattr(managed, "created_at", managed.updated_at),
+                "pinned": bool(getattr(managed, "pinned", False)),
+                "archived": bool(getattr(managed, "archived", False)),
+                "execution_state": self._normalize_execution_state_for_listing(
+                    sid, getattr(managed, "execution_state", "idle")
+                ),
+                "provider": str(getattr(managed.studio_session, "provider_name", "") or ""),
+                "model": str(getattr(managed.studio_session, "model_name", "") or ""),
+                "purpose": managed_purpose or None,
+                "purpose_scope": normalize_session_purpose_scope(
+                    getattr(managed, "purpose_scope", None)
+                )
+                or None,
+                "session_mode": normalize_session_mode(
+                    getattr(managed.studio_session, "session_mode", None)
+                ),
+                "permission_mode": normalize_permission_mode(
+                    getattr(managed.studio_session, "permission_mode", None),
+                    fallback=global_permission_mode(),
+                ),
+                "attachment_routing_lock": self._attachment_routing_lock_snapshot(
+                    managed.studio_session
+                ),
+                **self._active_taskspace_listing_fields(
+                    getattr(managed.studio_session, "active_taskspace_id", None),
+                    getattr(managed, "taskspaces", None),
+                ),
+                **_harness_list_fields(managed.studio_session),
+            })
+        for row in self._list_persisted_sessions(
+            avatar_id=avatar_id,
+            purpose=requested_purpose,
+            purpose_scope=requested_scope,
+        ):
+            sid = str(row.get("session_id", "")).strip()
+            if not sid or sid in seen_session_ids:
+                continue
+            if row.get("archived"):
+                continue
+            if avatar_id and row.get("avatar_id") != avatar_id:
+                continue
+            row["execution_state"] = self._normalize_execution_state_for_listing(
+                sid, row.get("execution_state", "idle")
+            )
+            result.append(row)
+            seen_session_ids.add(sid)
+        if result:
+            session_ids = [
+                str(row.get("session_id", "")).strip()
+                for row in result
+                if str(row.get("session_id", "")).strip()
+            ]
+            indexed_message_ts = self._session_store._max_message_timestamps_sync(session_ids)
+            summary_activity_ts = self._session_store._recover_activity_from_summaries_bulk_sync(
+                session_ids
+            )
+            for row in result:
+                sid = str(row.get("session_id", "")).strip()
+                managed = self._sessions.get(sid)
+                chat_history = (
+                    getattr(managed.studio_session, "chat_history", None) if managed else None
+                )
+                row_indexed_ts = float(indexed_message_ts.get(sid, 0) or 0)
+                row_summary_ts = float(summary_activity_ts.get(sid, 0) or 0)
+                disk_message_ts = 0.0
+                # Only fall back to a per-file messages.json read when neither the
+                # batched FTS index nor the summary store supplied an activity
+                # timestamp. When indexed_message_ts is present it equals the same
+                # max message timestamp a disk read would derive, so this preserves
+                # `_resolve_list_activity_at`'s result while removing the dominant
+                # O(n) cold-start disk I/O (see FR-2 profile).
+                if managed is None and row_indexed_ts <= 0 and row_summary_ts <= 0:
+                    disk_message_ts = self._last_message_activity_from_disk(sid)
+                row["updated_at"] = self._resolve_list_activity_at(
+                    chat_history=chat_history,
+                    metadata_updated_at=float(row.get("updated_at") or 0),
+                    metadata_created_at=float(row.get("created_at") or 0),
+                    indexed_message_ts=row_indexed_ts,
+                    metadata_last_activity_at=float(row.get("last_activity_at") or 0),
+                    disk_message_ts=disk_message_ts,
+                    summary_activity_ts=row_summary_ts,
+                    live_touch_at=float(managed.updated_at) if managed is not None else 0.0,
+                )
+        result.sort(
+            key=lambda row: (
+                1 if row.get("pinned") else 0,
+                float(row.get("updated_at", 0)),
+            ),
+            reverse=True,
+        )
+        return result
+
+    def find_purpose_session_id(
+        self,
+        purpose: str,
+        *,
+        purpose_scope: str | None = None,
+    ) -> str | None:
+        """Find the newest non-archived session for a dedicated purpose.
+
+        This lookup deliberately does not require chat history.  The Desktop
+        panel creates and persists an empty shell before its first turn so a
+        restart can reuse the same session without creating another shell.
+        """
+
+        wanted = normalize_session_purpose(purpose)
+        scope = normalize_session_purpose_scope(purpose_scope)
+        if not wanted:
+            return None
+
+        candidates: dict[str, float] = {}
+
+        def consider(session_id: Any, metadata: Any, fallback_at: Any = 0.0) -> None:
+            sid = str(session_id or "").strip()
+            if not sid or not isinstance(metadata, dict):
+                return
+            if bool(metadata.get("archived", False)):
+                return
+            if not session_has_purpose(metadata, wanted, scope):
+                return
+            updated = self._to_float(metadata.get("updated_at"), 0.0)
+            created = self._to_float(metadata.get("created_at"), 0.0)
+            try:
+                fallback = float(fallback_at or 0.0)
+            except (TypeError, ValueError):
+                fallback = 0.0
+            candidates[sid] = max(updated, created, fallback)
+
+        for sid, managed in self._sessions.items():
+            consider(
+                sid,
+                {
+                    "purpose": getattr(managed, "purpose", None),
+                    "purpose_scope": getattr(managed, "purpose_scope", None),
+                    "archived": getattr(managed, "archived", False),
+                    "updated_at": getattr(managed, "updated_at", 0.0),
+                    "created_at": getattr(managed, "created_at", 0.0),
+                },
+            )
+
+        try:
+            latest = self._session_store._list_latest_sessions_sync(limit=0)
+        except Exception:
+            latest = []
+        for item in latest:
+            if not isinstance(item, dict):
+                continue
+            consider(
+                item.get("session_id"),
+                item.get("metadata", {}),
+                self._iso_to_epoch(item.get("created_at")),
+            )
+
+        # Older or manually copied stores may have a session directory without
+        # an indexed summary.  Read only metadata for this explicit lookup.
+        root = Path(self._sessions_root)
+        if root.exists():
+            try:
+                children = list(root.iterdir())
+            except OSError:
+                children = []
+            for child in children:
+                if not child.is_dir():
+                    continue
+                try:
+                    metadata = self._session_store._load_latest_session_metadata_sync(
+                        child.name
+                    )
+                except Exception:
+                    metadata = {}
+                try:
+                    fallback_at = child.stat().st_mtime
+                except OSError:
+                    fallback_at = 0.0
+                consider(child.name, metadata, fallback_at)
+
+        if not candidates:
+            return None
+        return max(candidates, key=lambda sid: (candidates[sid], sid))
+
+    @staticmethod
+    def _snippet_around_query(content: str, query: str, max_len: int = 140) -> str:
+        c = str(content or "")
+        q = (query or "").strip()
+        if not c:
+            return ""
+        if not q:
+            return (c[:max_len] + "…") if len(c) > max_len else c
+        try:
+            lower_c = c.casefold()
+            lower_q = q.casefold()
+        except Exception:
+            lower_c = c.lower()
+            lower_q = q.lower()
+        idx = lower_c.find(lower_q)
+        if idx < 0:
+            return (c[:max_len] + "…") if len(c) > max_len else c
+        start = max(0, idx - 36)
+        end = min(len(c), idx + max_len)
+        frag = c[start:end]
+        if start > 0:
+            frag = "…" + frag
+        if end < len(c):
+            frag = frag + "…"
+        return frag
+
+    def search_sessions_by_message_text(
+        self,
+        query: str,
+        *,
+        avatar_id: Optional[str] = None,
+        limit_sessions: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Return session_id + snippet for sessions whose messages match query (FTS, then LIKE)."""
+        q = str(query or "").strip()
+        if not q:
+            return []
+        rows = self.list_sessions(avatar_id=avatar_id)
+        allowed = frozenset(
+            str(r["session_id"]).strip()
+            for r in rows
+            if r.get("session_id") and str(r["session_id"]).strip()
+        )
+        if not allowed:
+            return []
+        lim = max(1, min(int(limit_sessions), 100))
+        store = self._session_store
+        by_sid: dict[str, str] = {}
+
+        if session_fts_enabled():
+            try:
+                fts_hits = store._search_session_messages_sync(q, None, limit=400)
+            except Exception:
+                fts_hits = []
+            for hit in fts_hits:
+                sid = str(hit.get("session_id") or "").strip()
+                if sid not in allowed or sid in by_sid:
+                    continue
+                snip = str(hit.get("snippet") or "").strip()
+                if not snip:
+                    prev = str(hit.get("content_preview") or "")
+                    snip = (prev[:120] + "…") if len(prev) > 120 else prev
+                by_sid[sid] = snip or "…"
+                if len(by_sid) >= lim:
+                    return [{"session_id": k, "snippet": v} for k, v in by_sid.items()]
+
+        if len(by_sid) < lim:
+            try:
+                like_hits = store._search_session_messages_like_sync(q, allowed, limit=400)
+            except Exception:
+                like_hits = []
+            for hit in like_hits:
+                sid = str(hit.get("session_id") or "").strip()
+                if sid not in allowed or sid in by_sid:
+                    continue
+                body = str(hit.get("content") or "")
+                by_sid[sid] = self._snippet_around_query(body, q)
+                if len(by_sid) >= lim:
+                    break
+
+        return [{"session_id": k, "snippet": v} for k, v in by_sid.items()]
+
+    def rename_session(self, session_id: str, name: str) -> bool:
+        """Rename an existing session. Returns True if found and renamed."""
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        managed.session_name = name
+        managed.updated_at = time.time()
+        self._persist_session_state(session_id, managed.studio_session)
+        return True
+
+    def set_session_model(
+        self,
+        session_id: str,
+        *,
+        provider: Optional[str],
+        model: Optional[str],
+    ) -> bool:
+        """Update the session's active LLM provider/model and persist to disk.
+
+        Triggered by the desktop model-picker so a session's last-used model
+        survives app restarts (the UI re-applies it via list_sessions()).
+        Returns True if the session exists (either in memory or persistence).
+        """
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        managed = self.get(sid)
+        if managed is None:
+            return False
+        prov_clean = str(provider or "").strip()
+        model_clean = str(model or "").strip()
+        # A declared context window belongs to the model it arrived with. Drop it
+        # on a model switch so the new model cannot inherit the old one's window;
+        # the next /api/chat re-supplies it from the enterprise admin catalog.
+        if model_clean != str(managed.studio_session.model_name or "").strip():
+            managed.studio_session.declared_context_window = None
+        managed.studio_session.provider_name = prov_clean
+        managed.studio_session.model_name = model_clean
+        managed.updated_at = time.time()
+        self._persist_session_state(sid, managed.studio_session)
+        return True
+
+    def set_session_permission_mode(self, session_id: str, mode: str) -> bool:
+        """Set and persist the permission mode owned by one session."""
+
+        sid = str(session_id or "").strip()
+        normalized = normalize_permission_mode(mode, fallback="")
+        if not sid or not normalized:
+            return False
+        managed = self.get(sid)
+        if managed is None:
+            return False
+        previous_mode = getattr(managed.studio_session, "permission_mode", None)
+        previous_updated_at = managed.updated_at
+        managed.studio_session.permission_mode = normalized
+        managed.updated_at = time.time()
+        try:
+            persisted = self._persist_session_state(
+                sid,
+                managed.studio_session,
+                require_summary=True,
+            )
+        except Exception:
+            _log.exception(
+                "session permission persist failed session=%s",
+                sid,
+            )
+            persisted = False
+        if not persisted:
+            # Do not let a failed disk write turn the in-memory session into a
+            # value the permissions endpoint reports as successfully saved.
+            managed.studio_session.permission_mode = previous_mode
+            managed.updated_at = previous_updated_at
+            return False
+        return True
+
+    @staticmethod
+    def session_title_needs_auto_fill(name: Optional[str]) -> bool:
+        """True if missing or a generic IM/new-chat placeholder."""
+        raw = str(name or "").strip()
+        if not raw:
+            return True
+        key = raw.casefold()
+        if key in _PLACEHOLDER_SESSION_TITLE_CF:
+            return True
+        if key.startswith("新会话") or key.startswith("新对话"):
+            return True
+        if key.startswith("new session") or key.startswith("new chat"):
+            return True
+        return False
+
+    def auto_title_session(self, session_id: str, first_user_message: str) -> bool:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        if not self.session_title_needs_auto_fill(managed.session_name):
+            return False
+        title = self._build_auto_title(first_user_message)
+        if not title:
+            return False
+        managed.session_name = title
+        managed.updated_at = time.time()
+        self._persist_session_state(session_id, managed.studio_session)
+        return True
+
+    @staticmethod
+    def _text_from_chat_history_item(item: Any) -> str:
+        if not isinstance(item, dict):
+            return ""
+        raw = item.get("content")
+        if isinstance(raw, str):
+            return raw.strip()
+        if isinstance(raw, list):
+            parts: list[str] = []
+            for block in raw:
+                if isinstance(block, dict) and str(block.get("type") or "") == "text":
+                    parts.append(str(block.get("text") or ""))
+            return "".join(parts).strip()
+        return ""
+
+    def session_has_user_and_assistant_for_llm_title(self, session: StudioSession) -> bool:
+        hist = getattr(session, "chat_history", None) or []
+        has_user = False
+        has_asst = False
+        for item in hist:
+            role = str(item.get("role") or "")
+            text = self._text_from_chat_history_item(item)
+            if not text:
+                continue
+            if role == "user":
+                has_user = True
+            elif role == "assistant":
+                has_asst = True
+        return has_user and has_asst
+
+    def claim_llm_title_slot(self, session_id: str, snapshot_session_name: str) -> bool:
+        """Reserve one-shot LLM title upgrade; returns True if background job should run."""
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        managed = self._sessions.get(sid)
+        if managed is None:
+            return False
+        session = managed.studio_session
+        sp = session.scratchpad
+        if not isinstance(sp, dict):
+            session.scratchpad = {}
+            sp = session.scratchpad
+        if sp.get(LLM_TITLE_SCRATCH_KEY):
+            return False
+        if not self.session_has_user_and_assistant_for_llm_title(session):
+            return False
+        cur = str(managed.session_name or "").strip()
+        snap = str(snapshot_session_name or "").strip()
+        if snap and cur != snap:
+            return False
+        sp[LLM_TITLE_SCRATCH_KEY] = True
+        self._persist_session_state(sid, session)
+        return True
+
+    @staticmethod
+    def _sanitize_llm_session_title(raw: Any) -> str | None:
+        s = str(raw or "").strip()
+        if not s:
+            return None
+        s = s.splitlines()[0].strip()
+        for ch in ('"', "'", "「", "」", "『", "』", "《", "》"):
+            s = s.replace(ch, "")
+        s = s.strip(" \t.:：。；;，,")
+        if len(s) > 40:
+            s = s[:40].rstrip()
+        return s or None
+
+    def apply_llm_suggested_session_title(self, session_id: str, raw_title: str | None) -> None:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        cleaned = self._sanitize_llm_session_title(raw_title)
+        if cleaned:
+            self.rename_session(sid, cleaned)
+        else:
+            self.persist(sid)
+
+    def pin_session(self, session_id: str, pinned: bool) -> bool:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return False
+        managed.pinned = bool(pinned)
+        managed.updated_at = time.time()
+        self._persist_session_state(session_id, managed.studio_session)
+        return True
+
+    def fork_session(self, session_id: str) -> Optional[ManagedSession]:
+        source = self._sessions.get(session_id)
+        if source is None:
+            return None
+        forked = self.create(
+            provider=source.studio_session.provider_name,
+            model=source.studio_session.model_name,
+            permission_mode=normalize_permission_mode(
+                getattr(source.studio_session, "permission_mode", None),
+                fallback=global_permission_mode(),
+            ),
+            purpose=getattr(source, "purpose", None),
+            purpose_scope=getattr(source, "purpose_scope", None),
+        )
+        forked.avatar_id = source.avatar_id
+        forked.avatar_name = source.avatar_name
+        forked.session_name = self._build_fork_name(source.session_name)
+        forked.studio_session.workspace_dir = source.studio_session.workspace_dir
+        forked.studio_session.chat_history = deepcopy(source.studio_session.chat_history or [])
+        forked.studio_session.agent_messages = deepcopy(getattr(source.studio_session, "agent_messages", []) or [])
+        forked.studio_session.context_files = deepcopy(source.studio_session.context_files or {})
+        forked.studio_session.scratchpad = deepcopy(source.studio_session.scratchpad or {})
+        # A fork is a new conversation. Keep user-visible working notes, but do
+        # not inherit the source conversation's cumulative token allowance.
+        forked.studio_session.scratchpad.pop(TOKEN_BUDGET_SCRATCHPAD_KEY, None)
+        forked.studio_session.artifacts = deepcopy(source.studio_session.artifacts or {})
+        copy_enterprise_context_marker(
+            source.studio_session,
+            forked.studio_session,
+        )
+        forked.updated_at = time.time()
+        self._persist_session_state(forked.session_id, forked.studio_session)
+        return forked
+
+    def archive_sessions_before(self, session_id: str, avatar_id: str | None = None) -> int:
+        target = self._sessions.get(session_id)
+        if target is None:
+            return -1
+        target_avatar = avatar_id if avatar_id is not None else target.avatar_id
+        target_updated_at = float(target.updated_at)
+        archived_count = 0
+        for sid, managed in self._sessions.items():
+            if sid == session_id:
+                continue
+            # Dedicated surfaces have their own retention and recovery
+            # lifecycle.  Ordinary history actions must not archive them as a
+            # side effect of an avatar/session cleanup.
+            if normalize_session_purpose(getattr(managed, "purpose", None)):
+                continue
+            if managed.archived:
+                continue
+            if managed.avatar_id != target_avatar:
+                continue
+            if float(managed.updated_at) < target_updated_at:
+                managed.archived = True
+                managed.updated_at = time.time()
+                self._persist_session_state(sid, managed.studio_session)
+                archived_count += 1
+        return archived_count
+
+    def get_messages(self, session_id: str) -> list[dict]:
+        """Return normalized chat messages for session."""
+        raw = self._get_raw_messages_list(session_id)
+        return self._normalize_messages(raw)
+
+    def _get_raw_messages_list(self, session_id: str) -> list[dict]:
+        """Return raw chat_history rows before normalization."""
+        managed = self._sessions.get(session_id)
+        if managed is not None:
+            raw = getattr(managed.studio_session, "chat_history", []) or []
+        else:
+            raw = self._load_messages_snapshot(session_id)
+        return [item for item in raw if isinstance(item, dict)]
+
+    @staticmethod
+    def _tail_start_index_for_rounds(raw: list[dict], tail_rounds: int) -> int:
+        """Index of the earliest message included in the last *tail_rounds* user turns."""
+        if not raw:
+            return 0
+        n = max(1, int(tail_rounds))
+        user_seen = 0
+        for idx in range(len(raw) - 1, -1, -1):
+            role = str(raw[idx].get("role", "assistant"))
+            if role != "user":
+                continue
+            user_seen += 1
+            if user_seen >= n:
+                return idx
+        return 0
+
+    @staticmethod
+    def _last_user_index(raw: list[dict]) -> int:
+        last = -1
+        for idx, item in enumerate(raw):
+            if str(item.get("role", "")).strip() == "user":
+                last = idx
+        return last
+
+    @staticmethod
+    def _apply_tail_message_limit(
+        window: list[dict],
+        abs_start: int,
+        total_count: int,
+        tail_limit: int | None,
+        *,
+        full_raw: list[dict] | None = None,
+        round_anchor_abs: int | None = None,
+        last_user_abs_index: int = -1,
+    ) -> tuple[list[dict], int]:
+        if not tail_limit or len(window) <= tail_limit:
+            out_start = abs_start
+            out_window = window
+        else:
+            trimmed = window[-max(1, int(tail_limit)) :]
+            out_start = max(0, total_count - len(trimmed))
+            out_window = trimmed
+
+        # tail_limit must not drop the last user turn (or tail_rounds anchor) —
+        # otherwise desktop stall detection reads "no completed reply" on an
+        # idle session and loops futile resume cards after session switch.
+        anchor = out_start
+        if round_anchor_abs is not None:
+            anchor = min(anchor, max(0, int(round_anchor_abs)))
+        if last_user_abs_index >= 0:
+            anchor = min(anchor, last_user_abs_index)
+        if anchor < out_start and full_raw is not None:
+            out_start = anchor
+            out_window = full_raw[out_start:]
+        return out_window, out_start
+
+    def get_messages_page(
+        self,
+        session_id: str,
+        *,
+        tail_rounds: int | None = None,
+        before_index: int | None = None,
+        limit: int = 20,
+        tail_limit: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a normalized message window with pagination metadata."""
+        if tail_rounds is not None:
+            meta = self._load_messages_tail_snapshot(session_id)
+            if meta is not None:
+                raw_full = self._get_raw_messages_list(session_id)
+                last_user = self._last_user_index(raw_full)
+                raw_tail = meta["messages"]
+                total_count = int(meta["total_count"])
+                base_index = int(meta["start_index"])
+                rel_start = self._tail_start_index_for_rounds(raw_tail, tail_rounds)
+                window = raw_tail[rel_start:]
+                abs_start = base_index + rel_start
+                window, abs_start = self._apply_tail_message_limit(
+                    window,
+                    abs_start,
+                    total_count,
+                    tail_limit,
+                    full_raw=raw_full,
+                    round_anchor_abs=abs_start,
+                    last_user_abs_index=last_user,
+                )
+                return {
+                    "messages": self._normalize_messages(window),
+                    "start_index": abs_start,
+                    "total_count": total_count,
+                    "has_older": abs_start > 0,
+                }
+
+        raw = self._get_raw_messages_list(session_id)
+        total_count = len(raw)
+        last_user = self._last_user_index(raw)
+
+        if tail_rounds is not None:
+            start_index = self._tail_start_index_for_rounds(raw, tail_rounds)
+            window = raw[start_index:]
+            window, start_index = self._apply_tail_message_limit(
+                window,
+                start_index,
+                total_count,
+                tail_limit,
+                full_raw=raw,
+                round_anchor_abs=start_index,
+                last_user_abs_index=last_user,
+            )
+            self._ensure_messages_tail_snapshot(session_id, raw)
+        elif before_index is not None:
+            end_index = max(0, min(int(before_index), total_count))
+            page_limit = max(1, min(int(limit), 100))
+            start_index = max(0, end_index - page_limit)
+            window = raw[start_index:end_index]
+            self._diagnose_page_source(
+                session_id,
+                requested_before_index=int(before_index),
+                in_memory=self._sessions.get(session_id) is not None,
+                raw=raw,
+                window=window,
+                window_start=start_index,
+            )
+        else:
+            start_index = 0
+            window = raw
+
+        return {
+            "messages": self._normalize_messages(window),
+            "start_index": start_index,
+            "total_count": total_count,
+            "has_older": start_index > 0,
+        }
+
+    def _diagnose_page_source(
+        self,
+        session_id: str,
+        *,
+        requested_before_index: int,
+        in_memory: bool,
+        raw: list[dict],
+        window: list[dict],
+        window_start: int,
+    ) -> None:
+        """One-shot diagnostic: detect cross-session contamination on scroll-up.
+
+        Compares the served before_index window against the on-disk messages.json
+        for the SAME session. Any window row whose (role, content-prefix) does not
+        appear on disk is a candidate "leaked" row (in-memory source diverged from
+        the persisted file). Logs role/content fingerprints so we can confirm
+        whether the leak originates from in-memory chat_history or the snapshot.
+
+        Diagnostic only -- no behavior change. Remove once root cause is confirmed.
+        """
+        try:
+            disk_rows = self._load_messages_snapshot(session_id)
+            disk_keys: dict[str, int] = {}
+            for item in disk_rows:
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role", "")).strip()
+                content = str(item.get("content", "")).strip()[:160]
+                key = f"{role}::{content}"
+                disk_keys[key] = disk_keys.get(key, 0) + 1
+
+            leaked: list[dict[str, Any]] = []
+            for offset, item in enumerate(window):
+                if not isinstance(item, dict):
+                    continue
+                role = str(item.get("role", "")).strip()
+                content = str(item.get("content", "")).strip()[:160]
+                key = f"{role}::{content}"
+                if disk_keys.get(key, 0) > 0:
+                    disk_keys[key] -= 1
+                    continue
+                leaked.append(
+                    {
+                        "abs_index": window_start + offset,
+                        "role": role,
+                        "content_prefix": content[:80],
+                    }
+                )
+
+            _log.warning(
+                "[page-diag] session=%s before_index=%d in_memory=%s "
+                "raw_len=%d disk_len=%d window_len=%d leaked_rows=%d",
+                session_id,
+                requested_before_index,
+                in_memory,
+                len(raw),
+                len(disk_rows),
+                len(window),
+                len(leaked),
+            )
+            if leaked:
+                _log.warning(
+                    "[page-diag] session=%s LEAK candidates (in-memory has rows "
+                    "absent from messages.json): %s",
+                    session_id,
+                    leaked[:8],
+                )
+        except Exception as exc:  # pragma: no cover - diagnostic must never break paging
+            _log.warning("[page-diag] session=%s diagnostic failed: %s", session_id, exc)
+
+    def _ensure_messages_tail_snapshot(self, session_id: str, raw: list[dict]) -> None:
+        if not raw:
+            return
+        if os.path.exists(self._messages_tail_path(session_id)):
+            return
+        self._save_messages_tail_snapshot(session_id, raw)
+
+    def list_taskspaces(self, session_id: str) -> list[dict[str, str]]:
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return []
+        self._ensure_default_taskspace(managed)
+        rows: list[dict[str, str]] = []
+        for item in managed.taskspaces:
+            row = dict(item)
+            if "mount_mode" not in row:
+                row["mount_mode"] = "link"
+            rows.append(row)
+        return rows
+
+    def list_taskspace_catalog(self) -> list[dict[str, Any]]:
+        """Return folders previously registered on this machine.
+
+        The catalog is a picker history, not an authorization or attachment
+        list.  ``available`` is calculated on every read so unplugged/moved
+        folders remain visible without being recreated on disk.
+        """
+        rows = self._load_taskspace_catalog_rows()
+        rows = sorted(
+            rows,
+            key=lambda row: (
+                -float(row.get("last_used_at") or 0.0),
+                str(row.get("label", "")).casefold(),
+                str(row.get("path", "")),
+            ),
+        )
+        return [
+            {
+                **row,
+                "available": Path(str(row.get("path", ""))).is_dir(),
+            }
+            for row in rows
+        ]
+
+    def list_available_taskspaces(self, session_id: str) -> list[dict[str, Any]]:
+        """Return catalog entries not currently attached to ``session_id``."""
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return []
+        attached_paths = {
+            self._taskspace_path_key(str(item.get("path", "")))
+            for item in self.list_taskspaces(session_id)
+            if str(item.get("path", "")).strip()
+        }
+        return [
+            row
+            for row in self.list_taskspace_catalog()
+            if self._taskspace_path_key(str(row.get("path", ""))) not in attached_paths
+        ]
+
+    def register_taskspace(
+        self,
+        path: str,
+        *,
+        label: str | None = None,
+    ) -> dict[str, Any]:
+        """Upsert a folder in the local picker catalog without mounting it.
+
+        This is intentionally side-effect free with respect to the filesystem:
+        a stale catalog row is retained and reported with ``available=False``;
+        callers that actually want to use it still need ``add_taskspace``.
+        """
+        resolved_path = self._canonical_taskspace_path(path)
+        if not resolved_path:
+            raise ValueError("path is required")
+        candidate = Path(resolved_path)
+        if not candidate.is_dir():
+            raise ValueError("workspace path must be an existing directory")
+        rows = self._load_taskspace_catalog_rows()
+        path_key = self._taskspace_path_key(resolved_path)
+        clean_label = (label or "").strip() or Path(resolved_path).name or "taskspace"
+        now = time.time()
+        for row in rows:
+            if self._taskspace_path_key(str(row.get("path", ""))) != path_key:
+                continue
+            row["path"] = resolved_path
+            row["label"] = clean_label
+            row["last_used_at"] = now
+            self._save_taskspace_catalog_rows(rows)
+            return {
+                **row,
+                "available": Path(resolved_path).is_dir(),
+            }
+        row: dict[str, Any] = {
+            "id": f"workspace-{uuid.uuid4().hex[:12]}",
+            "label": clean_label,
+            "path": resolved_path,
+            "last_used_at": now,
+        }
+        rows.append(row)
+        self._save_taskspace_catalog_rows(rows)
+        return {
+            **row,
+            "available": Path(resolved_path).is_dir(),
+        }
+
+    def add_taskspace(
+        self,
+        session_id: str,
+        *,
+        path: str | None = None,
+        label: str | None = None,
+    ) -> dict[str, str]:
+        """Attach a folder path to this session's visible workspace only.
+
+        Paths are references (not copies). Visibility is per-session: adding or
+        removing here must not mutate sibling conversations for the same avatar.
+        """
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError("session not found")
+        self._ensure_default_taskspace(managed)
+        default_taskspace = self._get_taskspace(managed, "default")
+        if default_taskspace is None:
+            raise RuntimeError("default taskspace missing")
+        # An explicitly selected path is a reference to a user-owned folder;
+        # never create a typo/missing path as a side effect of attaching it.
+        # The implicit ``path=None`` form is intentionally different: it
+        # returns the session's internal default workspace, whose creation is
+        # still handled by ``_ensure_default_taskspace`` above.
+        should_register = bool(path and str(path).strip())
+        if should_register:
+            resolved_path = self._canonical_taskspace_path(path)
+            if not resolved_path or not Path(resolved_path).is_dir():
+                raise ValueError("workspace path must be an existing directory")
+        else:
+            resolved_path = str(Path(default_taskspace["path"]).resolve(strict=False))
+        resolved_key = self._taskspace_path_key(resolved_path)
+        for item in managed.taskspaces:
+            if self._taskspace_path_key(str(item.get("path", ""))) == resolved_key:
+                if should_register and str(item.get("id", "")).strip() != "default":
+                    self.register_taskspace(resolved_path, label=label or item.get("label"))
+                return dict(item)
+        limit = self._taskspace_limit()
+        non_default_count = sum(1 for item in managed.taskspaces if item.get("id") != "default")
+        if non_default_count >= max(0, limit - 1):
+            raise ValueError(f"taskspace limit reached ({limit})")
+        clean_label = (label or "").strip() or Path(resolved_path).name or "taskspace"
+        taskspace = {
+            "id": f"ts-{uuid.uuid4().hex[:8]}",
+            "label": clean_label,
+            "path": resolved_path,
+        }
+        # Keep the picker history durable while preserving per-session
+        # attachment isolation.  A later conversation sees this in
+        # ``available_workspaces`` but is not auto-mounted.
+        if should_register:
+            self.register_taskspace(resolved_path, label=clean_label)
+        managed.taskspaces = list(managed.taskspaces) + [taskspace]
+        # Do not bump updated_at: workspace mutations are not chat activity.
+        self._persist_session_state(session_id, managed.studio_session)
+        return dict(taskspace)
+
+    def remove_taskspace(self, session_id: str, taskspace_id: str) -> bool:
+        """Detach a folder from this session's visible workspace only."""
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            return False
+        tid = str(taskspace_id).strip()
+        if tid == "default":
+            return False
+        before = len(managed.taskspaces)
+        managed.taskspaces = [item for item in managed.taskspaces if item.get("id") != tid]
+        if len(managed.taskspaces) == before:
+            return False
+        self._persist_session_state(session_id, managed.studio_session)
+        return True
+
+    def list_taskspace_files(
+        self,
+        session_id: str,
+        taskspace_id: str,
+        rel_path: str = ".",
+        *,
+        max_entries: int = 2000,
+    ) -> dict[str, Any]:
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError("session not found")
+        self._ensure_default_taskspace(managed)
+        taskspace = self._get_taskspace(managed, taskspace_id)
+        if taskspace is None:
+            raise KeyError("taskspace not found")
+        root = Path(taskspace["path"]).expanduser().resolve(strict=False)
+        base_parts = self._normalize_rel_parts(rel_path)
+        is_root_listing = not base_parts
+        mounts_by_name = self._load_workspace_mounts(root)
+        # Reference mount directory: list the external source instead of the
+        # (non-existent) path under the session default workspace.
+        target: Path
+        if base_parts:
+            top = base_parts[0]
+            mount = mounts_by_name.get(top)
+            if mount and str(mount.get("mode") or "") == "reference":
+                source_path = str(mount.get("source_path") or "").strip()
+                if not source_path:
+                    raise FileNotFoundError(f"reference mount missing source: {top}")
+                source_root = Path(source_path).expanduser()
+                nested = Path(*base_parts[1:]) if len(base_parts) > 1 else Path()
+                target = source_root / nested if str(nested) not in {"", "."} else source_root
+                if not target.exists():
+                    raise FileNotFoundError(str(target))
+                if not target.is_dir():
+                    raise NotADirectoryError(str(target))
+            else:
+                target = self._resolve_inside_root(root, rel_path, expect_dir=True)
+        else:
+            target = self._resolve_inside_root(root, rel_path, expect_dir=True)
+        rows: list[dict[str, Any]] = []
+        total_seen = 0
+        truncated = False
+        # Collect directory entries without following symlinks for type checks.
+        try:
+            entries = sorted(
+                target.iterdir(),
+                key=lambda p: (0 if p.is_dir() else 1, p.name.lower()),
+            )
+        except OSError:
+            entries = []
+        seen_names: set[str] = set()
+        for entry in entries:
+            if entry.name in {".agx-mounts.json", ".agx-copy-manifest.json"}:
+                continue
+            total_seen += 1
+            if len(rows) >= max_entries:
+                truncated = True
+                continue
+            logical_parts = [*base_parts, entry.name]
+            logical = "/".join(logical_parts) if logical_parts else entry.name
+            is_symlink = entry.is_symlink()
+            dangling = False
+            try:
+                # lstat: do not follow symlink for type/size metadata.
+                lstat = entry.lstat()
+                size = int(lstat.st_size)
+                modified = float(lstat.st_mtime)
+            except OSError:
+                size = 0
+                modified = 0.0
+            if is_symlink:
+                # entry.exists() follows the link; False => dangling.
+                dangling = not entry.exists()
+            entry_is_dir = entry.is_dir()
+            mount = mounts_by_name.get(entry.name) if is_root_listing else None
+            row: dict[str, Any] = {
+                "name": entry.name,
+                "type": "dir" if entry_is_dir else "file",
+                "path": logical,
+                "size": size,
+                "modified": modified,
+                "is_symlink": is_symlink,
+                "dangling": dangling,
+            }
+            if mount:
+                row["mount_mode"] = mount.get("mode") or "link"
+                row["source_path"] = mount.get("source_path") or ""
+            seen_names.add(entry.name)
+            rows.append(row)
+        # Inject virtual reference mounts that have no filesystem entry.
+        if is_root_listing:
+            for name, mount in mounts_by_name.items():
+                if name in seen_names:
+                    continue
+                if str(mount.get("mode") or "") != "reference":
+                    continue
+                total_seen += 1
+                if len(rows) >= max_entries:
+                    truncated = True
+                    continue
+                source_path = str(mount.get("source_path") or "")
+                source = Path(source_path).expanduser() if source_path else None
+                is_dir = False
+                dangling = True
+                size = 0
+                modified = float(mount.get("linked_at") or 0.0)
+                if source is not None:
+                    try:
+                        dangling = not source.exists()
+                        is_dir = source.is_dir()
+                        if source.exists():
+                            st = source.stat()
+                            size = int(st.st_size)
+                            modified = float(st.st_mtime)
+                    except OSError:
+                        dangling = True
+                rows.append(
+                    {
+                        "name": name,
+                        "type": "dir" if is_dir else "file",
+                        "path": name,
+                        "size": size,
+                        "modified": modified,
+                        "is_symlink": False,
+                        "dangling": dangling,
+                        "mount_mode": "reference",
+                        "source_path": source_path,
+                        "virtual": True,
+                    }
+                )
+        rows.sort(key=lambda r: (0 if r.get("type") == "dir" else 1, str(r.get("name", "")).lower()))
+        return {
+            "files": rows,
+            "truncated": truncated,
+            "total_seen": total_seen,
+        }
+
+    def read_taskspace_file(
+        self,
+        session_id: str,
+        taskspace_id: str,
+        rel_path: str,
+        *,
+        max_bytes: int = 512 * 1024,
+    ) -> dict[str, Any]:
+        managed = self.get(session_id, touch=False)
+        if managed is None:
+            raise KeyError("session not found")
+        self._ensure_default_taskspace(managed)
+        taskspace = self._get_taskspace(managed, taskspace_id)
+        if taskspace is None:
+            raise KeyError("taskspace not found")
+        root = Path(taskspace["path"]).expanduser().resolve(strict=False)
+        parts = self._normalize_rel_parts(rel_path)
+        # Virtual reference mount: resolve through external source_path.
+        if parts:
+            mounts = self._load_workspace_mounts(root)
+            mount = mounts.get(parts[0])
+            if mount and str(mount.get("mode") or "") == "reference":
+                source_path = str(mount.get("source_path") or "").strip()
+                if not source_path:
+                    raise FileNotFoundError(f"reference mount missing source: {parts[0]}")
+                source_root = Path(source_path).expanduser()
+                nested = Path(*parts[1:]) if len(parts) > 1 else Path()
+                target = source_root / nested if str(nested) not in {"", "."} else source_root
+                if not target.exists():
+                    raise FileNotFoundError(f"reference source missing: {target}")
+                if target.is_dir():
+                    raise IsADirectoryError(str(target))
+                size = int(target.stat().st_size)
+                classification = classify_taskspace_file(target)
+                logical = "/".join(parts) or target.name
+                result: dict[str, Any] = {
+                    "name": target.name,
+                    "path": logical,
+                    "absolute_path": str(target.resolve(strict=False)),
+                    "size": size,
+                    "mount_mode": "reference",
+                    "source_path": str(source_root.resolve(strict=False)),
+                    **classification,
+                }
+                if _is_textual_preview_kind(str(classification["preview_kind"])):
+                    data = target.read_bytes()
+                    truncated = False
+                    if len(data) > max_bytes:
+                        data = data[:max_bytes]
+                        truncated = True
+                    result["content"] = data.decode("utf-8", errors="replace")
+                    result["truncated"] = truncated
+                else:
+                    result["truncated"] = False
+                return result
+        target = self._resolve_inside_root(root, rel_path, expect_dir=False)
+        if target.is_dir():
+            raise IsADirectoryError(str(target))
+        size = int(target.stat().st_size)
+        classification = classify_taskspace_file(target)
+        logical = "/".join(parts) or target.name
+        try:
+            absolute = str(target.resolve(strict=False))
+        except OSError:
+            absolute = str(target)
+        result = {
+            "name": target.name,
+            "path": logical,
+            "absolute_path": absolute,
+            "size": size,
+            **classification,
+        }
+        if _is_textual_preview_kind(str(classification["preview_kind"])):
+            data = target.read_bytes()
+            truncated = False
+            if len(data) > max_bytes:
+                data = data[:max_bytes]
+                truncated = True
+            result["content"] = data.decode("utf-8", errors="replace")
+            result["truncated"] = truncated
+        else:
+            result["truncated"] = False
+        return result
+
+    @staticmethod
+    def _load_workspace_mounts(root: Path) -> dict[str, dict[str, Any]]:
+        """Load ``.agx-mounts.json`` from a taskspace root (name -> record)."""
+        mounts_file = Path(root) / ".agx-mounts.json"
+        try:
+            raw = json.loads(mounts_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            return {}
+        rows = raw.get("mounts") if isinstance(raw, dict) else None
+        if not isinstance(rows, list):
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            if not name:
+                continue
+            mode = str(item.get("mode") or "link").strip().lower()
+            if mode not in {"reference", "copy", "link"}:
+                mode = "link"
+            out[name] = {
+                "name": name,
+                "mode": mode,
+                "source_path": str(item.get("source_path") or "").strip(),
+                "linked_at": float(item.get("linked_at") or 0.0),
+                "copy_rel": str(item.get("copy_rel") or "").strip() or None,
+            }
+        return out
+
+    def cleanup_expired(self) -> None:
+        now = time.time()
+        expired = [
+            sid
+            for sid, session in self._sessions.items()
+            if (now - session.updated_at) > self.ttl_seconds
+        ]
+        for sid in expired:
+            managed = self._sessions.get(sid)
+            if managed is None:
+                self._sessions.pop(sid, None)
+                continue
+            # Persist BEFORE removing from _sessions so _persist_session_state
+            # can still look up the managed ref via self._sessions.get(sid) and
+            # write all metadata fields (session_name, avatar_id, etc.) correctly.
+            self._persist_session_state(sid, managed.studio_session)
+            self._sessions.pop(sid, None)
+            if managed.team_manager is not None:
+                managed.team_manager.shutdown_now()
+            # MCP hub is global; do NOT kill child processes on session cleanup.
+
+    def _restore_persisted_state(self, session_id: str, session: StudioSession) -> None:
+        metadata: dict[str, Any] = {}
+        try:
+            loaded_metadata = self._session_store._load_latest_session_metadata_sync(session_id)
+            if isinstance(loaded_metadata, dict):
+                metadata = loaded_metadata
+            if isinstance(metadata, dict):
+                if "session_mode" in metadata:
+                    session.session_mode = normalize_session_mode(
+                        str(metadata.get("session_mode"))
+                    )
+                if "permission_mode" in metadata:
+                    persisted_permission_mode = normalize_permission_mode(
+                        metadata.get("permission_mode"),
+                        fallback="",
+                    )
+                    if persisted_permission_mode:
+                        session.permission_mode = persisted_permission_mode
+                from agenticx.studio.attachment_routing import restore_lock
+
+                restore_lock(session, metadata.get("attachment_routing_lock"))
+        except Exception:
+            pass
+        # Enterprise context is a server-owned private fence.  It is restored
+        # only for the dedicated managed purpose and never from scratchpad or
+        # request/context fields.  The small sidecar is written by incremental
+        # checkpoints so a crash between tool calls cannot lose the fence.
+        if normalize_session_purpose(metadata.get("purpose")) == ENVIRONMENT_ASSISTANT_PURPOSE:
+            restored = False
+            try:
+                marker_path = self._enterprise_context_path(session_id)
+                with open(marker_path, "r", encoding="utf-8") as fh:
+                    marker = json.load(fh)
+                restore_enterprise_context_marker(session, marker)
+                restored = hasattr(session, "_enterprise_assistant_context")
+            except Exception:
+                pass
+            if not restored:
+                restore_enterprise_context_marker(
+                    session,
+                    metadata.get(_ENTERPRISE_CONTEXT_METADATA_KEY),
+                )
+        try:
+            todos = self._session_store._load_todos_sync(session_id)
+            if todos:
+                session.todo_manager.load_payload(todos)
+            scratchpad = self._session_store._load_scratchpad_sync(session_id)
+            if scratchpad:
+                from agenticx.runtime.scratchpad_utils import normalize_scratchpad_loaded
+
+                session.scratchpad = normalize_scratchpad_loaded(dict(scratchpad))
+            messages = self._load_messages_snapshot(session_id)
+            if messages:
+                from agenticx.studio.chat_attachments import (
+                    materialize_message_lists_image_uploads,
+                )
+
+                if materialize_message_lists_image_uploads(session_id, [messages]):
+                    try:
+                        atomic_write_json(self._messages_path(session_id), messages)
+                    except Exception:
+                        pass
+                session.chat_history = self._normalize_messages(messages)
+        except Exception:
+            pass
+
+        try:
+            raw = self._load_agent_messages_snapshot(session_id)
+            if raw:
+                from agenticx.runtime.agent_runtime import _sanitize_context_messages
+                from agenticx.studio.chat_attachments import (
+                    materialize_message_lists_image_uploads,
+                    sync_agent_messages_attachments_from_chat_history,
+                )
+
+                materialize_message_lists_image_uploads(session_id, [raw])
+                sync_agent_messages_attachments_from_chat_history(
+                    raw, getattr(session, "chat_history", None) or []
+                )
+                session.agent_messages = _sanitize_context_messages(raw)
+        except Exception:
+            pass
+
+        try:
+            self._load_context_refs(session_id, session)
+        except Exception:
+            pass
+
+    def _restore_managed_metadata(self, session_id: str, managed: ManagedSession) -> None:
+        try:
+            metadata = self._session_store._load_latest_session_metadata_sync(session_id)
+        except Exception:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            return
+        raw_name = metadata.get("session_name")
+        if raw_name is not None:
+            session_name = str(raw_name).strip()
+            if session_name and session_name != "None":
+                managed.session_name = session_name
+        # Last resort: if DB history also had no valid name, derive from chat_history
+        # which was already loaded by _restore_persisted_state before this method.
+        if self.session_title_needs_auto_fill(managed.session_name):
+            first = self._first_user_text_from_chat_history(
+                getattr(managed.studio_session, "chat_history", None) or []
+            )
+            if first:
+                managed.session_name = self._build_auto_title(first)
+        managed.created_at = self._to_float(metadata.get("created_at"), managed.created_at)
+        # Restore last-activity timestamp from persisted metadata so the desktop
+        # history panel can correctly bucket sessions into Today / Previous 7 days
+        # after restart or on-demand reload. Without this, ManagedSession defaults
+        # to time.time() and every loaded session looks like it was just active.
+        restored_updated_at = self._to_float(metadata.get("updated_at"), 0.0)
+        if restored_updated_at > 0:
+            managed.updated_at = restored_updated_at
+        elif managed.created_at > 0:
+            managed.updated_at = managed.created_at
+        managed.pinned = bool(metadata.get("pinned", False))
+        managed.archived = bool(metadata.get("archived", False))
+        managed.taskspaces = self._sanitize_taskspaces(session_id, metadata.get("taskspaces"))
+        raw_active_taskspace_id = str(metadata.get("active_taskspace_id") or "").strip()
+        managed.studio_session.active_taskspace_id = raw_active_taskspace_id or None
+
+        if "avatar_id" in metadata:
+            raw_av = metadata.get("avatar_id")
+            managed.avatar_id = (
+                None if raw_av is None else normalize_session_avatar_binding(str(raw_av))
+            )
+        if "avatar_name" in metadata:
+            raw_name = metadata.get("avatar_name")
+            managed.avatar_name = (
+                None if raw_name is None else (str(raw_name).strip() or None)
+            )
+        if "execution_state" in metadata:
+            raw_state = str(metadata.get("execution_state", "idle")).strip().lower()
+            if raw_state in ("idle", "running", "interrupted", "failed"):
+                managed.execution_state = raw_state
+            else:
+                managed.execution_state = "idle"
+        if "session_mode" in metadata:
+            managed.studio_session.session_mode = normalize_session_mode(
+                str(metadata.get("session_mode"))
+            )
+        if "purpose" in metadata:
+            managed.purpose = normalize_session_purpose(metadata.get("purpose")) or None
+        if "purpose_scope" in metadata:
+            managed.purpose_scope = (
+                normalize_session_purpose_scope(metadata.get("purpose_scope")) or None
+            )
+
+    def _persist_core_snapshots(
+        self,
+        session_id: str,
+        session: StudioSession,
+        *,
+        default_timestamp_ms: int | None = None,
+    ) -> bool:
+        """Persist user-visible and model-context messages as the critical state."""
+        critical_ok = True
+        try:
+            self._save_messages_snapshot(
+                session_id,
+                session.chat_history or [],
+                default_timestamp_ms=default_timestamp_ms,
+            )
+        except Exception:
+            critical_ok = False
+            _log.exception(
+                "session persist failed session=%s stage=messages",
+                session_id,
+            )
+        try:
+            self._save_agent_messages_snapshot(
+                session_id,
+                getattr(session, "agent_messages", None) or [],
+            )
+        except Exception:
+            critical_ok = False
+            _log.exception(
+                "session persist failed session=%s stage=agent_messages",
+                session_id,
+            )
+        return critical_ok
+
+    def _enterprise_context_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_root, session_id, "enterprise_context.json")
+
+    def _persist_enterprise_context_marker(
+        self,
+        session_id: str,
+        session: StudioSession,
+    ) -> dict[str, Any]:
+        """Persist the private enterprise fence for both incremental and final saves."""
+
+        managed = self._sessions.get(session_id)
+        if managed is None or normalize_session_purpose(getattr(managed, "purpose", None)) != ENVIRONMENT_ASSISTANT_PURPOSE:
+            return {}
+        marker = enterprise_context_marker_for_persistence(session)
+        if not marker:
+            return {}
+        try:
+            atomic_write_json(self._enterprise_context_path(session_id), marker)
+        except Exception:
+            _log.exception(
+                "session persist auxiliary failure session=%s stage=enterprise_context",
+                session_id,
+            )
+        return marker
+
+    def _persist_session_state(
+        self,
+        session_id: str,
+        session: StudioSession,
+        *,
+        require_summary: bool = False,
+    ) -> bool:
+        self._ensure_session_title_from_chat_history(session_id, session)
+        managed_ref = self._sessions.get(session_id)
+        metadata_updated_at = float(
+            getattr(managed_ref, "updated_at", time.time()) or time.time()
+        )
+        metadata_created_at = float(
+            getattr(managed_ref, "created_at", time.time()) or time.time()
+        )
+        try:
+            materialize_message_lists_image_uploads(
+                session_id,
+                [
+                    session.chat_history or [],
+                    getattr(session, "agent_messages", None) or [],
+                ],
+            )
+        except Exception:
+            _log.exception(
+                "session persist auxiliary failure session=%s stage=attachments",
+                session_id,
+            )
+
+        critical_ok = self._persist_core_snapshots(
+            session_id,
+            session,
+            default_timestamp_ms=int(metadata_updated_at * 1000),
+        )
+        enterprise_marker = self._persist_enterprise_context_marker(session_id, session)
+
+        try:
+            self._session_store._save_todos_sync(
+                session_id,
+                session.todo_manager.to_payload(),
+            )
+        except Exception:
+            _log.exception(
+                "session persist auxiliary failure session=%s stage=todos",
+                session_id,
+            )
+
+        try:
+            scratchpad = dict(getattr(session, "scratchpad", {}) or {})
+            self._session_store._save_scratchpad_sync(session_id, scratchpad)
+        except Exception:
+            _log.exception(
+                "session persist auxiliary failure session=%s stage=scratchpad",
+                session_id,
+            )
+
+        summary_ok = True
+        if critical_ok:
+            try:
+                summary = self._build_session_summary(session)
+                last_activity_at = self._resolve_list_activity_at(
+                    chat_history=getattr(session, "chat_history", None),
+                    metadata_updated_at=metadata_updated_at,
+                    metadata_created_at=metadata_created_at,
+                )
+                metadata = {
+                    "provider": session.provider_name or "",
+                    "model": session.model_name or "",
+                    "chat_messages": len(session.chat_history),
+                    "artifacts": len(session.artifacts),
+                    "session_name": getattr(managed_ref, "session_name", None),
+                    "avatar_id": getattr(managed_ref, "avatar_id", None),
+                    "avatar_name": getattr(managed_ref, "avatar_name", None),
+                    "created_at": metadata_created_at,
+                    "updated_at": metadata_updated_at,
+                    "last_activity_at": last_activity_at,
+                    "pinned": bool(getattr(managed_ref, "pinned", False)),
+                    "archived": bool(getattr(managed_ref, "archived", False)),
+                    "taskspaces": list(getattr(managed_ref, "taskspaces", []) or []),
+                    "active_taskspace_id": str(
+                        getattr(session, "active_taskspace_id", None) or ""
+                    ).strip()
+                    or None,
+                    "execution_state": getattr(managed_ref, "execution_state", "idle"),
+                    "session_mode": normalize_session_mode(
+                        getattr(session, "session_mode", None)
+                    ),
+                    "purpose": normalize_session_purpose(
+                        getattr(managed_ref, "purpose", None)
+                    )
+                    or None,
+                    "purpose_scope": normalize_session_purpose_scope(
+                        getattr(managed_ref, "purpose_scope", None)
+                    )
+                    or None,
+                    "permission_mode": normalize_permission_mode(
+                        getattr(session, "permission_mode", None),
+                        fallback=global_permission_mode(),
+                    ),
+                    "attachment_routing_lock": self._attachment_routing_lock_snapshot(
+                        session
+                    ),
+                    **_harness_list_fields(session),
+                }
+                if enterprise_marker:
+                    metadata[_ENTERPRISE_CONTEXT_METADATA_KEY] = enterprise_marker
+                self._session_store._save_session_summary_sync(
+                    session_id,
+                    summary,
+                    metadata,
+                )
+            except Exception:
+                summary_ok = False
+                _log.exception(
+                    "session persist auxiliary failure session=%s stage=summary",
+                    session_id,
+                )
+
+            if require_summary and not summary_ok:
+                critical_ok = False
+
+            try:
+                self._session_store._index_session_messages_sync(
+                    session_id,
+                    session.chat_history or [],
+                )
+            except Exception:
+                _log.exception(
+                    "session persist auxiliary failure session=%s stage=fts",
+                    session_id,
+                )
+        else:
+            _log.error(
+                "session persist skipped metadata session=%s because critical snapshots failed",
+                session_id,
+            )
+
+        try:
+            self._save_context_refs(session_id, session)
+        except Exception:
+            _log.exception(
+                "session persist auxiliary failure session=%s stage=context_refs",
+                session_id,
+            )
+
+        return critical_ok
+
+    @staticmethod
+    def _attachment_routing_lock_snapshot(session: StudioSession) -> Optional[Dict[str, str]]:
+        try:
+            from agenticx.studio.attachment_routing import lock_snapshot
+
+            return lock_snapshot(session)
+        except Exception:
+            _log.warning("attachment routing lock snapshot failed", exc_info=True)
+            return None
+
+    @staticmethod
+    def _attachment_routing_lock_snapshot_from_raw(
+        raw: Any,
+    ) -> Optional[Dict[str, str]]:
+        try:
+            from agenticx.studio.attachment_routing import lock_snapshot_from_raw
+
+            return lock_snapshot_from_raw(raw)
+        except Exception:
+            _log.warning("attachment routing raw lock snapshot failed", exc_info=True)
+            return None
+
+    def _messages_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_root, session_id, "messages.json")
+
+    def _save_messages_snapshot(
+        self,
+        session_id: str,
+        messages: list[dict],
+        *,
+        default_timestamp_ms: int | None = None,
+    ) -> None:
+        path = self._messages_path(session_id)
+        # Stamp ms-epoch timestamp on messages missing one (in-memory + disk).
+        now_ms = default_timestamp_ms or int(time.time() * 1000)
+        for item in messages:
+            if not isinstance(item, dict):
+                continue
+            if not item.get("timestamp"):
+                item["timestamp"] = now_ms
+        atomic_write_json(path, messages)
+        self._save_messages_tail_snapshot(session_id, messages)
+
+    _TAIL_SNAPSHOT_MAX = 120
+
+    def _messages_tail_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_root, session_id, "messages_tail.json")
+
+    def _save_messages_tail_snapshot(self, session_id: str, messages: list[dict]) -> None:
+        if not messages:
+            return
+        total = len(messages)
+        tail_rows = [item for item in messages[-self._TAIL_SNAPSHOT_MAX :] if isinstance(item, dict)]
+        if not tail_rows:
+            return
+        start_index = max(0, total - len(tail_rows))
+        atomic_write_json(
+            self._messages_tail_path(session_id),
+            {
+                "total_count": total,
+                "start_index": start_index,
+                "messages": tail_rows,
+            },
+        )
+
+    def _load_messages_tail_snapshot(self, session_id: str) -> dict[str, Any] | None:
+        path = self._messages_tail_path(session_id)
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return None
+        if not isinstance(data, dict):
+            return None
+        rows = self._parse_messages_json_payload(data.get("messages"))
+        if not rows:
+            return None
+        total_count = int(data.get("total_count", len(rows)))
+        start_index = int(data.get("start_index", max(0, total_count - len(rows))))
+        return {
+            "total_count": total_count,
+            "start_index": start_index,
+            "messages": rows,
+        }
+
+    @staticmethod
+    def _parse_messages_json_payload(data: Any) -> list[dict]:
+        """Accept Studio list snapshots or legacy ``{\"messages\": [...]}`` wrappers."""
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, dict):
+            inner = data.get("messages") or data.get("chat_history")
+            rows = inner if isinstance(inner, list) else []
+        else:
+            rows = []
+        return [item for item in rows if isinstance(item, dict)]
+
+    def _load_messages_snapshot(self, session_id: str) -> list[dict]:
+        path = self._messages_path(session_id)
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        rows = self._parse_messages_json_payload(data)
+        if rows and not os.path.exists(self._messages_tail_path(session_id)):
+            self._save_messages_tail_snapshot(session_id, rows)
+        return rows
+
+    def _derive_session_name_from_disk_messages(self, session_id: str) -> str | None:
+        """Build a list title from on-disk messages when metadata has no session_name."""
+        first = self._first_user_text_from_chat_history(
+            self._load_messages_snapshot(session_id)
+        )
+        if not first:
+            return None
+        title = self._build_auto_title(first)
+        return title or None
+
+    def _agent_messages_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_root, session_id, "agent_messages.json")
+
+    def _save_agent_messages_snapshot(self, session_id: str, messages: list[dict]) -> None:
+        tail = messages[-40:]
+        path = self._agent_messages_path(session_id)
+        atomic_write_json(path, tail)
+
+    def _load_agent_messages_snapshot(self, session_id: str) -> list[dict]:
+        path = self._agent_messages_path(session_id)
+        if not os.path.exists(path):
+            return []
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        if not isinstance(data, list):
+            return []
+        return [item for item in data if isinstance(item, dict)]
+
+    def _context_refs_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_root, session_id, "context_files_refs.json")
+
+    def _save_context_refs(self, session_id: str, session: StudioSession) -> None:
+        ctx = getattr(session, "context_files", None)
+        if not ctx:
+            return
+        paths = list(ctx.keys())
+        path = self._context_refs_path(session_id)
+        atomic_write_json(path, paths)
+
+    def _load_context_refs(self, session_id: str, session: StudioSession) -> None:
+        path = self._context_refs_path(session_id)
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as fh:
+            paths = json.load(fh)
+        if not isinstance(paths, list):
+            return
+        for fpath in paths:
+            if not isinstance(fpath, str) or not os.path.isfile(fpath):
+                continue
+            with open(fpath, "r", encoding="utf-8") as fh:
+                session.context_files[fpath] = fh.read()
+
+    def _normalize_messages(self, messages: list[dict]) -> list[dict]:
+        max_data_url = 8_000_000
+        normalized: list[dict] = []
+        for item in messages:
+            role = str(item.get("role", "assistant"))
+            if role not in {"user", "assistant", "tool"}:
+                role = "assistant"
+            raw_timestamp = item.get("timestamp")
+            try:
+                parsed_timestamp = int(raw_timestamp) if raw_timestamp is not None else None
+            except (TypeError, ValueError):
+                parsed_timestamp = None
+            row: dict[str, Any] = {
+                "id": str(item.get("id", "")),
+                "role": role,
+                "content": str(item.get("content", "")),
+                "agent_id": str(item.get("agent_id", "meta") or "meta"),
+                "avatar_name": str(item.get("avatar_name", "") or ""),
+                "avatar_url": str(item.get("avatar_url", "") or ""),
+                "provider": str(item.get("provider", "") or ""),
+                "model": str(item.get("model", "") or ""),
+                "quoted_message_id": str(item.get("quoted_message_id", "") or ""),
+                "reply_to_message_id": str(
+                    item.get("reply_to_message_id")
+                    or item.get("quoted_message_id", "")
+                    or ""
+                ),
+                "quoted_content": str(item.get("quoted_content", "") or ""),
+                "timestamp": parsed_timestamp,
+                "forwarded_history": item.get("forwarded_history"),
+            }
+            raw_meta = item.get("metadata")
+            if isinstance(raw_meta, dict) and raw_meta:
+                row["metadata"] = dict(raw_meta)
+            if role == "tool":
+                tool_call_id = str(
+                    item.get("tool_call_id", item.get("toolCallId", "")) or ""
+                ).strip()
+                tool_name = str(item.get("tool_name", item.get("toolName", "")) or "").strip()
+                tool_status = str(
+                    item.get("tool_status", item.get("toolStatus", "")) or ""
+                ).strip()
+                tool_group_id = str(
+                    item.get("tool_group_id", item.get("toolGroupId", "")) or ""
+                ).strip()
+                if tool_call_id:
+                    row["tool_call_id"] = tool_call_id
+                if tool_name:
+                    row["tool_name"] = tool_name
+                raw_tool_args = item.get("tool_args", item.get("toolArgs"))
+                if isinstance(raw_tool_args, dict):
+                    row["tool_args"] = raw_tool_args
+                if tool_status in {"pending", "running", "done", "error", "cancelled"}:
+                    row["tool_status"] = tool_status
+                raw_elapsed = item.get("tool_elapsed_sec", item.get("toolElapsedSec"))
+                try:
+                    elapsed = int(raw_elapsed) if raw_elapsed is not None else None
+                except (TypeError, ValueError):
+                    elapsed = None
+                if elapsed is not None and elapsed >= 0:
+                    row["tool_elapsed_sec"] = elapsed
+                preview = str(
+                    item.get("tool_result_preview", item.get("toolResultPreview", "")) or ""
+                ).strip()
+                if preview:
+                    row["tool_result_preview"] = preview
+                if tool_group_id:
+                    row["tool_group_id"] = tool_group_id
+                raw_stream = item.get("tool_stream_lines", item.get("toolStreamLines"))
+                if isinstance(raw_stream, list):
+                    row["tool_stream_lines"] = [str(line) for line in raw_stream[:200]]
+            raw_atts = item.get("attachments")
+            if isinstance(raw_atts, list) and raw_atts:
+                clean_atts: list[dict[str, Any]] = []
+                image_n = 0
+                file_n = 0
+                for a in raw_atts[:24]:
+                    if not isinstance(a, dict):
+                        continue
+                    du = str(a.get("data_url", "")).strip()
+                    kind = str(a.get("kind", "") or "").strip()
+                    is_context = kind == "context_file"
+                    if du.startswith("data:image/") and len(du) <= max_data_url:
+                        if image_n >= 4:
+                            continue
+                        mime = str(a.get("mime_type", "") or "").strip()
+                        if not mime and du.startswith("data:"):
+                            semi = du.find(";")
+                            if semi > 5:
+                                mime = du[5:semi]
+                        if not mime:
+                            mime = "image/png"
+                        try:
+                            sz = int(a.get("size", 0) or 0)
+                        except (TypeError, ValueError):
+                            sz = 0
+                        clean_atts.append(
+                            {
+                                **(
+                                    {"id": attachment_id}
+                                    if (
+                                        attachment_id := str(
+                                            a.get("id") or a.get("artifact_id") or ""
+                                        ).strip()
+                                    )
+                                    else {}
+                                ),
+                                "name": str(a.get("name", "") or "").strip() or "image",
+                                "mime_type": mime,
+                                "size": sz,
+                                "data_url": du,
+                                **(
+                                    {"storage_path": sp}
+                                    if (sp := str(a.get("storage_path", "") or "").strip())
+                                    else {}
+                                ),
+                            }
+                        )
+                        image_n += 1
+                        continue
+                    if is_context or (not du and str(a.get("name", "") or "").strip()):
+                        name = str(a.get("name", "") or "").strip()
+                        if not name:
+                            continue
+                        if file_n >= 8:
+                            continue
+                        sp = str(a.get("source_path", "") or "").strip()
+                        rt = bool(a.get("reference_token", False))
+                        crl = str(a.get("composer_ref_label", "") or "").strip()
+                        mime = str(a.get("mime_type", "") or "").strip() or "application/octet-stream"
+                        try:
+                            sz = int(a.get("size", 0) or 0)
+                        except (TypeError, ValueError):
+                            sz = 0
+                        att_dict = {
+                            **(
+                                {"id": attachment_id}
+                                if (
+                                    attachment_id := str(
+                                        a.get("id") or a.get("artifact_id") or ""
+                                    ).strip()
+                                )
+                                else {}
+                            ),
+                            "name": name,
+                            "mime_type": mime,
+                            "size": sz,
+                            "source_path": sp,
+                            "reference_token": rt,
+                            "kind": "context_file",
+                        }
+                        if crl:
+                            att_dict["composer_ref_label"] = crl
+                        line_start = a.get("line_start")
+                        line_end = a.get("line_end")
+                        if isinstance(line_start, int) and isinstance(line_end, int):
+                            att_dict["line_start"] = line_start
+                            att_dict["line_end"] = line_end
+                        snippet_ref = str(a.get("snippet_ref", "") or "").strip()
+                        if snippet_ref:
+                            att_dict["snippet_ref"] = snippet_ref
+                        sheet = str(a.get("sheet", "") or "").strip()
+                        a1 = str(a.get("a1", "") or "").strip()
+                        if sheet and a1:
+                            att_dict["sheet"] = sheet
+                            att_dict["a1"] = a1
+                        clean_atts.append(att_dict)
+                        file_n += 1
+                if clean_atts:
+                    row["attachments"] = clean_atts
+            raw_visual = item.get("visual_attachments")
+            if isinstance(raw_visual, list) and raw_visual:
+                clean_visual: list[dict[str, Any]] = []
+                for a in raw_visual[:4]:
+                    if not isinstance(a, dict):
+                        continue
+                    du = str(a.get("data_url", "")).strip()
+                    if not du.startswith("data:image/") or len(du) > max_data_url:
+                        continue
+                    mime = str(a.get("mime_type", "") or "").strip() or "image/png"
+                    try:
+                        sz = int(a.get("size", 0) or 0)
+                    except (TypeError, ValueError):
+                        sz = 0
+                    clean_visual.append(
+                        {
+                            "name": str(a.get("name", "") or "").strip() or "image",
+                            "mime_type": mime,
+                            "size": sz,
+                            "data_url": du,
+                            "source": str(a.get("source", "") or "").strip(),
+                        }
+                    )
+                if clean_visual:
+                    row["visual_attachments"] = clean_visual
+            if role == "assistant":
+                content_for_parse = str(item.get("content", "") or "")
+                parsed_out = parse_assistant_output(content_for_parse)
+                row["content"] = parsed_out.visible_body
+                raw_sq = item.get("suggested_questions")
+                if parsed_out.malformed:
+                    # Detached SQ from malformed protocol must not ship to clients.
+                    pass
+                elif isinstance(raw_sq, list) and raw_sq:
+                    cleaned_sq = sanitize_suggested_questions(
+                        raw_sq,
+                        parsed_out.visible_body,
+                    )
+                    if cleaned_sq:
+                        row["suggested_questions"] = list(cleaned_sq)
+                raw_refs = item.get("references")
+                if isinstance(raw_refs, list) and raw_refs:
+                    clean_refs: list[dict[str, Any]] = []
+                    for ref in raw_refs[:50]:
+                        if not isinstance(ref, dict):
+                            continue
+                        rid = ref.get("id")
+                        title = str(ref.get("title", "") or "").strip()
+                        url = str(ref.get("url", "") or "").strip()
+                        if not title and not url:
+                            continue
+                        entry: dict[str, Any] = {
+                            "id": int(rid) if rid is not None else len(clean_refs) + 1,
+                            "title": title or url,
+                            "url": url,
+                            "snippet": str(ref.get("snippet", "") or "").strip()[:240],
+                            "source": str(ref.get("source", "") or "web").strip() or "web",
+                        }
+                        provider = str(ref.get("provider", "") or "").strip()
+                        domain = str(ref.get("domain", "") or "").strip()
+                        if provider:
+                            entry["provider"] = provider
+                        if domain:
+                            entry["domain"] = domain
+                        clean_refs.append(entry)
+                    if clean_refs:
+                        row["references"] = clean_refs
+                raw_queries = item.get("searched_queries")
+                if isinstance(raw_queries, list) and raw_queries:
+                    row["searched_queries"] = [
+                        str(x).strip() for x in raw_queries[:20] if str(x).strip()
+                    ]
+                raw_reasoning = item.get("reasoning")
+                if isinstance(raw_reasoning, str) and raw_reasoning.strip():
+                    row["reasoning"] = raw_reasoning.strip()[:16384]
+                raw_reasoning_seconds = item.get("reasoning_seconds")
+                try:
+                    reasoning_seconds = int(raw_reasoning_seconds) if raw_reasoning_seconds is not None else None
+                except (TypeError, ValueError):
+                    reasoning_seconds = None
+                if reasoning_seconds is not None and reasoning_seconds >= 1:
+                    row["reasoning_seconds"] = reasoning_seconds
+            normalized.append(row)
+        return self._collapse_repeated_assistant_in_turn(normalized)
+
+    @staticmethod
+    def _collapse_repeated_assistant_in_turn(rows: list[dict]) -> list[dict]:
+        """Drop assistant rows that exactly repeat an earlier assistant reply
+        within the same user turn.
+
+        A single turn's reply must never appear twice. Spurious re-runs
+        (e.g. a false-stall auto-nudge re-answering a completed turn) or
+        in-memory/disk merge races can append identical assistant copies that
+        then accumulate across restarts. Repeats across *different* user turns
+        are legitimate (the user asked the same thing twice) and are kept: the
+        per-turn seen-set is cleared whenever a user message is encountered.
+        Empty (tool-call-only) assistant rows carry no visible text and are
+        never deduped.
+        """
+        deduped: list[dict] = []
+        seen_in_turn: set[str] = set()
+        for row in rows:
+            role = row.get("role")
+            if role == "user":
+                seen_in_turn.clear()
+            elif role == "assistant":
+                key = str(row.get("content", "") or "").strip()
+                if key:
+                    if key in seen_in_turn:
+                        continue
+                    seen_in_turn.add(key)
+            deduped.append(row)
+        return deduped
+
+    def _build_session_summary(self, session: StudioSession) -> str:
+        last_user = ""
+        last_assistant = ""
+        for item in reversed(session.chat_history[-20:]):
+            role = str(item.get("role", ""))
+            content = str(item.get("content", ""))
+            if role == "assistant" and not last_assistant:
+                last_assistant = content
+            if role == "user" and not last_user:
+                last_user = content
+            if last_user and last_assistant:
+                break
+        return (
+            f"last_user={last_user[:300]}\n"
+            f"last_assistant={last_assistant[:300]}\n"
+            f"todos={session.todo_manager.render()[:600]}"
+        )
+
+    def _build_auto_title(self, message: str) -> str:
+        compact = " ".join(str(message or "").split())
+        if not compact:
+            return ""
+        return compact[:48]
+
+    @staticmethod
+    def _first_user_text_from_chat_history(chat_history: list) -> str:
+        for item in chat_history or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("role", "")).strip() != "user":
+                continue
+            content = str(item.get("content", "")).strip()
+            if content:
+                return content
+        return ""
+
+    def _ensure_session_title_from_chat_history(self, session_id: str, session: StudioSession) -> None:
+        managed = self._sessions.get(session_id)
+        if managed is None:
+            return
+        if not self.session_title_needs_auto_fill(managed.session_name):
+            return
+        first = self._first_user_text_from_chat_history(getattr(session, "chat_history", None) or [])
+        if not first:
+            return
+        managed.session_name = self._build_auto_title(first)
+
+    @staticmethod
+    def _session_has_listable_chat_history(chat_history: list | None) -> bool:
+        """True when the session has at least one visible user/assistant message."""
+        for item in chat_history or []:
+            if not isinstance(item, dict):
+                continue
+            role = str(item.get("role", "")).strip().lower()
+            if role not in {"user", "assistant"}:
+                continue
+            if str(item.get("content", "")).strip():
+                return True
+        return False
+
+    @staticmethod
+    def _normalize_epoch_seconds(value: Any) -> float:
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if ts <= 0:
+            return 0.0
+        if ts > 1e11:
+            ts /= 1000.0
+        return ts
+
+    @classmethod
+    def _last_message_activity_from_history(cls, chat_history: list | None) -> float:
+        best = 0.0
+        for item in chat_history or []:
+            if not isinstance(item, dict):
+                continue
+            for key in ("timestamp", "created_at", "ts"):
+                ts = cls._normalize_epoch_seconds(item.get(key))
+                if ts > best:
+                    best = ts
+        return best
+
+    def _last_message_activity_from_disk(self, session_id: str) -> float:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return 0.0
+        path = self._messages_path(sid)
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return 0.0
+        cached = getattr(self, "_disk_activity_cache", {}).get(sid)
+        if cached and cached[0] == mtime:
+            return cached[1]
+        activity = self._last_message_activity_from_history(self._load_messages_snapshot(sid))
+        cache = getattr(self, "_disk_activity_cache", None)
+        if cache is None:
+            cache = {}
+            setattr(self, "_disk_activity_cache", cache)
+        cache[sid] = (mtime, activity)
+        return activity
+
+    @classmethod
+    def _resolve_list_activity_at(
+        cls,
+        *,
+        chat_history: list | None,
+        metadata_updated_at: float,
+        metadata_created_at: float,
+        indexed_message_ts: float = 0.0,
+        metadata_last_activity_at: float = 0.0,
+        disk_message_ts: float = 0.0,
+        summary_activity_ts: float = 0.0,
+        live_touch_at: float = 0.0,
+    ) -> float:
+        """Pick the best last-activity timestamp for session list bucketing."""
+        message_based = max(
+            cls._last_message_activity_from_history(chat_history),
+            cls._normalize_epoch_seconds(indexed_message_ts),
+            cls._normalize_epoch_seconds(disk_message_ts),
+        )
+        touch_at = cls._normalize_epoch_seconds(live_touch_at)
+        if message_based > 0:
+            # Real chat timestamps are the source of truth. We deliberately ignore
+            # touch_at here even when it's larger, because historically taskspace
+            # mutations and other non-activity code paths bulk-bumped updated_at
+            # and shoved unrelated sessions into Today. The "just sent, no message
+            # written yet" case is covered by the frontend sessionHistoryHints
+            # optimistic bump, not by touch_at on the backend.
+            return message_based
+        summary_based = cls._normalize_epoch_seconds(summary_activity_ts)
+        if summary_based > 0:
+            if touch_at > summary_based:
+                return touch_at
+            return summary_based
+        meta_last = cls._normalize_epoch_seconds(metadata_last_activity_at)
+        if meta_last > 0:
+            if touch_at > meta_last:
+                return touch_at
+            return meta_last
+        if touch_at > 0:
+            return touch_at
+        if metadata_updated_at > 0:
+            return metadata_updated_at
+        if metadata_created_at > 0:
+            return metadata_created_at
+        return 0.0
+
+    def _build_fork_name(self, base_name: Optional[str]) -> str:
+        text = str(base_name or "").strip()
+        if not text:
+            return "Fork Chat"
+        return f"{text} (Fork)"
+
+    def _to_float(self, value: Any, fallback: float) -> float:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return fallback
+        if parsed <= 0:
+            return fallback
+        return parsed
+
+    @staticmethod
+    def _sanitize_session_name(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        s = str(raw).strip()
+        if not s or s == "None":
+            return None
+        return s
+
+    @staticmethod
+    def _active_taskspace_listing_fields(
+        raw_active_id: Any,
+        taskspaces: Any,
+    ) -> dict[str, str | None]:
+        """Return compact project metadata for the desktop session list.
+
+        ``default`` is retained in the id so the UI can distinguish an explicit
+        default selection from legacy rows, but it is still rendered as a task.
+        Invalid/stale ids are omitted rather than incorrectly turning a task into
+        a project.
+        """
+        active_id = str(raw_active_id or "").strip()
+        inferred_item: dict[str, Any] | None = None
+        if not active_id and isinstance(taskspaces, list):
+            # ``active_taskspace_id`` was introduced after users could already
+            # attach folders to a conversation.  Treat the newest attached
+            # non-default folder as the legacy active project instead of
+            # collapsing every pre-migration project into the task list.
+            # Historical auto-generated artifact roots are not user projects.
+            for item in reversed(taskspaces):
+                if not isinstance(item, dict):
+                    continue
+                candidate_id = str(item.get("id", "")).strip()
+                if not candidate_id or candidate_id == "default":
+                    continue
+                label = str(item.get("label", "")).strip()
+                path = str(item.get("path", "")).strip().replace("\\", "/").rstrip("/")
+                if label == "任务产物" or path.endswith("/task_artifacts"):
+                    continue
+                active_id = candidate_id
+                inferred_item = item
+                break
+        if not active_id:
+            return {"active_taskspace_id": None, "active_taskspace_label": None}
+        label = ""
+        if inferred_item is not None:
+            label = str(inferred_item.get("label", "")).strip()
+        if isinstance(taskspaces, list):
+            for item in taskspaces:
+                if not isinstance(item, dict):
+                    continue
+                if str(item.get("id", "")).strip() != active_id:
+                    continue
+                label = str(item.get("label", "")).strip()
+                break
+        if not label and active_id != "default":
+            # A stale active id should not be advertised as a project. The
+            # taskspace list is the source of truth for valid project ids.
+            if isinstance(taskspaces, list) and not any(
+                isinstance(item, dict) and str(item.get("id", "")).strip() == active_id
+                for item in taskspaces
+            ):
+                return {"active_taskspace_id": None, "active_taskspace_label": None}
+        return {
+            "active_taskspace_id": active_id,
+            "active_taskspace_label": label or None,
+        }
+
+    def _list_persisted_sessions(
+        self,
+        avatar_id: str | None = None,
+        *,
+        purpose: str | None = None,
+        purpose_scope: str | None = None,
+    ) -> list[dict]:
+        """Load persisted session rows with optional avatar/purpose scoping.
+
+        When ``avatar_id`` is set, skip unrelated rows before any ``messages.json``
+        reads so filtered listings (group-pane open) stay cheap.
+        """
+        rows: list[dict] = []
+        wanted = normalize_session_avatar_binding(avatar_id)
+        wanted_purpose = normalize_session_purpose(purpose) or None
+        wanted_scope = normalize_session_purpose_scope(purpose_scope) or None
+        try:
+            latest = self._session_store._list_latest_sessions_sync(
+                limit=0, avatar_id=wanted
+            )
+        except Exception:
+            latest = []
+        sqlite_skip: set[str] = set()
+        if wanted is not None:
+            try:
+                sqlite_skip = self._session_store._list_all_session_ids_sync()
+            except Exception:
+                sqlite_skip = set()
+        for item in latest:
+            sid = str(item.get("session_id", "")).strip()
+            if not sid:
+                continue
+            metadata = item.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            raw_av = metadata.get("avatar_id")
+            row_av = (
+                None
+                if raw_av is None
+                else normalize_session_avatar_binding(str(raw_av))
+            )
+            if wanted is not None and row_av != wanted:
+                continue
+            row_purpose = normalize_session_purpose(metadata.get("purpose"))
+            if wanted_purpose:
+                if not session_has_purpose(metadata, wanted_purpose, wanted_scope):
+                    continue
+            elif row_purpose:
+                continue
+            chat_count = 0
+            try:
+                chat_count = int(metadata.get("chat_messages", 0))
+            except (TypeError, ValueError):
+                pass
+            if chat_count <= 0:
+                # 元数据可能略滞后于磁盘 messages.json；有消息则仍应出现在会话列表中。
+                try:
+                    mp = Path(self._messages_path(sid))
+                    raw = mp.read_text(encoding="utf-8").strip()
+                    if raw and raw != "[]":
+                        chat_count = 1
+                except Exception:
+                    pass
+            if chat_count <= 0 and not wanted_purpose:
+                continue
+            created_at = self._to_float(metadata.get("created_at"), self._iso_to_epoch(item.get("created_at")))
+            updated_at = self._to_float(metadata.get("updated_at"), self._iso_to_epoch(item.get("created_at")))
+            last_activity_at = self._to_float(metadata.get("last_activity_at"), updated_at)
+            sess_nm = self._sanitize_session_name(metadata.get("session_name"))
+            if self.session_title_needs_auto_fill(sess_nm):
+                derived = self._derive_session_name_from_disk_messages(sid)
+                if derived:
+                    sess_nm = derived
+            rows.append(
+                {
+                    "session_id": sid,
+                    "avatar_id": metadata.get("avatar_id"),
+                    "avatar_name": metadata.get("avatar_name"),
+                    "session_name": sess_nm,
+                    "updated_at": updated_at,
+                    "created_at": created_at,
+                    "last_activity_at": last_activity_at,
+                    "pinned": bool(metadata.get("pinned", False)),
+                    "archived": bool(metadata.get("archived", False)),
+                    "execution_state": str(metadata.get("execution_state", "idle") or "idle"),
+                    "provider": str(metadata.get("provider", "") or ""),
+                    "model": str(metadata.get("model", "") or ""),
+                    "purpose": row_purpose or None,
+                    "purpose_scope": normalize_session_purpose_scope(
+                        metadata.get("purpose_scope")
+                    )
+                    or None,
+                    "permission_mode": normalize_permission_mode(
+                        metadata.get("permission_mode"),
+                        fallback=global_permission_mode(),
+                    ),
+                    "attachment_routing_lock": self._attachment_routing_lock_snapshot_from_raw(
+                        metadata.get("attachment_routing_lock")
+                    ),
+                    **self._active_taskspace_listing_fields(
+                        metadata.get("active_taskspace_id"),
+                        metadata.get("taskspaces"),
+                    ),
+                }
+            )
+        known = {str(row.get("session_id", "")) for row in rows}
+        skip_dirs = known | sqlite_skip
+        root = Path(self._sessions_root)
+        if root.exists():
+            for child in root.iterdir():
+                if not child.is_dir():
+                    continue
+                sid = child.name
+                if sid in skip_dirs:
+                    continue
+                messages_path = child / "messages.json"
+                fs_meta: dict[str, Any] = {}
+                try:
+                    loaded = self._session_store._load_latest_session_metadata_sync(sid)
+                    if isinstance(loaded, dict):
+                        fs_meta = loaded
+                except Exception:
+                    fs_meta = {}
+                raw_av = fs_meta.get("avatar_id")
+                av_norm = (
+                    None
+                    if raw_av is None
+                    else normalize_session_avatar_binding(str(raw_av))
+                )
+                if wanted is not None and av_norm != wanted:
+                    continue
+                row_purpose = normalize_session_purpose(fs_meta.get("purpose"))
+                if wanted_purpose:
+                    if not session_has_purpose(fs_meta, wanted_purpose, wanted_scope):
+                        continue
+                elif row_purpose:
+                    continue
+                if not wanted_purpose and not messages_path.exists():
+                    continue
+                if wanted_purpose:
+                    try:
+                        mtime = float(child.stat().st_mtime)
+                    except OSError:
+                        mtime = 0.0
+                else:
+                    try:
+                        content = messages_path.read_text(encoding="utf-8").strip()
+                        if not content or content == "[]":
+                            continue
+                    except Exception:
+                        continue
+                    mtime = float(messages_path.stat().st_mtime)
+                raw_nm = fs_meta.get("avatar_name")
+                av_name = None if raw_nm is None else (str(raw_nm).strip() or None)
+                sess_nm = self._sanitize_session_name(fs_meta.get("session_name"))
+                if self.session_title_needs_auto_fill(sess_nm):
+                    derived = self._derive_session_name_from_disk_messages(sid)
+                    if derived:
+                        sess_nm = derived
+                rows.append(
+                    {
+                        "session_id": sid,
+                        "avatar_id": av_norm,
+                        "avatar_name": av_name,
+                        "session_name": sess_nm,
+                        "updated_at": mtime,
+                        "created_at": mtime,
+                        "pinned": False,
+                        "archived": False,
+                        "execution_state": str(fs_meta.get("execution_state", "idle") or "idle"),
+                        "provider": str(fs_meta.get("provider", "") or ""),
+                        "model": str(fs_meta.get("model", "") or ""),
+                        "purpose": row_purpose or None,
+                        "purpose_scope": normalize_session_purpose_scope(
+                            fs_meta.get("purpose_scope")
+                        )
+                        or None,
+                        "permission_mode": normalize_permission_mode(
+                            fs_meta.get("permission_mode"),
+                            fallback=global_permission_mode(),
+                        ),
+                        "attachment_routing_lock": self._attachment_routing_lock_snapshot_from_raw(
+                            fs_meta.get("attachment_routing_lock")
+                        ),
+                        **self._active_taskspace_listing_fields(
+                            fs_meta.get("active_taskspace_id"),
+                            fs_meta.get("taskspaces"),
+                        ),
+                    }
+                )
+        return rows
+
+    def _purge_session_state(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        db_ok = False
+        try:
+            self._session_store._purge_session_sync(sid)
+            db_ok = not self._session_store._session_exists_sync(sid)
+        except Exception:
+            db_ok = False
+        fs_ok = True
+        session_dir = Path(self._sessions_root) / sid
+        if session_dir.exists():
+            try:
+                shutil.rmtree(session_dir, ignore_errors=False)
+            except Exception:
+                fs_ok = False
+            else:
+                fs_ok = not session_dir.exists()
+        taskspace_ok = True
+        default_taskspace_dir = Path(self._taskspaces_root) / sid
+        if default_taskspace_dir.exists():
+            try:
+                shutil.rmtree(default_taskspace_dir, ignore_errors=False)
+            except Exception:
+                taskspace_ok = False
+            else:
+                taskspace_ok = not default_taskspace_dir.exists()
+        return db_ok and fs_ok and taskspace_ok
+
+    def _session_exists_in_persistence(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        try:
+            metadata = self._session_store._load_latest_session_metadata_sync(sid)
+            if isinstance(metadata, dict) and metadata:
+                return True
+        except Exception:
+            pass
+        messages_path = Path(self._messages_path(sid))
+        return messages_path.exists()
+
+    def _iso_to_epoch(self, value: Any) -> float:
+        text = str(value or "").strip()
+        if not text:
+            return time.time()
+        try:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            return time.time()
+
+    def _ensure_default_taskspace(self, managed: ManagedSession) -> None:
+        for existing in managed.taskspaces:
+            if existing.get("id") == "default" and existing.get("path"):
+                existing["path"] = str(Path(existing["path"]).resolve(strict=False))
+                existing["label"] = existing.get("label") or "默认工作区"
+                return
+        session_ws = getattr(managed.studio_session, "workspace_dir", None)
+        default_path = (
+            session_ws
+            if session_ws and str(session_ws).strip()
+            else self._resolve_taskspace_root(managed.session_id, None)
+        )
+        resolved = Path(default_path).resolve(strict=False)
+        resolved.mkdir(parents=True, exist_ok=True)
+        managed.taskspaces = [{
+            "id": "default",
+            "label": "默认工作区",
+            "path": str(resolved),
+        }] + [item for item in managed.taskspaces if item.get("id") != "default"]
+
+    def _sync_taskspaces_with_global(
+        self, managed: ManagedSession, *, limit: int | None = None
+    ) -> None:
+        """Re-derive a session's taskspace list from the scope's global config.
+
+        ``limit`` should be precomputed by the caller when syncing multiple sessions
+        in a loop (see ``_sync_all_sessions_from_global``): resolving the limit reads
+        and parses ``config.yaml`` from disk, so recomputing it per-session (or per-row)
+        turns an O(1) lookup into O(sessions x rows) disk I/O.
+        """
+        effective_limit = limit if limit is not None else self._taskspace_limit()
+        self._ensure_default_taskspace(managed)
+        globals_rows = self._load_global_taskspaces(
+            scope_key=self._taskspace_scope_key_for_managed(managed)
+        )
+        default_item = self._get_taskspace(managed, "default")
+        if default_item is None:
+            return
+        merged: list[dict[str, str]] = [dict(default_item)]
+        seen_paths: set[str] = {default_item["path"]}
+        for row in globals_rows:
+            path = str(row.get("path", "")).strip()
+            if not path or path in seen_paths:
+                continue
+            merged.append(
+                {
+                    "id": str(row.get("id", "")).strip(),
+                    "label": str(row.get("label", "")).strip() or Path(path).name or "taskspace",
+                    "path": path,
+                }
+            )
+            seen_paths.add(path)
+            if len(merged) >= effective_limit:
+                break
+        managed.taskspaces = merged
+
+    def _sync_all_sessions_from_global(self, scope_key: str | None = None) -> None:
+        limit = self._taskspace_limit()
+        for managed in self._sessions.values():
+            if (
+                scope_key is not None
+                and self._taskspace_scope_key_for_managed(managed) != scope_key
+            ):
+                continue
+            self._sync_taskspaces_with_global(managed, limit=limit)
+
+    def _global_taskspaces_path(self) -> str:
+        return os.path.join(self._taskspaces_root, "global_workspaces.json")
+
+    @staticmethod
+    def _taskspace_scope_key_from_avatar_id(avatar_id: Optional[str]) -> str:
+        normalized = normalize_session_avatar_binding(avatar_id)
+        if normalized is None:
+            return SessionManager._META_TASKSPACE_SCOPE
+        return f"avatar:{normalized}"
+
+    def _taskspace_scope_key_for_managed(self, managed: ManagedSession) -> str:
+        return self._taskspace_scope_key_from_avatar_id(getattr(managed, "avatar_id", None))
+
+    @staticmethod
+    def _taskspace_path_key(path: str) -> str:
+        """Return a stable comparison key for local workspace paths."""
+        return os.path.normcase(os.path.normpath(str(path or "").strip()))
+
+    def _canonical_taskspace_path(self, path: str | None) -> str:
+        """Canonicalize a user-selected path without creating it."""
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).expanduser().resolve(strict=False))
+        except OSError:
+            # Keep picker registration resilient to a disconnected volume or a
+            # path whose parent cannot currently be stat'ed.
+            return os.path.abspath(os.path.expanduser(raw))
+
+    def _taskspace_catalog_path(self) -> str:
+        return os.path.join(self._taskspaces_root, "workspace_catalog.json")
+
+    @staticmethod
+    def _catalog_id_for_path(path: str) -> str:
+        return f"workspace-{uuid.uuid5(uuid.NAMESPACE_URL, path).hex[:12]}"
+
+    @staticmethod
+    def _catalog_row_is_user_workspace(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        taskspace_id = str(row.get("id", "")).strip()
+        if taskspace_id == "default":
+            return False
+        label = str(row.get("label", "")).strip()
+        path = str(row.get("path", "")).strip().replace("\\", "/").rstrip("/")
+        # Artifact mounts are implementation details, not folders a user chose
+        # in the workspace picker and should not pollute the durable catalog.
+        return bool(path) and label != "任务产物" and not path.endswith("/task_artifacts")
+
+    def _normalize_taskspace_catalog_rows(self, payload: Any) -> list[dict[str, Any]]:
+        if isinstance(payload, dict):
+            payload = payload.get("workspaces", payload.get("rows", []))
+        if not isinstance(payload, list):
+            return []
+        rows: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+        used_ids: set[str] = set()
+        for item in payload:
+            if not self._catalog_row_is_user_workspace(item):
+                continue
+            resolved_path = self._canonical_taskspace_path(item.get("path"))
+            path_key = self._taskspace_path_key(resolved_path)
+            if not resolved_path or path_key in seen_paths:
+                continue
+            taskspace_id = str(item.get("id", "")).strip()
+            if not taskspace_id or taskspace_id == "default" or taskspace_id in used_ids:
+                taskspace_id = self._catalog_id_for_path(resolved_path)
+                if taskspace_id in used_ids:
+                    taskspace_id = f"workspace-{uuid.uuid4().hex[:12]}"
+            try:
+                last_used_at = float(item.get("last_used_at") or item.get("updated_at") or 0.0)
+            except (TypeError, ValueError):
+                last_used_at = 0.0
+            rows.append(
+                {
+                    "id": taskspace_id,
+                    "label": str(item.get("label", "")).strip()
+                    or Path(resolved_path).name
+                    or "taskspace",
+                    "path": resolved_path,
+                    "last_used_at": last_used_at if last_used_at > 0 else 0.0,
+                }
+            )
+            seen_paths.add(path_key)
+            used_ids.add(taskspace_id)
+        return rows
+
+    def _read_taskspace_catalog_payload(self) -> list[dict[str, Any]]:
+        path = self._taskspace_catalog_path()
+        if not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except (OSError, json.JSONDecodeError, TypeError):
+            return []
+        return self._normalize_taskspace_catalog_rows(payload)
+
+    def _save_taskspace_catalog_rows(self, rows: list[dict[str, Any]]) -> None:
+        normalized = self._normalize_taskspace_catalog_rows(rows)
+        payload = {
+            "version": TASKSPACE_CATALOG_VERSION,
+            "workspaces": [
+                {
+                    "id": str(row["id"]),
+                    "label": str(row["label"]),
+                    "path": str(row["path"]),
+                    "last_used_at": float(row.get("last_used_at") or 0.0),
+                }
+                for row in normalized
+            ],
+        }
+        atomic_write_json(self._taskspace_catalog_path(), payload)
+
+    def _load_taskspace_catalog_rows(self) -> list[dict[str, Any]]:
+        return self._read_taskspace_catalog_payload()
+
+    def _normalize_global_taskspace_rows(self, payload: Any) -> list[dict[str, str]]:
+        if not isinstance(payload, list):
+            return []
+        rows: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            taskspace_id = str(item.get("id", "")).strip()
+            raw_path = str(item.get("path", "")).strip()
+            if not taskspace_id or not raw_path:
+                continue
+            resolved_path = self._resolve_taskspace_path(raw_path)
+            if resolved_path in seen_paths:
+                continue
+            rows.append(
+                {
+                    "id": taskspace_id,
+                    "label": str(item.get("label", "")).strip()
+                    or Path(resolved_path).name
+                    or "taskspace",
+                    "path": resolved_path,
+                }
+            )
+            seen_paths.add(resolved_path)
+            if len(rows) >= max(0, self._taskspace_limit() - 1):
+                break
+        return rows
+
+    def _load_global_taskspace_scopes(self) -> dict[str, list[dict[str, str]]]:
+        path = self._global_taskspaces_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
+        except Exception:
+            return {}
+
+        # Backward compatibility: old payload was a plain list shared by all sessions.
+        if isinstance(payload, list):
+            return {
+                self._META_TASKSPACE_SCOPE: self._normalize_global_taskspace_rows(payload)
+            }
+
+        if not isinstance(payload, dict):
+            return {}
+        raw_scopes = payload.get("scopes", payload)
+        if not isinstance(raw_scopes, dict):
+            return {}
+
+        scopes: dict[str, list[dict[str, str]]] = {}
+        for key, rows in raw_scopes.items():
+            scope_key = str(key or "").strip()
+            if not scope_key:
+                continue
+            normalized_rows = self._normalize_global_taskspace_rows(rows)
+            if normalized_rows:
+                scopes[scope_key] = normalized_rows
+        return scopes
+
+    def _load_global_taskspaces(self, scope_key: str | None = None) -> list[dict[str, str]]:
+        key = (scope_key or "").strip() or self._META_TASKSPACE_SCOPE
+        scopes = self._load_global_taskspace_scopes()
+        return [dict(item) for item in scopes.get(key, [])]
+
+    def _save_global_taskspaces(
+        self,
+        rows: list[dict[str, str]],
+        scope_key: str | None = None,
+    ) -> None:
+        key = (scope_key or "").strip() or self._META_TASKSPACE_SCOPE
+        scopes = self._load_global_taskspace_scopes()
+        normalized_rows = self._normalize_global_taskspace_rows(rows)
+        if normalized_rows:
+            scopes[key] = normalized_rows
+        else:
+            scopes.pop(key, None)
+        path = self._global_taskspaces_path()
+        atomic_write_json(path, {"scopes": scopes})
+
+    def _resolve_taskspace_path(self, path: str) -> str:
+        root = Path(str(path).strip()).expanduser()
+        resolved = root.resolve(strict=False)
+        resolved.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+
+    def _resolve_taskspace_root(self, session_id: str, path: str | None) -> str:
+        if path and str(path).strip():
+            return self._resolve_taskspace_path(path)
+        root = Path(self._taskspaces_root) / session_id / "default"
+        resolved = root.resolve(strict=False)
+        resolved.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
+
+    def rebind_default_taskspace_to_workspace(self, managed: ManagedSession) -> None:
+        """Re-point the 'default' taskspace to the session's workspace_dir (call after workspace_dir is set)."""
+        ws = getattr(managed.studio_session, "workspace_dir", None)
+        if not ws or not str(ws).strip():
+            return
+        resolved = str(Path(ws).resolve(strict=False))
+        for ts in managed.taskspaces:
+            if ts.get("id") == "default":
+                if ts["path"] != resolved:
+                    Path(resolved).mkdir(parents=True, exist_ok=True)
+                    ts["path"] = resolved
+                return
+
+    def apply_session_workspace_dir(
+        self,
+        managed: ManagedSession,
+        *,
+        avatar_workspace_dir: str | None = None,
+    ) -> None:
+        """Set the session workspace and keep its default TaskSpace in sync.
+
+        The environment assistant is a dedicated Meta surface, but its tools
+        must inspect the user's selected workspace.  Ordinary Meta sessions
+        continue to use an isolated per-session scratch root.
+        """
+        from agenticx.workspace.loader import (
+            resolve_default_session_workspace_dir,
+            resolve_workspace_dir,
+        )
+
+        avatar_raw = (avatar_workspace_dir or "").strip()
+        if avatar_raw:
+            resolved = resolve_default_session_workspace_dir(
+                avatar_workspace_dir=avatar_raw,
+            )
+        elif normalize_session_purpose(getattr(managed, "purpose", None)) == ENVIRONMENT_ASSISTANT_PURPOSE:
+            # ``AGX_WORKSPACE_ROOT`` is a process-start fallback.  The Desktop
+            # settings route can update config.yaml while this backend stays
+            # alive, so a dedicated session must read the live configured root
+            # instead of retaining the stale startup environment value.
+            resolved = resolve_workspace_dir()
+        elif not str(getattr(managed, "avatar_id", "") or "").strip():
+            # Meta sessions: isolate work under $AGX_HOME/taskspaces/<sid>/default
+            resolved = Path(self._resolve_taskspace_root(managed.session_id, None))
+        else:
+            resolved = resolve_default_session_workspace_dir()
+        managed.studio_session.workspace_dir = str(resolved)
+        self.rebind_default_taskspace_to_workspace(managed)
+
+    def align_meta_session_workspace(self, managed: ManagedSession) -> None:
+        """Keep Meta sessions on their intended workspace.
+
+        The environment assistant follows the current configured workspace so
+        a restart or a reused session cannot silently fall back to its private
+        ``$AGX_HOME/taskspaces/<sid>/default`` directory.  Other Meta
+        sessions retain their isolated scratch root.
+        """
+        if str(getattr(managed, "avatar_id", "") or "").strip():
+            return
+        if normalize_session_purpose(getattr(managed, "purpose", None)) == ENVIRONMENT_ASSISTANT_PURPOSE:
+            from agenticx.workspace.loader import resolve_workspace_dir
+
+            # Re-read the saved Desktop workspace on every acquisition/chat;
+            # AGX_WORKSPACE_ROOT may be stale after an in-process settings
+            # change.
+            session_root = str(resolve_workspace_dir())
+        else:
+            session_root = self._resolve_taskspace_root(managed.session_id, None)
+        managed.studio_session.workspace_dir = session_root
+        self._ensure_default_taskspace(managed)
+        for ts in managed.taskspaces:
+            if ts.get("id") == "default":
+                ts["path"] = session_root
+                ts["label"] = ts.get("label") or "默认工作区"
+                return
+
+    def apply_avatar_binding(
+        self,
+        managed: ManagedSession,
+        *,
+        avatar_id: Optional[str],
+        avatar_name: Optional[str] = None,
+    ) -> None:
+        """Bind session avatar identity without mutating per-session workspaces.
+
+        Attached folders are owned by the session metadata. Binding an avatar must
+        not pull or replace that list from legacy global_workspaces.json scopes.
+        """
+        managed.avatar_id = normalize_session_avatar_binding(avatar_id)
+        managed.avatar_name = (str(avatar_name).strip() or None) if avatar_name is not None else None
+        self._ensure_default_taskspace(managed)
+
+    def _sanitize_taskspaces(self, session_id: str, payload: Any) -> list[dict[str, str]]:
+        limit = self._taskspace_limit()
+        rows: list[dict[str, str]] = []
+        if isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                taskspace_id = str(item.get("id", "")).strip()
+                label = str(item.get("label", "")).strip()
+                path = str(item.get("path", "")).strip()
+                if not taskspace_id or not path:
+                    continue
+                resolved_path = self._resolve_taskspace_root(session_id, path)
+                mode = str(item.get("mount_mode") or "link").strip().lower()
+                if mode not in {"reference", "copy", "link"}:
+                    mode = "link"
+                source_path = str(item.get("source_path") or "").strip()
+                linked_at_raw = item.get("linked_at")
+                try:
+                    linked_at = float(linked_at_raw) if linked_at_raw is not None else 0.0
+                except (TypeError, ValueError):
+                    linked_at = 0.0
+                row: dict[str, Any] = {
+                    "id": taskspace_id,
+                    "label": label or Path(resolved_path).name or "taskspace",
+                    "path": resolved_path,
+                    "mount_mode": mode,
+                }
+                if source_path:
+                    row["source_path"] = source_path
+                if linked_at:
+                    row["linked_at"] = linked_at
+                rows.append(row)  # type: ignore[arg-type]
+                if len(rows) >= limit:
+                    break
+        if not rows:
+            return []
+        dedup: list[dict[str, str]] = []
+        seen_paths: set[str] = set()
+        for row in rows:
+            row_path = row["path"]
+            if row_path in seen_paths:
+                continue
+            # Historical rows without mount_mode fall back to "link".
+            if "mount_mode" not in row:
+                row = {**row, "mount_mode": "link"}
+            dedup.append(row)
+            seen_paths.add(row_path)
+            if len(dedup) >= limit:
+                break
+        return dedup
+
+    def _get_taskspace(self, managed: ManagedSession, taskspace_id: str) -> Optional[dict[str, str]]:
+        for item in managed.taskspaces:
+            if item.get("id") == taskspace_id:
+                return item
+        return None
+
+    @staticmethod
+    def _normalize_rel_parts(rel_path: str) -> list[str]:
+        """Normalize a relative path into parts; reject absolute / ``..`` escape."""
+        clean_rel = str(rel_path or ".").strip() or "."
+        rel = Path(clean_rel)
+        if rel.is_absolute():
+            raise ValueError("path escapes taskspace root")
+        parts: list[str] = []
+        for part in rel.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                if not parts:
+                    raise ValueError("path escapes taskspace root")
+                parts.pop()
+                continue
+            parts.append(part)
+        return parts
+
+    def _resolve_inside_root(self, root: Path, rel_path: str, *, expect_dir: bool) -> Path:
+        """Resolve ``rel_path`` under ``root`` without treating outbound symlinks as escape.
+
+        Containment is lexical (path under root before following the final symlink
+        target). I/O callers may then ``stat``/``open`` and follow symlinks.
+        """
+        root_resolved = Path(root).expanduser().resolve(strict=False)
+        parts = self._normalize_rel_parts(rel_path)
+        joined = root_resolved.joinpath(*parts) if parts else root_resolved
+        # Normpath can collapse extra separators; still must stay under root.
+        joined_norm = Path(os.path.normpath(str(joined)))
+        try:
+            joined_norm.relative_to(root_resolved)
+        except ValueError as exc:
+            raise ValueError("path escapes taskspace root") from exc
+        # Prefer the normed path for subsequent checks.
+        target = joined_norm
+        if not target.exists() and not target.is_symlink():
+            raise FileNotFoundError(str(target))
+        if expect_dir and not target.is_dir():
+            raise NotADirectoryError(str(target))
+        return target

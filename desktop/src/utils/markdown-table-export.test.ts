@@ -1,0 +1,42 @@
+import assert from "node:assert/strict";
+import { test } from "vitest";
+import { extractTableRows, rowsToCsv, rowsToMarkdown, rowsToTsv } from "./markdown-table-export";
+
+test("extractTableRows reads header and body cells", () => {
+  const mkCell = (text: string) => ({ textContent: text });
+  const mkRow = (texts: string[]) => ({
+    querySelectorAll: (sel: string) => (sel === "th, td" ? texts.map(mkCell) : []),
+  });
+  const table = {
+    querySelectorAll: (sel: string) =>
+      sel === "tr" ? [mkRow(["A", "B"]), mkRow(["1", "2"])] : [],
+  } as unknown as HTMLTableElement;
+
+  assert.deepEqual(extractTableRows(table), [
+    ["A", "B"],
+    ["1", "2"],
+  ]);
+});
+
+test("rowsToCsv escapes commas and quotes", () => {
+  const csv = rowsToCsv([
+    ["name", "note"],
+    ["foo", 'say "hi", world'],
+  ]);
+  assert.ok(csv.startsWith("\uFEFF"));
+  assert.match(csv, /"say ""hi"", world"/);
+});
+
+test("rowsToMarkdown builds markdown table", () => {
+  assert.equal(
+    rowsToMarkdown([
+      ["差距维度", "优先级"],
+      ["信息摄入", "P0"],
+    ]),
+    "| 差距维度 | 优先级 |\n| --- | --- |\n| 信息摄入 | P0 |",
+  );
+});
+
+test("rowsToTsv sanitizes cell line breaks for spreadsheet paste", () => {
+  assert.equal(rowsToTsv([["name", "note"], ["foo", "line 1\nline 2"]]), "name\tnote\nfoo\tline 1 line 2");
+});

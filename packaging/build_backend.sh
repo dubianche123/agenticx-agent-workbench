@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Build PyInstaller agx-server binary for one macOS architecture.
+# Usage: packaging/build_backend.sh [arm64|x64]
+# Author: Damon Li
+
+set -euo pipefail
+
+ARCH="${1:-arm64}"
+if [[ "$ARCH" != "arm64" && "$ARCH" != "x64" ]]; then
+  echo "Usage: $0 [arm64|x64]"
+  exit 1
+fi
+
+WHEELHOUSE="${AGX_BACKEND_WHEELHOUSE:-}"
+OFFLINE_BUILD="${AGX_OFFLINE_BUILD:-${AGX_OFFLINE_INSTALL:-${AGX_NO_NETWORK:-0}}}"
+PIP_OFFLINE_ARGS=()
+if [[ -n "$WHEELHOUSE" ]]; then
+  [[ -d "$WHEELHOUSE" ]] || { echo "✗ AGX_BACKEND_WHEELHOUSE is not a directory: $WHEELHOUSE"; exit 1; }
+  PIP_OFFLINE_ARGS=(--no-index --find-links "$WHEELHOUSE" --prefer-binary)
+  echo "=== Using Python wheelhouse: $WHEELHOUSE ==="
+fi
+if [[ "$OFFLINE_BUILD" == "1" || "$OFFLINE_BUILD" == "true" || "$OFFLINE_BUILD" == "yes" || "$OFFLINE_BUILD" == "on" ]]; then
+  [[ -n "$WHEELHOUSE" ]] || { echo "✗ Offline build requested but AGX_BACKEND_WHEELHOUSE is not set."; exit 1; }
+  OFFLINE_BUILD=1
+else
+  OFFLINE_BUILD=0
+fi
+
+pick_python() {
+  for c in python3.13 python3.12 python3.11 python3.10 python3; do
+    if command -v "$c" &>/dev/null; then
+      if "$c" -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+        echo "$c"
+        return 0
+      fi
+    fi
+  done
+  return 1
+}
+
+PYTHON_BIN="$(pick_python)" || {
+  echo "✗ Need Python >= 3.10 on PATH (e.g. python3.12). Got: $(command -v python3 || true)"
+  exit 1
+}
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+DIST_DIR="$SCRIPT_DIR/dist/$ARCH"
+WORK_DIR="$SCRIPT_DIR/build/$ARCH"
+PY_DIR="$SCRIPT_DIR/pyinstaller"
+VENV="$SCRIPT_DIR/.venv-packaging"
+
+echo "=== Building agx-server for $ARCH ==="
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  "$PYTHON_BIN" -m venv "$VENV"
+fi
+VPY="$VENV/bin/python"
+VPIP="$VENV/bin/pip"
+
+if [[ "$OFFLINE_BUILD" != "1" && -z "$WHEELHOUSE" ]]; then
+  "$VPIP" install -q -U pip
+fi
+"$VPIP" install -q "${PIP_OFFLINE_ARGS[@]}" pyinstaller
+# Non-editable install so PyInstaller sees a real site-packages tree (editable can miss subpackages).
+# Use the `desktop-runtime` extras so the bundled exe ships with PDF / Office
+# readers and numpy (issue #10: "Document ingestion fails for PDF files").
+"$VPIP" uninstall -y agenticx 2>/dev/null || true
+"$VPIP" install -q "${PIP_OFFLINE_ARGS[@]}" "${PROJECT_ROOT}[desktop-runtime]"
+"$VPY" - <<'PY'
+import importlib
+import sys
+
+required = ("numpy",)
+missing = []
+for name in required:
+    try:
+        importlib.import_module(name)
+    except Exception:
+        missing.append(name)
+pdf_ok = False
+for pdf_mod in ("fitz", "pypdf"):
+    try:
+        importlib.import_module(pdf_mod)
+        pdf_ok = True
+        break
+    except Exception:
+        pass
+if not pdf_ok:
+    missing.append("pdf (fitz or pypdf)")
+
+if missing:
+    print(f"✗ Missing desktop-runtime deps in packaging venv: {', '.join(missing)}")
+    sys.exit(1)
+
+print("✓ desktop-runtime dependency import check passed")
+PY
+
+cd "$PY_DIR"
+
+"$VPY" -m PyInstaller agx_serve.spec \
+  --distpath "$DIST_DIR" \
+  --workpath "$WORK_DIR" \
+  --clean \
+  --noconfirm
+
+BINARY="$DIST_DIR/agx-server"
+if [[ ! -x "$BINARY" ]]; then
+  echo "✗ Expected binary not found or not executable: $BINARY"
+  exit 1
+fi
+
+echo "=== Built: $BINARY ($(du -sh "$BINARY" | cut -f1)) ==="
+
+echo "=== Bundled runtime dependency check ==="
+"$BINARY" --check-desktop-runtime
+
+echo "=== Smoke test ==="
+FREE_PORT="$("$VPY" -c "import socket; s=socket.socket(); s.bind(('127.0.0.1',0)); p=s.getsockname()[1]; s.close(); print(p)")"
+AGX_DESKTOP_TOKEN="" "$BINARY" --host 127.0.0.1 --port "$FREE_PORT" &
+PID=$!
+cleanup() {
+  kill "$PID" 2>/dev/null || true
+  wait "$PID" 2>/dev/null || true
+}
+trap cleanup EXIT
+CODE="000"
+for _i in $(seq 1 60); do
+  if ! kill -0 "$PID" 2>/dev/null; then
+    echo "✗ agx-server exited early"
+    exit 1
+  fi
+  # Avoid HTTP(S)_PROXY routing localhost through a proxy (often yields 502).
+  CODE="$(curl --noproxy '*' -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${FREE_PORT}/api/session" 2>/dev/null || echo "000")"
+  if [[ "$CODE" == "200" ]]; then
+    break
+  fi
+  sleep 1
+done
+if [[ "$CODE" != "200" ]]; then
+  echo "✗ /api/session expected 200, got $CODE (after up to 60s wait)"
+  exit 1
+fi
+echo "✓ agx-server smoke test passed"

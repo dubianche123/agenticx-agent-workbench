@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">AgenticX Ontology</title>
+  <desc id="desc">Connected nodes mark</desc>
+  <defs>
+    <linearGradient id="agx-gradient" x1="48" y1="48" x2="208" y2="208" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+  <rect x="16" y="16" width="224" height="224" rx="56" fill="#0f172a"/>
+  <g fill="none" stroke="url(#agx-gradient)" stroke-width="12" stroke-linecap="round">
+    <path d="M128 66v38M83 92l29 25M173 92l-29 25M92 187l28-30M164 187l-28-30"/>
+  </g>
+  <g fill="url(#agx-gradient)" stroke="#e2e8f0" stroke-width="4">
+    <circle cx="128" cy="58" r="13"/>
+    <circle cx="76" cy="86" r="13"/>
+    <circle cx="180" cy="86" r="13"/>
+    <circle cx="88" cy="198" r="13"/>
+    <circle cx="168" cy="198" r="13"/>
+    <circle cx="128" cy="128" r="29"/>
+  </g>
+</svg>

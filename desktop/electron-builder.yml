@@ -1,0 +1,65 @@
+appId: com.agenticx.ontology
+productName: AgenticX Ontology
+directories:
+  output: release
+files:
+  - dist/**/*
+  - dist-electron/**/*
+extraResources:
+  - assets/**/*
+  # The neutral renderer is bundled before electron-builder runs. Keeping an
+  # explicit resource entry makes the runtime contract independent of asar
+  # file globs and is verified by the afterPack hook.
+  - from: dist-electron/document-renderer-runtime.cjs
+    to: document-renderer-runtime.cjs
+afterPack: scripts/verify-bundled-backend.js  # 漏打内嵌后端时直接 fail（含本地手工出包）
+# 签名/公证见 electron-builder.signing.yml（CI 注入 CSC_LINK 时自动切换）
+dmg:
+  title: "${productName}"
+  background: assets/dmg-background.png
+  window:
+    width: 640
+    height: 380
+  iconSize: 86
+  iconTextSize: 12
+  contents:
+    - x: 160
+      y: 258
+      type: file
+    - x: 480
+      y: 258
+      type: link
+      path: /Applications
+mac:
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+  target:
+    - target: dmg
+  icon: assets/icon.icns
+  category: public.app-category.developer-tools
+  identity: null
+  gatekeeperAssess: false
+  extraResources:
+    - from: bundled-backend/${arch}
+      to: backend
+      filter:
+        - "**/*"
+      # An optional wheelhouse under this directory is shipped too. The
+      # bundled backend remains self-contained; the wheelhouse is only used by
+      # the settings repair flow when a platform-specific Python dependency is
+      # missing.
+win:
+  artifactName: "${productName}-${version}-win-x64.${ext}"
+  target:
+    - nsis
+  icon: assets/icon.ico
+  extraResources:
+    - from: bundled-backend/win-amd64
+      to: backend
+      filter:
+        - "**/*"
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+linux:
+  target:
+    - AppImage

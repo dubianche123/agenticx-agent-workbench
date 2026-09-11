@@ -1,0 +1,238 @@
+import { JwtService } from "./jwt";
+import { hashPassword, verifyPassword } from "./password";
+import {
+  buildLoginFailureDetails,
+  LoginFailureError,
+  MAX_FAILED_LOGIN_ATTEMPTS,
+  LOGIN_LOCK_MINUTES,
+} from "./login-policy";
+import type {
+  AuthContext,
+  AuthTokens,
+  AuthUser,
+  AuthUserRepository,
+  LoginInput,
+  RefreshSession,
+  RefreshTokenStore,
+} from "../types";
+
+export class InMemoryRefreshTokenStore implements RefreshTokenStore {
+  private readonly sessions = new Map<string, RefreshSession>();
+
+  public async set(session: RefreshSession): Promise<void> {
+    this.sessions.set(session.sessionId, session);
+  }
+
+  public async get(sessionId: string): Promise<RefreshSession | null> {
+    const session = this.sessions.get(sessionId);
+    if (!session) return null;
+    if (session.expiresAt <= Date.now()) {
+      this.sessions.delete(sessionId);
+      return null;
+    }
+    return session;
+  }
+
+  public async delete(sessionId: string): Promise<void> {
+    this.sessions.delete(sessionId);
+  }
+}
+
+export class InMemoryAuthUserRepository implements AuthUserRepository {
+  private readonly users = new Map<string, AuthUser>();
+
+  public constructor(seedUsers: AuthUser[] = []) {
+    for (const user of seedUsers) {
+      this.users.set(user.email.toLowerCase(), user);
+    }
+  }
+
+  public async findByEmail(email: string): Promise<AuthUser | null> {
+    return this.users.get(email.toLowerCase()) ?? null;
+  }
+
+  public async updateFailedLogin(email: string, nextFailedCount: number, lockedUntil: number | null): Promise<void> {
+    const key = email.toLowerCase();
+    const current = this.users.get(key);
+    if (!current) return;
+    this.users.set(key, {
+      ...current,
+      failedLoginCount: nextFailedCount,
+      lockedUntil,
+      status: lockedUntil && lockedUntil > Date.now() ? "locked" : current.status,
+    });
+  }
+
+  public async resetFailedLogin(email: string): Promise<void> {
+    const key = email.toLowerCase();
+    const current = this.users.get(key);
+    if (!current) return;
+    this.users.set(key, {
+      ...current,
+      failedLoginCount: 0,
+      lockedUntil: null,
+      status: current.status === "locked" ? "active" : current.status,
+    });
+  }
+
+  public async updatePasswordAndClearRequirement(email: string, passwordHash: string): Promise<AuthUser | null> {
+    const key = email.toLowerCase();
+    const current = this.users.get(key);
+    if (!current) return null;
+    const updated: AuthUser = {
+      ...current,
+      passwordHash,
+      mustChangePassword: false,
+      failedLoginCount: 0,
+      lockedUntil: null,
+      status: "active",
+    };
+    this.users.set(key, updated);
+    return updated;
+  }
+}
+
+type AuthServiceDeps = {
+  userRepo: AuthUserRepository;
+  jwtService: JwtService;
+  refreshStore?: RefreshTokenStore;
+};
+
+export class AuthService {
+  private readonly userRepo: AuthUserRepository;
+  private readonly jwtService: JwtService;
+  private readonly refreshStore: RefreshTokenStore;
+
+  public constructor(deps: AuthServiceDeps) {
+    this.userRepo = deps.userRepo;
+    this.jwtService = deps.jwtService;
+    this.refreshStore = deps.refreshStore ?? new InMemoryRefreshTokenStore();
+  }
+
+  private toContext(user: AuthUser): AuthContext {
+    return {
+      userId: user.id,
+      tenantId: user.tenantId,
+      deptId: user.deptId ?? null,
+      email: user.email,
+      scopes: user.scopes,
+      mustChangePassword: user.mustChangePassword,
+      sessionId: `${user.id}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    };
+  }
+
+  private async issueTokens(context: AuthContext): Promise<AuthTokens> {
+    const access = await this.jwtService.signAccessToken(context);
+    const refresh = await this.jwtService.signRefreshToken(context);
+
+    await this.refreshStore.set({
+      sessionId: context.sessionId,
+      userId: context.userId,
+      tenantId: context.tenantId,
+      deptId: context.deptId ?? null,
+      email: context.email,
+      scopes: context.scopes,
+      mustChangePassword: context.mustChangePassword,
+      expiresAt: Date.now() + refresh.expiresInSeconds * 1000,
+    });
+
+    return {
+      accessToken: access.token,
+      refreshToken: refresh.token,
+      tokenType: "Bearer",
+      expiresInSeconds: access.expiresInSeconds,
+      mustChangePassword: context.mustChangePassword,
+    };
+  }
+
+  public async loginWithPassword(input: LoginInput): Promise<AuthTokens> {
+    const user = await this.userRepo.findByEmail(input.email);
+    if (!user) throw new Error("Invalid credentials.");
+    if (user.status === "disabled") throw new Error("Account disabled.");
+    const now = Date.now();
+    const hasActiveLock = Boolean(user.lockedUntil && user.lockedUntil > now);
+    const hasManualLock = user.status === "locked" && !user.lockedUntil;
+    if (hasActiveLock || hasManualLock) {
+      throw new LoginFailureError(
+        "Account temporarily locked.",
+        buildLoginFailureDetails(
+          hasManualLock ? MAX_FAILED_LOGIN_ATTEMPTS : user.failedLoginCount,
+          hasActiveLock ? user.lockedUntil ?? null : null,
+          now,
+        ),
+      );
+    }
+
+    const isValidPassword = await verifyPassword(input.password, user.passwordHash);
+    if (!isValidPassword) {
+      const failedCount = user.failedLoginCount + 1;
+      const shouldLock = failedCount >= MAX_FAILED_LOGIN_ATTEMPTS;
+      const lockedUntil = shouldLock ? now + LOGIN_LOCK_MINUTES * 60 * 1000 : null;
+      await this.userRepo.updateFailedLogin(user.email, failedCount, lockedUntil);
+      throw new LoginFailureError(
+        shouldLock ? "Account temporarily locked." : "Invalid credentials.",
+        buildLoginFailureDetails(failedCount, lockedUntil, now),
+      );
+    }
+
+    await this.userRepo.resetFailedLogin(user.email);
+    const context = this.toContext(user);
+    return this.issueTokens(context);
+  }
+
+  public async verifyAccess(token: string): Promise<AuthContext | null> {
+    return this.jwtService.verifyAccessToken(token);
+  }
+
+  public async refresh(refreshToken: string): Promise<AuthTokens> {
+    const refreshContext = await this.jwtService.verifyRefreshToken(refreshToken);
+    if (!refreshContext) throw new Error("Invalid refresh token.");
+
+    const stored = await this.refreshStore.get(refreshContext.sessionId);
+    if (!stored || stored.userId !== refreshContext.userId || stored.tenantId !== refreshContext.tenantId) {
+      throw new Error("Refresh session expired.");
+    }
+
+    const user = await this.userRepo.findByEmail(refreshContext.email);
+    if (!user || user.tenantId !== refreshContext.tenantId) {
+      throw new Error("Refresh session expired.");
+    }
+    if (user.status === "disabled" || user.status === "locked" || (user.lockedUntil && user.lockedUntil > Date.now())) {
+      throw new Error("Refresh session expired.");
+    }
+
+    return this.issueTokens({
+      ...refreshContext,
+      userId: user.id,
+      tenantId: user.tenantId,
+      deptId: user.deptId ?? null,
+      email: user.email,
+      scopes: user.scopes,
+      mustChangePassword: user.mustChangePassword,
+    });
+  }
+
+  public async completeRequiredPasswordChange(input: {
+    context: AuthContext;
+    newPassword: string;
+  }): Promise<AuthTokens> {
+    if (!input.context.mustChangePassword) {
+      throw new Error("Password change is not required.");
+    }
+
+    const passwordHash = await hashPassword(input.newPassword);
+    const updatedUser = await this.userRepo.updatePasswordAndClearRequirement(
+      input.context.email,
+      passwordHash,
+    );
+    if (!updatedUser || updatedUser.tenantId !== input.context.tenantId) {
+      throw new Error("Account unavailable.");
+    }
+
+    await this.refreshStore.delete(input.context.sessionId);
+    return this.issueTokens({
+      ...this.toContext(updatedUser),
+      mustChangePassword: false,
+    });
+  }
+}

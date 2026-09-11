@@ -1,0 +1,96 @@
+:root[data-theme="dim"] {
+  color-scheme: dark;
+  --text-primary: #d9dce1;
+  --text-strong: #f6f7f9;
+  --text-muted: rgba(225, 229, 236, 0.72);
+  --text-subtle: rgba(225, 229, 236, 0.58);
+  --text-faint: rgba(225, 229, 236, 0.42);
+
+  --surface-base: #2a2a2e;
+  --surface-base-fallback: #2a2a2e;
+  --surface-panel: rgba(42, 42, 46, 0.82);
+  --surface-popover: #323238;
+  --surface-sidebar: rgba(47, 47, 52, 0.82);
+  --surface-topbar: rgba(47, 47, 52, 0.82);
+  --surface-messages: transparent;
+  --surface-composer: rgba(50, 50, 55, 0.88);
+  --chat-followup-chip-bg: rgba(255, 255, 255, 0.08);
+  --chat-followup-chip-bg-hover: rgba(255, 255, 255, 0.12);
+  --chat-followup-chip-border: var(--border-subtle);
+  --surface-card: rgba(255, 255, 255, 0.035);
+  --surface-card-strong: rgba(255, 255, 255, 0.1);
+  --surface-hover: rgba(255, 255, 255, 0.075);
+  --surface-bubble: rgba(255, 255, 255, 0.1);
+  --surface-bubble-user: rgba(91, 157, 255, 0.36);
+  --chat-im-user-bg: rgba(34, 197, 94, 0.32);
+  --chat-im-user-border: rgba(74, 222, 128, 0.18);
+  --chat-im-user-text: #ecfff3;
+  --chat-im-assistant-bg: rgba(255, 255, 255, 0.08);
+  --chat-im-assistant-border: rgba(255, 255, 255, 0.11);
+  --chat-im-assistant-text: var(--text-primary);
+  --chat-im-avatar-bg: rgba(255, 255, 255, 0.11);
+  --settings-accent-subtle-bg: rgba(255, 255, 255, 0.055);
+  --settings-accent-subtle-bg-hover: rgba(255, 255, 255, 0.1);
+  --settings-accent-row-bg: rgba(255, 255, 255, 0.1);
+  --settings-accent-fg: rgba(246, 247, 249, 0.9);
+  --settings-accent-fg-muted: rgba(225, 229, 236, 0.78);
+  --settings-accent-border-muted: rgba(255, 255, 255, 0.3);
+  --settings-accent-border-strong: rgba(255, 255, 255, 0.4);
+  --settings-accent-solid: rgba(var(--theme-color-rgb), 1);
+  --settings-accent-solid-hover: rgba(var(--theme-color-rgb), 0.9);
+  --settings-accent-solid-text: var(--theme-color-text);
+  --settings-accent-badge-bg: rgba(255, 255, 255, 0.11);
+  --settings-accent-focus: rgba(255, 255, 255, 0.42);
+  --settings-accent-progress: #94a3b8;
+  --chat-terminal-user: #96f7bf;
+  --chat-terminal-assistant: #deebff;
+  --chat-terminal-meta: rgba(203, 213, 225, 0.78);
+  --chat-clean-user-accent: rgba(110, 231, 183, 0.95);
+  --chat-clean-user-bg: rgba(16, 185, 129, 0.1);
+  --chat-clean-assistant-bg: rgba(255, 255, 255, 0.035);
+  --chat-clean-assistant-border: rgba(255, 255, 255, 0.075);
+
+  --border-subtle: rgba(255, 255, 255, 0.12);
+  --border-muted: rgba(255, 255, 255, 0.09);
+  --border-strong: rgba(255, 255, 255, 0.17);
+  --window-outline: rgba(255, 255, 255, 0.20);
+  --focus-glass-bg: rgba(255, 255, 255, 0.58);
+  --focus-glass-border: rgba(255, 255, 255, 0);
+  --focus-glass-highlight: rgba(255, 255, 255, 0);
+  --focus-glass-shadow-outer: rgba(0, 0, 0, 0);
+  --focus-composer-surface: #323237;
+  --focus-composer-border: rgba(255, 255, 255, 0.12);
+  --focus-composer-text: #d9dce1;
+  --focus-composer-text-muted: rgba(225, 229, 236, 0.5);
+
+  --status-success: rgba(130, 230, 195, 0.94);
+  --status-warning: rgba(255, 184, 110, 0.94);
+  --status-error: rgba(255, 122, 122, 0.94);
+
+  --brain-scope-global-bg: rgba(139, 92, 246, 0.18);
+  --brain-scope-global-fg: #ddd6fe;
+  --brain-scope-global-ring: rgba(167, 139, 250, 0.35);
+  --brain-scope-global-icon: #c4b5fd;
+  --brain-scope-private-bg: rgba(245, 158, 11, 0.16);
+  --brain-scope-private-fg: #fde68a;
+  --brain-scope-private-ring: rgba(251, 191, 36, 0.35);
+  --brain-scope-private-icon: #fcd34d;
+  --brain-scope-enabled-bg: rgba(16, 185, 129, 0.16);
+  --brain-scope-enabled-fg: #6ee7b7;
+  --brain-scope-type-bg: rgba(255, 255, 255, 0.1);
+  --brain-scope-type-fg: rgba(225, 229, 236, 0.72);
+
+  --ui-btn-primary-bg: rgba(var(--theme-color-rgb), 1);
+  --ui-btn-primary-bg-hover: rgba(var(--theme-color-rgb), 0.9);
+  --ui-btn-primary-text: var(--theme-color-text);
+  --ui-accent-surface: rgba(255, 255, 255, 0.08);
+  --ui-accent-surface-hover: rgba(255, 255, 255, 0.13);
+  --ui-accent-text: rgba(255, 255, 255, 0.80);
+  --ui-accent-divider: rgba(255, 255, 255, 0.09);
+  --ui-accent-divider-hover: rgba(255, 255, 255, 0.20);
+
+  --kb-citation-bg: rgba(var(--theme-color-rgb), 0.22);
+  --kb-citation-bg-muted: rgba(var(--theme-color-rgb), 0.11);
+  --kb-citation-fg: rgb(var(--theme-color-fg-rgb));
+  --kb-citation-list-bg: rgba(var(--theme-color-rgb), 0.07);
+}

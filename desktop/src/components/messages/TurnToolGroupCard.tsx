@@ -1,0 +1,267 @@
+import { useMemo, useState } from "react";
+import type { Message } from "../../store";
+import { Check, ChevronDown, ChevronRight, TriangleAlert, Wrench } from "lucide-react";
+import { buildToolCardTitle, ToolCallCard } from "./ToolCallCard";
+import type { ReactNode } from "react";
+import { isTodoUpdateToolMessage } from "./MessageRenderer";
+import type { SkillPatchPreviewPayload } from "./skill-manage-preview";
+import { REACT_RAIL_ICON_TILE_STYLE, REACT_RAIL_TITLE_CLASS } from "./im-layout";
+import { isToolGroupInProgress } from "./group-tool-messages";
+import {
+  formatToolElapsedSeconds,
+  useLiveToolElapsedSeconds,
+} from "./tool-elapsed-timer";
+import { isNoisyToolStatusMessage } from "../../utils/noisy-chat-messages";
+import { Shimmer } from "../ds/Shimmer";
+import { useAppStore } from "../../store";
+import { isDeferredToolSchemaAutoloadMessage } from "../../utils/runtime-tool-result";
+import {
+  resolveToolActivityPresentation,
+  resolveToolActivitySummary,
+} from "./ToolActivityIndicator";
+
+type Props = {
+  messages: Message[];
+  highlightTerms?: string[];
+  /** Passed through to each ToolCallCard */
+  renderExtras?: (message: Message) => ReactNode;
+  selectable?: boolean;
+  selectedIds?: Set<string>;
+  onToggleSelectMessage?: (message: Message) => void;
+  /** Parent ReAct column already shows Near avatar — drop left spacer. */
+  omitLeadingSpacer?: boolean;
+  /** When true, remove outer border/rounded so parent unified container provides the single border. */
+  flat?: boolean;
+  /** Keep header in "calling tools" while the turn is still between sequential calls. */
+  holdProgress?: boolean;
+  onSkillManageApply?: (message: Message, payload: SkillPatchPreviewPayload, targetIndex: number | null) => void;
+};
+
+function countToolNames(msgs: Message[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const msg of msgs) {
+    const n = String(msg.toolName ?? "").trim() || "tool";
+    m.set(n, (m.get(n) ?? 0) + 1);
+  }
+  return m;
+}
+
+function sortedToolCounts(msgs: Message[]): Array<[string, number]> {
+  const counts = countToolNames(msgs);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function ToolNameChip({ name }: { name: string }) {
+  return (
+    <span className="inline-flex max-w-[min(100%,12rem)] items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 font-mono text-[11px] leading-none text-text-strong">
+      <Wrench className="h-2.5 w-2.5 shrink-0 text-text-muted" strokeWidth={2.2} aria-hidden />
+      <span className="truncate">{name}</span>
+    </span>
+  );
+}
+
+function CompletedToolSummary({ messages }: { messages: Message[] }) {
+  const parts = sortedToolCounts(messages);
+  return (
+    <span className={`inline-flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 ${REACT_RAIL_TITLE_CLASS}`}>
+      <span className="shrink-0">已调用 {messages.length} 次工具</span>
+      {parts.length > 0 ? (
+        <>
+          <span className="shrink-0 text-text-faint" aria-hidden>
+            ·
+          </span>
+          {parts.map(([name, count], index) => (
+            <span key={name} className="inline-flex min-w-0 items-center">
+              {index > 0 ? <span className="shrink-0 text-text-faint mr-1.5">，</span> : null}
+              <span className="shrink-0 tabular-nums mr-1.5">{count} 次</span>
+              <ToolNameChip name={name} />
+            </span>
+          ))}
+        </>
+      ) : null}
+    </span>
+  );
+}
+
+export function TurnToolGroupCard({
+  messages,
+  highlightTerms,
+  renderExtras,
+  selectable,
+  selectedIds,
+  onToggleSelectMessage,
+  omitLeadingSpacer = false,
+  flat = false,
+  holdProgress = false,
+  onSkillManageApply,
+}: Props) {
+  const [expanded, setExpanded] = useState(false);
+  const showToolCalls = useAppStore((state) => state.showToolCalls);
+  // todo_write snapshots are owned by StickyTaskBar; never nest TodoUpdateCard here.
+  const visibleMessages = useMemo(
+    () =>
+      messages.filter(
+        (m) =>
+          !isNoisyToolStatusMessage(m) &&
+          !isDeferredToolSchemaAutoloadMessage(m) &&
+          !isTodoUpdateToolMessage(m.content) &&
+          (m.toolName ?? "").trim() !== "todo_write",
+      ),
+    [messages],
+  );
+  const inProgress = useMemo(
+    () => isToolGroupInProgress(visibleMessages) || holdProgress,
+    [holdProgress, visibleMessages],
+  );
+  const activeTools = useMemo(
+    () =>
+      visibleMessages.filter(
+        (message) => message.toolStatus === "running" || message.toolStatus === "pending",
+      ),
+    [visibleMessages],
+  );
+  const activeTool = activeTools[activeTools.length - 1];
+  const presentation = resolveToolActivityPresentation(showToolCalls, inProgress);
+  const resolvedCompactSummary = resolveToolActivitySummary(visibleMessages);
+  const compactSummary = inProgress
+    && !resolvedCompactSummary.active
+    && resolvedCompactSummary.tone === "normal"
+    ? { active: true, tone: "normal" as const, label: "正在继续处理" }
+    : resolvedCompactSummary;
+  const liveElapsedSec = useLiveToolElapsedSeconds(
+    String(activeTool?.toolCallId || activeTool?.id || "tool-group-idle"),
+    Boolean(activeTool),
+    activeTool?.toolElapsedSec,
+  );
+  const activeToolTitle = activeTool ? buildToolCardTitle(activeTool) : "工具";
+
+  // Group may consist solely of todo_write (hidden); do not render an empty shell.
+  if (visibleMessages.length === 0) return null;
+
+  const cardContent = (
+    <div
+      className={
+        flat
+          ? "w-full min-w-0 text-[13px] text-text-muted"
+          : "w-full min-w-0 overflow-hidden rounded-lg border border-border bg-surface-card text-[13px] text-text-muted transition"
+      }
+    >
+      <button
+        type="button"
+        className={`relative z-[1] inline-flex w-full max-w-full items-center gap-2 text-left ${
+          flat ? "px-3 py-1" : "px-3 py-3"
+        }`}
+        onClick={() => setExpanded((v) => !v)}
+      >
+        <span className="flex h-[20px] w-[20px] shrink-0 items-center justify-center" aria-hidden>
+          {presentation === "summary" && compactSummary.tone === "error" ? (
+            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-rose-500/12 text-rose-400 ring-1 ring-rose-500/30">
+              <TriangleAlert className="h-2.5 w-2.5" strokeWidth={2.45} />
+            </span>
+          ) : inProgress ? (
+            <span
+              className="flex h-4 w-4 items-center justify-center rounded-full"
+              style={REACT_RAIL_ICON_TILE_STYLE}
+            >
+              <Wrench className="h-2.5 w-2.5" strokeWidth={2.45} />
+            </span>
+          ) : (
+            <span className="flex h-4 w-4 items-center justify-center rounded-full bg-[rgb(var(--theme-color-rgb,59,130,246))] ring-1 ring-[rgba(var(--theme-color-rgb,59,130,246),0.35)]">
+              <Check className="h-2.5 w-2.5 text-[var(--theme-color-text)]" strokeWidth={2.45} />
+            </span>
+          )}
+        </span>
+        <span className="flex min-w-0 items-center gap-1.5">
+          {presentation === "summary" ? (
+            compactSummary.active ? (
+              <Shimmer
+                variant="status"
+                text={activeTool
+                  ? `${compactSummary.label} · ${formatToolElapsedSeconds(liveElapsedSec)}`
+                  : compactSummary.label}
+                className={`min-w-0 truncate tabular-nums ${REACT_RAIL_TITLE_CLASS}`}
+              />
+            ) : (
+              <span
+                className={`min-w-0 truncate ${REACT_RAIL_TITLE_CLASS} ${
+                  compactSummary.tone === "error"
+                    ? "!text-rose-400"
+                    : compactSummary.tone === "cancelled"
+                      ? "!text-text-faint"
+                      : ""
+                }`}
+              >
+                {compactSummary.label}
+              </span>
+            )
+          ) : inProgress ? (
+            <span className={`min-w-0 truncate ${REACT_RAIL_TITLE_CLASS}`}>
+              调用 {activeToolTitle}
+              {activeTools.length > 1 ? ` 等 ${activeTools.length} 个工具` : ""}
+            </span>
+          ) : (
+            <CompletedToolSummary messages={visibleMessages} />
+          )}
+          {presentation === "details" && activeTool ? (
+            <Shimmer
+              variant="status"
+              text={`运行中 · ${formatToolElapsedSeconds(liveElapsedSec)}`}
+              className="shrink-0 whitespace-nowrap text-[12px] font-normal tabular-nums"
+            />
+          ) : null}
+        </span>
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-text-muted" strokeWidth={2} aria-hidden />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-muted" strokeWidth={2} aria-hidden />
+        )}
+      </button>
+      {expanded && visibleMessages.length > 0 ? (
+        <div
+          className={
+            flat
+              ? "relative px-3 pb-2 pt-0.5 text-[13px] text-text-muted"
+              : "relative z-[0] border-t border-border px-3 pb-2 pt-1 text-[13px] text-text-muted"
+          }
+        >
+          {/* 时间线仅在展开列表区，与 nested ToolCallCard 节点同一 X（px-3 12px + half Check 10px = 22px） */}
+          <div
+            className="pointer-events-none absolute left-[22px] top-0 bottom-2 z-0 w-0 border-l border-dashed border-border"
+            aria-hidden
+          />
+          <div className="relative z-[1] space-y-2.5">
+            {visibleMessages.map((m) => (
+              <ToolCallCard
+                key={m.id}
+                message={m}
+                highlightTerms={highlightTerms}
+                forceExpand={!!m.inlineConfirm}
+                selectable={selectable}
+                selected={selectedIds?.has(m.id)}
+                onToggleSelectMessage={onToggleSelectMessage}
+                action={renderExtras?.(m)}
+                variant="nested"
+                omitLeadingSpacer={flat}
+                onSkillManageApply={onSkillManageApply}
+              />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+
+  if (flat && omitLeadingSpacer) {
+    return cardContent;
+  }
+
+  return (
+    <div className="flex min-w-0 items-start gap-2">
+      <div className="flex min-w-0 flex-1 flex-row gap-2">
+        <div className="flex min-w-0 flex-1 flex-col items-start">
+          {cardContent}
+        </div>
+      </div>
+    </div>
+  );
+}

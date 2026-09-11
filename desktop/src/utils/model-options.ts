@@ -1,0 +1,421 @@
+import { formatModelOptionLabel, normalizeBareModelId } from "./model-display";
+
+export type ManagedModelCatalogEntry = {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  model: string;
+  label: string;
+  route?: "local" | "private-cloud" | "third-party";
+  isDefault?: boolean;
+  capabilities?: string[];
+  /** 管理员在企业后台声明的上下文窗口；缺省时由后端按模型名兜底。 */
+  contextWindow?: number;
+};
+
+export type ProviderCatalogEntry = {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  models: string[];
+  enabled: boolean;
+  dropParams: boolean;
+  displayName?: string;
+  interface?: "openai" | "ollama";
+  managed?: boolean;
+  modelCatalog?: ManagedModelCatalogEntry[];
+};
+
+export type SelectableModelOption = {
+  provider: string;
+  model: string;
+  label: string;
+};
+
+export type ManagedModelProviderGroup = {
+  provider: string;
+  providerLabel: string;
+  items: SelectableModelOption[];
+};
+
+const MANAGED_PROVIDER_FALLBACK_LABELS: Record<string, string> = {
+  privatecloud: "私有云",
+  cmcc: "私有云",
+  kimi: "月之暗面",
+  moonshot: "月之暗面",
+  moma: "MOMA",
+};
+
+const MODEL_PREFIX_COLLATOR = new Intl.Collator("en-US", {
+  numeric: true,
+  sensitivity: "base",
+});
+
+function modelPrefixSortParts(modelId: string): { family: string; model: string } {
+  const segments = modelId
+    .trim()
+    .toLowerCase()
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+  const model = segments.at(-1) ?? "";
+  if (segments.length > 1) {
+    // Enterprise model ids may contain an infrastructure route before the
+    // visible vendor, for example `privatecloud/kimi/kimi-k3`, while another
+    // model from the same family is simply `Kimi/Kimi-K2.6`.  The segment
+    // nearest the model is the semantic prefix users see; comparing the whole
+    // route would incorrectly split those Kimi rows into separate groups.
+    return { family: segments.at(-2) ?? model, model };
+  }
+  return { family: model.match(/^[a-z]+/)?.[0] ?? model, model };
+}
+
+/** Keep models with the same visible family prefix adjacent, then sort naturally within it. */
+export function sortModelOptionsByPrefix<T extends Pick<SelectableModelOption, "model">>(
+  options: readonly T[],
+): T[] {
+  return [...options].sort((left, right) => {
+    const leftParts = modelPrefixSortParts(left.model);
+    const rightParts = modelPrefixSortParts(right.model);
+    const prefixOrder = MODEL_PREFIX_COLLATOR.compare(
+      leftParts.family,
+      rightParts.family,
+    );
+    if (prefixOrder !== 0) return prefixOrder;
+    const modelOrder = MODEL_PREFIX_COLLATOR.compare(leftParts.model, rightParts.model);
+    if (modelOrder !== 0) return modelOrder;
+    return MODEL_PREFIX_COLLATOR.compare(left.model, right.model);
+  });
+}
+
+function managedProviderFromModelId(modelId: string): string {
+  const value = modelId.trim();
+  const slash = value.indexOf("/");
+  return slash > 0 ? value.slice(0, slash).trim() : "enterprise";
+}
+
+function managedProviderFallbackLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (!normalized || normalized === "enterprise") return "企业模型";
+  return MANAGED_PROVIDER_FALLBACK_LABELS[normalized] ?? provider.trim();
+}
+
+/**
+ * Split one physical Enterprise gateway into the internal providers configured
+ * by admins. Requests still use the physical provider and complete model id.
+ */
+export function groupManagedModelOptions(
+  entry: ProviderCatalogEntry,
+  options: readonly SelectableModelOption[],
+): ManagedModelProviderGroup[] {
+  const metadata = new Map(
+    (entry.modelCatalog ?? [])
+      .filter((item) => item && typeof item.id === "string")
+      .map((item) => [item.id.trim(), item] as const),
+  );
+  const groups = new Map<string, ManagedModelProviderGroup>();
+
+  for (const option of options) {
+    const catalogItem = metadata.get(option.model.trim());
+    const provider =
+      catalogItem?.provider?.trim() || managedProviderFromModelId(option.model);
+    const key = provider.toLowerCase();
+    const providerLabel =
+      catalogItem?.providerLabel?.trim() || managedProviderFallbackLabel(provider);
+    const group = groups.get(key);
+    if (group) {
+      group.items.push(option);
+    } else {
+      groups.set(key, { provider, providerLabel, items: [option] });
+    }
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      items: sortModelOptionsByPrefix(group.items),
+    }))
+    .sort((left, right) => MODEL_PREFIX_COLLATOR.compare(left.providerLabel, right.providerLabel));
+}
+
+/** Models the user can pick for a provider: visible list wins over legacy `model`. */
+export function listProviderVisibleModelIds(entry: ProviderCatalogEntry): string[] {
+  const models = (entry.models ?? []).map((m) => m.trim()).filter(Boolean);
+  if (models.length > 0) return models;
+  const single = (entry.model ?? "").trim();
+  return single ? [single] : [];
+}
+
+/** Keep legacy `model` aligned with the visible catalog. */
+export function normalizeProviderEntry(entry: ProviderCatalogEntry): ProviderCatalogEntry {
+  const models = (entry.models ?? []).map((m) => m.trim()).filter(Boolean);
+  let model = (entry.model ?? "").trim();
+  if (models.length > 0) {
+    if (!models.includes(model)) model = models[0] ?? "";
+  }
+  return { ...entry, model, models };
+}
+
+export function normalizeAllProviders(
+  providers: Record<string, ProviderCatalogEntry>,
+): Record<string, ProviderCatalogEntry> {
+  const out: Record<string, ProviderCatalogEntry> = {};
+  for (const [name, entry] of Object.entries(providers)) {
+    out[name] = normalizeProviderEntry(entry);
+  }
+  return out;
+}
+
+/** At least apiKey or custom baseUrl — aligns with SettingsPanel providerCredentialed. */
+export function isProviderCredentialed(
+  entry: Pick<ProviderCatalogEntry, "apiKey" | "baseUrl"> | undefined,
+): boolean {
+  if (!entry) return false;
+  return Boolean((entry.apiKey ?? "").trim() || (entry.baseUrl ?? "").trim());
+}
+
+function providerPassesPickerGate(entry: ProviderCatalogEntry): boolean {
+  if (entry.enabled === false) return false;
+  return isProviderCredentialed(entry);
+}
+
+export function isModelInProviderCatalog(
+  providerId: string,
+  modelId: string,
+  providers: Record<string, ProviderCatalogEntry>,
+): boolean {
+  const entry = providers[providerId];
+  if (!entry || entry.enabled === false) return false;
+  return canonicalizeCatalogModel(providerId, modelId, providers) !== null;
+}
+
+/** Same rules as chat/automation model pickers. */
+export function isModelSelectable(
+  providerId: string,
+  modelId: string,
+  providers: Record<string, ProviderCatalogEntry>,
+): boolean {
+  if (!isModelInProviderCatalog(providerId, modelId, providers)) return false;
+  const entry = providers[providerId];
+  if (!entry) return false;
+  return providerPassesPickerGate(entry);
+}
+
+export function canonicalizeCatalogModel(
+  providerId: string,
+  modelId: string,
+  providers: Record<string, ProviderCatalogEntry>,
+): string | null {
+  const entry = providers[providerId];
+  if (!entry) return null;
+  const raw = modelId.trim();
+  if (!raw) return null;
+  const candidates = listProviderVisibleModelIds(entry);
+  // Managed Enterprise ids can contain several routing segments, for example
+  // `privatecloud/kimi/kimi-k3`. Prefer the exact catalog id before comparing a
+  // single optional routing prefix; repeatedly stripping prefixes silently
+  // turns a valid choice into a different model and falls back to row one.
+  const exact = candidates.find((candidate) => candidate.trim() === raw);
+  if (exact) return exact;
+  const bare = normalizeBareModelId(raw);
+  const hit = candidates.find((candidate) => {
+    const candidateBare = normalizeBareModelId(candidate);
+    return candidateBare === raw || candidateBare === bare;
+  });
+  return hit ?? null;
+}
+
+export function collectSelectableModelOptions(
+  providers: Record<string, ProviderCatalogEntry>,
+  separator = "/",
+): SelectableModelOption[] {
+  const result: SelectableModelOption[] = [];
+  for (const [provName, entry] of Object.entries(providers)) {
+    if (!providerPassesPickerGate(entry)) continue;
+    for (const model of listProviderVisibleModelIds(entry)) {
+      result.push({
+        provider: provName,
+        model,
+        label: formatModelOptionLabel(provName, model, entry, separator),
+      });
+    }
+  }
+  return result;
+}
+
+/**
+ * Skip the provider level only when the complete visible picker catalog is a
+ * single managed provider. A normal single-provider setup keeps the hierarchy
+ * so adding more providers later does not change the interaction model.
+ */
+export function resolveDirectModelPickerProvider(
+  providers: Record<string, ProviderCatalogEntry>,
+): string | null {
+  const selectableProviders = Object.entries(providers).filter(([, entry]) =>
+    providerPassesPickerGate(entry),
+  );
+  if (selectableProviders.length !== 1) return null;
+  const [providerId, entry] = selectableProviders[0] ?? [];
+  return providerId && entry?.managed === true ? providerId : null;
+}
+
+export function resolveFallbackModel(
+  providers: Record<string, ProviderCatalogEntry>,
+  preferredProvider?: string,
+): { provider: string; model: string } | null {
+  const options = collectSelectableModelOptions(providers);
+  if (options.length === 0) return null;
+  const pref = (preferredProvider ?? "").trim();
+  if (pref) {
+    const sameProvider = options.find((row) => row.provider === pref);
+    if (sameProvider) {
+      return { provider: sameProvider.provider, model: sameProvider.model };
+    }
+  }
+  const first = options[0];
+  return { provider: first.provider, model: first.model };
+}
+
+/** Return a selectable provider/model pair, falling back when stale or missing. */
+export function coerceSelectableModel(
+  providers: Record<string, ProviderCatalogEntry>,
+  provider: string,
+  model: string,
+  preferredProvider?: string,
+): { provider: string; model: string } | null {
+  const providerId = provider.trim();
+  const requestedModel = model.trim();
+  if (providerId && requestedModel && isModelSelectable(providerId, requestedModel, providers)) {
+    const canonical =
+      canonicalizeCatalogModel(providerId, requestedModel, providers) ?? requestedModel;
+    return { provider: providerId, model: canonical };
+  }
+  return resolveFallbackModel(providers, preferredProvider || providerId);
+}
+
+export type SessionBindingModelInput = {
+  providers: Record<string, ProviderCatalogEntry>;
+  /** True when the caller queried session metadata, even if it found no model. */
+  sessionModelKnown: boolean;
+  sessionProvider?: string;
+  sessionModel?: string;
+  paneProvider?: string;
+  paneModel?: string;
+  avatarProvider?: string;
+  avatarModel?: string;
+  defaultProvider?: string;
+  defaultModel?: string;
+  activeProvider?: string;
+  activeModel?: string;
+};
+
+/** Resolve a pane model without mistaking an inherited layout snapshot for a session override. */
+export function resolveSessionBindingModel(
+  input: SessionBindingModelInput,
+): { provider: string; model: string } | null {
+  const candidates: Array<[string | undefined, string | undefined]> = [
+    [input.sessionProvider, input.sessionModel],
+    ...(input.sessionModelKnown
+      ? []
+      : [[input.paneProvider, input.paneModel] as [string | undefined, string | undefined]]),
+    [input.avatarProvider, input.avatarModel],
+    [input.defaultProvider, input.defaultModel],
+    [input.activeProvider, input.activeModel],
+  ];
+  for (const [rawProvider, rawModel] of candidates) {
+    const provider = String(rawProvider ?? "").trim();
+    const model = String(rawModel ?? "").trim();
+    if (!provider || !model) continue;
+    const resolved = coerceSelectableModel(input.providers, provider, model, provider);
+    if (resolved) return resolved;
+  }
+  return resolveFallbackModel(input.providers, input.defaultProvider || input.activeProvider);
+}
+
+export type PaneModelLike = {
+  id: string;
+  modelProvider?: string;
+  modelName?: string;
+};
+
+export type ReconcilePaneModelsResult = {
+  panes: PaneModelLike[];
+  activeProvider: string;
+  activeModel: string;
+  changedPaneIds: string[];
+  activeChanged: boolean;
+};
+
+/** Drop or migrate pane/global models that are no longer in the visible catalog. */
+export function reconcilePaneModelsWithSettings(input: {
+  panes: PaneModelLike[];
+  activePaneId: string;
+  activeProvider: string;
+  activeModel: string;
+  providers: Record<string, ProviderCatalogEntry>;
+}): ReconcilePaneModelsResult {
+  const providers = normalizeAllProviders(input.providers);
+  const changedPaneIds: string[] = [];
+  const nextPanes = input.panes.map((pane) => {
+    const provider = (pane.modelProvider ?? "").trim();
+    const model = (pane.modelName ?? "").trim();
+    if (!provider && !model) return pane;
+    const coerced = coerceSelectableModel(providers, provider, model, provider);
+    if (!coerced) {
+      if (provider || model) changedPaneIds.push(pane.id);
+      return { ...pane, modelProvider: "", modelName: "" };
+    }
+    if (coerced.provider === provider && coerced.model === model) return pane;
+    changedPaneIds.push(pane.id);
+    return { ...pane, modelProvider: coerced.provider, modelName: coerced.model };
+  });
+
+  const activePane = nextPanes.find((p) => p.id === input.activePaneId) ?? nextPanes[0];
+  let nextActiveProvider = (input.activeProvider ?? "").trim();
+  let nextActiveModel = (input.activeModel ?? "").trim();
+  let activeChanged = false;
+
+  const activeFromPane = coerceSelectableModel(
+    providers,
+    String(activePane?.modelProvider ?? ""),
+    String(activePane?.modelName ?? ""),
+    nextActiveProvider,
+  );
+  if (activeFromPane) {
+    if (
+      activeFromPane.provider !== nextActiveProvider ||
+      activeFromPane.model !== nextActiveModel
+    ) {
+      activeChanged = true;
+    }
+    nextActiveProvider = activeFromPane.provider;
+    nextActiveModel = activeFromPane.model;
+  } else {
+    const coercedActive = coerceSelectableModel(
+      providers,
+      nextActiveProvider,
+      nextActiveModel,
+      nextActiveProvider,
+    );
+    if (!coercedActive) {
+      if (nextActiveProvider || nextActiveModel) activeChanged = true;
+      nextActiveProvider = "";
+      nextActiveModel = "";
+    } else if (
+      coercedActive.provider !== nextActiveProvider ||
+      coercedActive.model !== nextActiveModel
+    ) {
+      activeChanged = true;
+      nextActiveProvider = coercedActive.provider;
+      nextActiveModel = coercedActive.model;
+    }
+  }
+
+  return {
+    panes: nextPanes,
+    activeProvider: nextActiveProvider,
+    activeModel: nextActiveModel,
+    changedPaneIds,
+    activeChanged,
+  };
+}

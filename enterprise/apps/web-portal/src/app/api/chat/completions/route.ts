@@ -1,0 +1,917 @@
+
+import { NextResponse } from "next/server";
+import {
+  DOCUMENT_EXTENSIONS,
+  attachmentExtensionOf,
+  hasRoutedDocument,
+  modelSupportsVision,
+} from "@agenticx/config";
+import {
+  isPlatformFeatureAllowedForUser,
+  isPlatformFeatureAllowedOnSurface,
+} from "../../../../lib/capability-packs-reader";
+import { cookies } from "next/headers";
+import { ulid } from "ulid";
+import {
+  ACCESS_COOKIE,
+  REFRESH_COOKIE,
+  getSessionAuthFromCookies,
+  isAuthCookieSecure,
+  passwordChangeRequiredResponse,
+} from "../../../../lib/session";
+import { refreshTokens } from "../../../../lib/auth-runtime";
+import { isChatSessionOwned } from "../../../../lib/chat-history";
+import { toChatHistoryContext } from "../../../../lib/chat-history-http";
+import {
+  listAvailableModelsForUser,
+  type PortalModelOption,
+} from "../../../../lib/admin-providers-reader";
+import { buildAttachmentRoutingPolicy } from "../../../../lib/attachment-routing-policy";
+import {
+  attachmentNamesFromChatRequest,
+  attachmentNamesFromMetadataHint,
+} from "../../../../lib/attachment-request-hints";
+import {
+  countImageParts,
+  replaceImagePartsWithDescriptions,
+} from "../../../../lib/image-understanding";
+import { stripEmptyAssistantMessages } from "../../../../lib/chat-completion-sanitize";
+import { withCurrentTimeContext } from "../../../../lib/current-time";
+import { withPortalCapabilityContext } from "../../../../lib/portal-capabilities";
+import {
+  NO_TURN_REQUESTS,
+  selectTurnPlan,
+  type AutomaticTurnPlan,
+  type TurnPlan,
+  type TurnRequests,
+} from "../../../../lib/chat-routing/turn-plan";
+import {
+  runWebSearchTurn,
+  type WebSearchChatMessage,
+} from "../../../../lib/web-search/tool-loop";
+import {
+  isCalculatorEnabled,
+  loadTenantWebSearchConfig,
+  loadTenantWebSearchConfigStrict,
+} from "../../../../lib/web-search/tenant-config";
+import {
+  isTenantDailySearchProviderQuotaExceeded,
+  reserveTenantDailySearchProviderCall,
+} from "../../../../lib/web-search/daily-provider-quota";
+import { runDeepResearchTurn } from "../../../../lib/deep-research/orchestrator";
+import { defaultArtifactStore } from "../../../../lib/deep-research/artifact-store";
+import {
+  planAutomaticTurn,
+  resolveManualDeepResearchQuery,
+} from "../../../../lib/deep-research/auto-need";
+import type { DeepResearchIntentConfidence } from "../../../../lib/deep-research/clarification-policy";
+import { withCalculatorContext } from "../../../../lib/calculator/chat-context";
+import {
+  latestUserQueryFromMessages,
+  loadPortalFeedbackContext,
+  subjectIdFromMessages,
+  withFeedbackContext,
+} from "../../../../lib/chat-feedback-context";
+import {
+  chatConcurrencyLimitResponse,
+  holdChatTurnUntilResponseEnds,
+  tryAcquireChatTurn,
+} from "../../../../lib/chat-concurrency";
+import { log } from "../../../../lib/observability/logger";
+import { withRequestLog } from "../../../../lib/observability/with-request-log";
+
+function withSanitizedMessages(body: Record<string, unknown>): Record<string, unknown> {
+  if (!Array.isArray(body.messages)) return body;
+  const cleaned = stripEmptyAssistantMessages(
+    body.messages as Array<{ role: string; content?: string | null; tool_calls?: unknown }>,
+  );
+  return {
+    ...body,
+    // Direct (non-web-search) turns still need clock grounding — same as Desktop/Kimi.
+    messages: withPortalCapabilityContext(withCurrentTimeContext(cleaned)),
+  };
+}
+
+function hasDocumentAttachmentHint(names: readonly string[]): boolean {
+  const wanted = new Set(DOCUMENT_EXTENSIONS);
+  return names.some((name) => wanted.has(attachmentExtensionOf(name)));
+}
+
+function withRoutedModelHeader(response: Response, routedModelId: string): Response {
+  if (!routedModelId) return response;
+  const headers = new Headers(response.headers);
+  headers.set("x-agenticx-routed-model", routedModelId);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+const GATEWAY_COMPLETIONS_URL =
+  process.env.GATEWAY_COMPLETIONS_URL ?? "http://127.0.0.1:8088/v1/chat/completions";
+
+/**
+ * Active deep research has a 20-minute budget plus headroom for network jitter.
+ * Human clarification pauses that budget and may outlive this request; the
+ * database-backed resume/orphan path continues it after a handler restart.
+ */
+export const maxDuration = 1500;
+export const runtime = "nodejs";
+
+export async function POST(request: Request) {
+  return withRequestLog("chat.completions", async (logCtx) => {
+  const auth = await getSessionAuthFromCookies();
+  if (!auth) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "40101",
+          message: "unauthorized",
+        },
+      },
+      { status: 401 }
+    );
+  }
+  if (auth.session.mustChangePassword) {
+    return passwordChangeRequiredResponse();
+  }
+  const { session, accessToken } = auth;
+  let refreshToken = auth.refreshToken;
+
+  const chatSessionId = request.headers.get("x-chat-session-id")?.trim();
+  if (!chatSessionId) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "40001",
+          message: "missing chat session",
+        },
+      },
+      { status: 400 }
+    );
+  }
+
+  const traceId = logCtx.traceId;
+  logCtx.setUser({
+    userId: session.userId,
+    tenantId: session.tenantId,
+    sessionId: chatSessionId,
+  });
+
+  const ctx = toChatHistoryContext(session);
+  const owned = await isChatSessionOwned(ctx, chatSessionId);
+  if (!owned) {
+    return NextResponse.json(
+      {
+        error: {
+          code: "40301",
+          message: "forbidden",
+        },
+      },
+      { status: 403 }
+    );
+  }
+
+  const rawBody = await request.text();
+  let providerHint = "";
+  let routedModelId = "";
+  let forwardBody = rawBody;
+  let turnRequests: TurnRequests = NO_TURN_REQUESTS;
+  let parsedBody: Record<string, unknown> | null = null;
+  let effectiveModelsForRequest: Awaited<ReturnType<typeof listAvailableModelsForUser>> | null = null;
+  let resolvedModelOption: PortalModelOption | null = null;
+  let attachmentNames: string[] = [];
+  let currentAttachmentNames: string[] = [];
+  let hasCurrentAttachmentHint = false;
+  let attachmentRouteDecision: "private" | "public" | null = null;
+  let attachmentRouteForGateway: "private" | "public-override" | null = null;
+  let attachmentRoutingAllowedPromise: Promise<boolean> | null = null;
+  let attachmentPublicOverrideAllowedPromise: Promise<boolean> | null = null;
+  const loadAttachmentRoutingAllowed = () => {
+    attachmentRoutingAllowedPromise ??= isPlatformFeatureAllowedOnSurface(
+      session.tenantId,
+      "attachment_routing",
+      "web",
+      session.userId,
+      session.email,
+      session.deptId,
+    );
+    return attachmentRoutingAllowedPromise;
+  };
+  const loadAttachmentPublicOverrideAllowed = () => {
+    attachmentPublicOverrideAllowedPromise ??= isPlatformFeatureAllowedOnSurface(
+      session.tenantId,
+      "attachment_public_override",
+      "web",
+      session.userId,
+      session.email,
+      session.deptId,
+    );
+    return attachmentPublicOverrideAllowedPromise;
+  };
+  // portal 把模型 id 编码为 "<provider>/<model>"；admin 配置好的 provider 与上游 endpoint 一一对应。
+  // gateway 用 model 字段查表，所以这里把 provider 拆出来放请求头，body.model 仅保留模型名。
+  let parsedRequest: (Record<string, unknown> & {
+    model?: string;
+    agenticx_web_search?: unknown;
+    agenticx_deep_research?: unknown;
+    agenticx_deep_research_auto?: unknown;
+    agenticx_attachments?: unknown;
+    agenticx_current_attachments?: unknown;
+    agenticx_attachment_route?: unknown;
+  }) | null = null;
+  try {
+    parsedRequest = JSON.parse(rawBody) as Record<string, unknown> & {
+      model?: string;
+      agenticx_web_search?: unknown;
+      agenticx_deep_research?: unknown;
+      agenticx_deep_research_auto?: unknown;
+      agenticx_attachments?: unknown;
+      agenticx_current_attachments?: unknown;
+      agenticx_attachment_route?: unknown;
+    };
+  } catch {
+    // Non-JSON bodies are forwarded unchanged.
+  }
+
+  if (parsedRequest) {
+    const parsed = parsedRequest;
+    attachmentNames = attachmentNamesFromChatRequest(parsed);
+    hasCurrentAttachmentHint = Object.prototype.hasOwnProperty.call(
+      parsed,
+      "agenticx_current_attachments",
+    );
+    currentAttachmentNames = attachmentNamesFromMetadataHint(
+      parsed.agenticx_current_attachments,
+    );
+    attachmentRouteDecision =
+      parsed.agenticx_attachment_route === "private" ||
+      parsed.agenticx_attachment_route === "public"
+        ? parsed.agenticx_attachment_route
+        : null;
+    turnRequests = {
+      webSearchRequested: parsed.agenticx_web_search === true,
+      manualDeepResearchRequested: parsed.agenticx_deep_research === true,
+      automaticDeepResearchRequested: parsed.agenticx_deep_research_auto === true,
+    };
+    const {
+      agenticx_web_search: _stripWs,
+      agenticx_deep_research: _stripDr,
+      agenticx_deep_research_auto: _stripDrAuto,
+      agenticx_attachments: _stripAttachments,
+      agenticx_current_attachments: _stripCurrentAttachments,
+      agenticx_attachment_route: _stripAttachmentRoute,
+      ...withoutFlag
+    } = parsed;
+    parsedBody = withoutFlag;
+
+    if (typeof parsed.model === "string") {
+      // Resolve every portal model through the user's effective list. This
+      // prevents a bare model name from bypassing provider visibility before
+      // the same model is used for automatic routing or the final answer.
+      let effectiveModels: Awaited<ReturnType<typeof listAvailableModelsForUser>>;
+      try {
+        effectiveModels = await listAvailableModelsForUser(
+          session.userId,
+          session.email,
+          session.deptId ?? undefined,
+        );
+      } catch (error) {
+        console.error(
+          "[chat] effective model policy unavailable:",
+          error instanceof Error ? error.message : error,
+        );
+        return NextResponse.json(
+          {
+            error: {
+              code: "50302",
+              message: "模型权限暂时无法校验，请稍后重试",
+            },
+          },
+          { status: 503 },
+        );
+      }
+      effectiveModelsForRequest = effectiveModels;
+      const requestedModel = parsed.model.trim();
+      const resolvedModelId = requestedModel.includes("/")
+        ? effectiveModels.find((model) => model.id === requestedModel)?.id
+        : (() => {
+            const matches = effectiveModels.filter(
+              (model) => model.id.split("/").slice(1).join("/") === requestedModel,
+            );
+            return matches.length === 1 ? matches[0]?.id : undefined;
+          })();
+      if (!resolvedModelId) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "40301",
+              message: "该模型已不在您的可见范围内，请刷新页面重新选择模型",
+            },
+          },
+          { status: 403 },
+        );
+      }
+      resolvedModelOption =
+        effectiveModels.find((model) => model.id === resolvedModelId) ?? null;
+
+      const [providerId, ...rest] = resolvedModelId.split("/");
+      const modelName = rest.join("/");
+      if (providerId && modelName) {
+        providerHint = providerId;
+        parsedBody = { ...withoutFlag, model: modelName };
+        forwardBody = JSON.stringify(parsedBody);
+      } else {
+        forwardBody = JSON.stringify(withoutFlag);
+      }
+    } else {
+      forwardBody = JSON.stringify(withoutFlag);
+    }
+  }
+
+  // Document containment is enforced here, before image fallback, automatic
+  // planning, calculator injection, or the final gateway fetch. The browser
+  // also switches its visible session model, but that UI is not a trust
+  // boundary: direct callers and stale tabs must be routed by the BFF as well.
+  if (
+    parsedBody &&
+    effectiveModelsForRequest &&
+    hasDocumentAttachmentHint(attachmentNames)
+  ) {
+    let attachmentRoutingAllowed: boolean;
+    try {
+      attachmentRoutingAllowed = await loadAttachmentRoutingAllowed();
+    } catch (error) {
+      console.error(
+        "[attachment-routing] capability policy unavailable:",
+        error instanceof Error ? error.message : error,
+      );
+      return NextResponse.json(
+        {
+          error: {
+            code: "50302",
+            message: "附件路由策略暂时无法校验，请稍后重试",
+          },
+        },
+        { status: 503 },
+      );
+    }
+
+    if (!attachmentRoutingAllowed) {
+      // A false answer here means attachment_routing is governed and this
+      // caller is not entitled to it (including a user opt-out). Never treat
+      // that as a legacy tenant and forward the document to the selected
+      // public model. Legacy tenants remain fail-open through the capability
+      // reader, which returns true when no pack governs the feature.
+      return NextResponse.json(
+        {
+          error: {
+            code: "40301",
+            message: "当前账号没有附件自动路由权限，文档不会发送到公网模型",
+          },
+        },
+        { status: 403 },
+      );
+    }
+
+    const publicOverrideAllowed = await loadAttachmentPublicOverrideAllowed().catch(() => false);
+    const attachmentRouting = buildAttachmentRoutingPolicy(effectiveModelsForRequest, {
+      enabled: true,
+      allowPublicOverride: publicOverrideAllowed,
+    });
+    if (
+      !attachmentRouting.enabled ||
+      !attachmentRouting.documentTarget ||
+      !hasRoutedDocument(attachmentNames, attachmentRouting)
+    ) {
+      // The user's capability promises document containment. If the target
+      // disappeared, forwarding to the originally selected cloud model is
+      // a data leak, not a graceful fallback.
+      return NextResponse.json(
+        {
+          error: {
+            code: "50302",
+            message: "附件自动路由暂不可用，请联系管理员配置私有多模态模型",
+          },
+        },
+        { status: 503 },
+      );
+    }
+
+    const target = attachmentRouting.documentTarget;
+    const targetOption = effectiveModelsForRequest.find((model) => model.id === target.id);
+    if (!targetOption) {
+      return NextResponse.json(
+        {
+          error: {
+            code: "50302",
+            message: "附件自动路由目标已不可用，请刷新后重试",
+          },
+        },
+        { status: 503 },
+      );
+    }
+
+    let routeToPrivate = true;
+    if (attachmentRouting.allowPublicOverride) {
+      const requestedModelUsesPublicRoute =
+        resolvedModelOption?.route === "third-party";
+      const currentTurnHasDocument =
+        hasCurrentAttachmentHint &&
+        hasRoutedDocument(currentAttachmentNames, attachmentRouting);
+      if (currentTurnHasDocument) {
+        if (
+          attachmentRouteDecision === "public" &&
+          requestedModelUsesPublicRoute
+        ) {
+          // The Gateway is the final routing authority. It re-checks the
+          // live tenant/user policy after resolving the provider and records
+          // exactly one accepted/denied decision immediately before an
+          // upstream call. The BFF only forwards the user's explicit intent;
+          // recording here would create a false accepted event if Gateway
+          // rejects the marker, and would double-count successful calls.
+          routeToPrivate = false;
+          attachmentRouteForGateway = "public-override";
+        } else if (
+          attachmentRouteDecision !== "private" &&
+          requestedModelUsesPublicRoute
+        ) {
+          return NextResponse.json(
+            {
+              error: {
+                code: "40902",
+                message: "请先确认文档使用私有模型还是公网模型",
+              },
+            },
+            { status: 409 },
+          );
+        }
+      } else if (hasCurrentAttachmentHint) {
+        // 新版客户端明确说明“本轮没有新附件”：若会话仍停在公网模型，说明用户已在
+        // 之前的文档回合选择过例外；按当前模型延续，避免每句话重复弹窗。
+        routeToPrivate = resolvedModelOption?.route !== "third-party";
+        attachmentRouteForGateway = routeToPrivate ? "private" : "public-override";
+      }
+      // 旧客户端没有 current-attachment 字段。不能把“看不懂”当成获得过例外，
+      // 继续走强制私有路由，直到页面刷新到支持风险确认的新版本。
+    }
+
+    if (routeToPrivate) {
+      attachmentRouteForGateway = "private";
+      providerHint = target.provider;
+      routedModelId = target.id;
+      resolvedModelOption = targetOption;
+      parsedBody = { ...parsedBody, model: target.model };
+      forwardBody = JSON.stringify(parsedBody);
+      console.info(`[attachment-routing] document session locked target=${target.id}`);
+    } else {
+      console.info(
+        `[attachment-routing] authorized public override model=${resolvedModelOption?.id ?? "unknown"}`,
+      );
+    }
+  }
+
+  const gatewayHeaders: Record<string, string> = {
+    "content-type": "application/json",
+    authorization: `Bearer ${accessToken}`,
+    "x-tenant-id": session.tenantId,
+    "x-user-id": session.userId,
+    "x-dept-id": session.deptId ?? "",
+    "x-user-email": session.email,
+    "x-session-id": session.sessionId,
+    "x-agenticx-trace-id": traceId,
+    "x-agenticx-trace-step": "1",
+    "x-agenticx-trace-stage": "chat.answer",
+    ...(attachmentRouteForGateway
+      ? { "x-agenticx-attachment-route": attachmentRouteForGateway }
+      : {}),
+    ...(providerHint ? { "x-agenticx-provider": providerHint } : {}),
+  };
+
+  let tenantSearchConfigSnapshot: Awaited<ReturnType<typeof loadTenantWebSearchConfig>> = null;
+  let tenantSearchConfigLoaded = false;
+  let ordinaryTenantConfigPromise: ReturnType<typeof loadTenantWebSearchConfig> | null = null;
+  const loadTenantSearchConfigForWeb = () => {
+    if (tenantSearchConfigLoaded) return Promise.resolve(tenantSearchConfigSnapshot);
+    ordinaryTenantConfigPromise ??= loadTenantWebSearchConfig(session.tenantId);
+    return ordinaryTenantConfigPromise;
+  };
+  let tenantDeepResearchEnabled = true;
+  if (
+    (turnRequests.manualDeepResearchRequested ||
+      turnRequests.automaticDeepResearchRequested) &&
+    parsedBody
+  ) {
+    try {
+      tenantSearchConfigSnapshot = await loadTenantWebSearchConfigStrict(session.tenantId);
+      tenantSearchConfigLoaded = true;
+      // 租户总开关之上再看分配范围。查不动时放行：最可能的原因是租户还没跑迁移，
+      // 深度研究现在是能力包的成员（feature:deep_research），谁能用由包的分配决定。
+      // 没有任何包引用它时视为还没纳管、保持全员可用——直接改成「不在包里就不能用」，
+      // 所有现存租户会在升级当天静默失效，现场看到的只是「深度研究突然不工作了」。
+      // 查询本身出错也放行：为一次数据库抖动把全公司的深度研究停掉不划算。
+      const deepResearchAssigned = await isPlatformFeatureAllowedForUser(
+        session.tenantId,
+        "deep_research",
+        session.userId,
+        session.email,
+        session.deptId,
+      ).catch(() => true);
+      tenantDeepResearchEnabled =
+        (tenantSearchConfigSnapshot?.deepResearchEnabled ?? true) && deepResearchAssigned;
+    } catch (error) {
+      console.error(
+        "[deep-research] tenant policy unavailable:",
+        error instanceof Error ? error.message : error,
+      );
+      if (turnRequests.manualDeepResearchRequested) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "50303",
+              message: "深度研究策略暂时无法校验，请稍后重试",
+            },
+          },
+          { status: 503 },
+        );
+      }
+      // Automatic mode is fail-closed for the expensive path. Ordinary web
+      // search may still use its established best-effort configuration path.
+      tenantDeepResearchEnabled = false;
+      console.info("[deep-research] automatic route skipped (policy_unavailable)");
+    }
+    if (
+      tenantSearchConfigLoaded &&
+      !tenantDeepResearchEnabled &&
+      turnRequests.automaticDeepResearchRequested &&
+      !turnRequests.manualDeepResearchRequested
+    ) {
+      // Automatic mode silently falls back to the ordinary web-search policy.
+      // A manual request stays enabled so the orchestrator can return its
+      // existing administrator-disabled explanation without a router call.
+      console.info("[deep-research] automatic route skipped (tenant_disabled)");
+    }
+  }
+
+  const turnLease = tryAcquireChatTurn({
+    tenantId: session.tenantId,
+    userId: session.userId,
+  });
+  if (!turnLease) return chatConcurrencyLimitResponse();
+
+  const produceAdmittedTurn = async (): Promise<Response> => {
+    // Browser turns normally arrive with image parsed_text already persisted by
+    // the composer. This is the final safety net for stale clients and direct
+    // callers: never forward image_url blocks to a model declared text-only.
+    if (
+      parsedBody &&
+      resolvedModelOption &&
+      effectiveModelsForRequest &&
+      !modelSupportsVision(
+        resolvedModelOption.provider,
+        resolvedModelOption.model,
+        resolvedModelOption.capabilities,
+      ) &&
+      countImageParts(parsedBody) > 0
+    ) {
+      const attachmentRoutingAllowed = await loadAttachmentRoutingAllowed().catch(() => false);
+      const attachmentRouting = buildAttachmentRoutingPolicy(effectiveModelsForRequest, {
+        enabled: attachmentRoutingAllowed,
+      });
+      if (
+        !attachmentRouting.enabled ||
+        attachmentRouting.imageStrategy !== "vision-fallback" ||
+        !attachmentRouting.visionFallback
+      ) {
+        return NextResponse.json(
+          {
+            error: {
+              code: "40002",
+              message: "当前模型不支持图片，且管理员尚未配置可用的私有视觉解析模型",
+            },
+          },
+          { status: 400 },
+        );
+      }
+      try {
+        parsedBody = await replaceImagePartsWithDescriptions(parsedBody, {
+          gatewayUrl: GATEWAY_COMPLETIONS_URL,
+          headers: gatewayHeaders,
+          fallback: attachmentRouting.visionFallback,
+          signal: request.signal,
+        });
+        forwardBody = JSON.stringify(parsedBody);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "图片解析失败";
+        return NextResponse.json(
+          { error: { code: "50201", message }, trace_id: traceId },
+          { status: 502, headers: { "x-agenticx-trace-id": traceId } },
+        );
+      }
+    }
+
+  let automaticTurnPlan: AutomaticTurnPlan | undefined;
+  if (
+    tenantDeepResearchEnabled &&
+    turnRequests.automaticDeepResearchRequested &&
+    !turnRequests.manualDeepResearchRequested &&
+    parsedBody
+  ) {
+    const outcome = await planAutomaticTurn(
+      Array.isArray(parsedBody.messages)
+        ? (parsedBody.messages as WebSearchChatMessage[])
+        : [],
+      {
+        url: GATEWAY_COMPLETIONS_URL,
+        headers: gatewayHeaders,
+        signal: request.signal,
+        model: typeof parsedBody.model === "string" ? parsedBody.model : undefined,
+      },
+      {
+        allowWebSearch: turnRequests.webSearchRequested,
+        maxSearchCalls: tenantSearchConfigSnapshot?.maxSearchCalls,
+        // Policy is already loaded here; with calculation off the prompt does
+        // not ask for the hint at all.
+        calculatorEnabled: isCalculatorEnabled(tenantSearchConfigSnapshot),
+      },
+    );
+    if (outcome.kind === "planned") {
+      automaticTurnPlan = outcome.plan;
+      console.info(`[chat-routing] automatic plan mode=${outcome.plan.mode}`);
+    } else {
+      console.info(
+        `[chat-routing] automatic plan fallback reason=${outcome.reason}`,
+      );
+    }
+  }
+
+  let turnPlan: TurnPlan = selectTurnPlan(turnRequests, automaticTurnPlan);
+
+  // Automatic routing already resolved the contextual query in its one model
+  // call. Manual activation intentionally skips the decision gate, but still
+  // uses the shared resolver when history is needed to fill missing context.
+  if (
+    tenantDeepResearchEnabled &&
+    turnPlan.mode === "deep" &&
+    turnPlan.source === "manual" &&
+    parsedBody &&
+    !turnPlan.researchQuery
+  ) {
+    const queryResolution = await resolveManualDeepResearchQuery(
+      Array.isArray(parsedBody.messages)
+        ? (parsedBody.messages as WebSearchChatMessage[])
+        : [],
+      {
+        url: GATEWAY_COMPLETIONS_URL,
+        headers: gatewayHeaders,
+        signal: request.signal,
+        model: typeof parsedBody.model === "string" ? parsedBody.model : undefined,
+      },
+    );
+    if (queryResolution.kind === "unresolved") {
+      console.warn(
+        `[deep-research] manual query unresolved (${queryResolution.reason}); rejecting instead of silently downgrading`,
+      );
+      return NextResponse.json(
+        {
+          error: {
+            code: "40001",
+            message: "无法从本轮消息确定深度研究主题，请补充文字说明后重试",
+          },
+        },
+        { status: 400 },
+      );
+    } else {
+      // Manual activation is an explicit high-confidence routing choice; the
+      // existing resolver confidence still decides whether its context is safe.
+      const intentConfidence: DeepResearchIntentConfidence = {
+        routeConfidence: 1,
+        queryConfidence: queryResolution.value.confidence,
+      };
+      turnPlan = {
+        mode: "deep",
+        source: "manual",
+        researchQuery: queryResolution.value.query,
+        intentConfidence,
+      };
+      console.info(
+        `[deep-research] standalone query source=${queryResolution.value.source} confidence=${queryResolution.value.confidence.toFixed(2)} chars=${queryResolution.value.query.length}`,
+      );
+    }
+  }
+
+  console.info(
+    `[chat-routing] selected mode=${turnPlan.mode} source=${turnPlan.source}`,
+  );
+
+  logCtx.setMode(
+    turnPlan.mode === "deep"
+      ? "deep_research"
+      : turnPlan.mode === "web"
+        ? "web_search"
+        : "chat",
+  );
+
+  if (turnPlan.mode === "deep" && parsedBody) {
+    const deepResearchRunId = ulid().toLowerCase();
+    logCtx.setRun(deepResearchRunId);
+    const response = await runDeepResearchTurn(withSanitizedMessages(parsedBody), {
+      url: GATEWAY_COMPLETIONS_URL,
+      headers: gatewayHeaders,
+      signal: request.signal,
+      tenantConfig: tenantSearchConfigSnapshot,
+      artifactStore: defaultArtifactStore,
+      tenantId: session.tenantId,
+      userId: session.userId,
+      sessionId: chatSessionId,
+      runId: deepResearchRunId,
+      traceId,
+      resolvedUserQuery: turnPlan.researchQuery,
+      intentConfidence: turnPlan.intentConfidence,
+      reserveProviderCall: () => reserveTenantDailySearchProviderCall(session.tenantId),
+      refreshAccessToken: async () => {
+        if (!refreshToken) return null;
+        try {
+          const next = await refreshTokens(refreshToken);
+          refreshToken = next.refreshToken;
+          // Best-effort: attach rotated cookies on the (still-open) response.
+          // In-memory Bearer update for subsequent Gateway calls is what matters.
+          try {
+            const cookieStore = await cookies();
+            cookieStore.set(ACCESS_COOKIE, next.accessToken, {
+              httpOnly: true,
+              sameSite: "lax",
+              secure: isAuthCookieSecure(),
+              maxAge: next.expiresInSeconds,
+              path: "/",
+            });
+            cookieStore.set(REFRESH_COOKIE, next.refreshToken, {
+              httpOnly: true,
+              sameSite: "lax",
+              secure: isAuthCookieSecure(),
+              maxAge: 7 * 24 * 60 * 60,
+              path: "/",
+            });
+          } catch {
+            // Streaming responses may reject mid-flight cookie writes; ignore.
+          }
+          return { accessToken: next.accessToken };
+        } catch {
+          return null;
+        }
+      },
+    });
+    return withRoutedModelHeader(response, routedModelId);
+  }
+
+  if (turnPlan.mode === "web" && parsedBody) {
+    try {
+      const response = await runWebSearchTurn(
+        withSanitizedMessages(parsedBody),
+        {
+          url: GATEWAY_COMPLETIONS_URL,
+          headers: gatewayHeaders,
+          signal: request.signal,
+          loadTenantConfig: loadTenantSearchConfigForWeb,
+          reserveProviderCall: () => reserveTenantDailySearchProviderCall(session.tenantId),
+        },
+        turnPlan.searchPlan
+          ? { preparedSearchPlan: turnPlan.searchPlan }
+          : {},
+      );
+      return withRoutedModelHeader(response, routedModelId);
+    } catch (error) {
+      if (isTenantDailySearchProviderQuotaExceeded(error)) {
+        // Never fall through to a search-free model answer: the user asked for
+        // the web, and the tenant gate is the reason they did not get it.
+        return NextResponse.json(
+          { error: { code: error.reason === "exhausted" ? "42903" : "50302", message: error.userMessage } },
+          { status: error.reason === "exhausted" ? 429 : 503 },
+        );
+      }
+      const detail = error instanceof Error ? error.message : "web search turn failed";
+      return NextResponse.json(
+        {
+          error: {
+            code: "50000",
+            message: `联网搜索对话失败：${detail}`,
+          },
+        },
+        { status: 500 },
+      );
+    }
+  }
+
+  if (parsedBody) {
+    let directBody = withSanitizedMessages(parsedBody);
+    // Feedback examples are deliberately limited to the ordinary-chat lane.
+    // Research/search turns have their own evidence and planning context, and
+    // should not spend another query or inherit a stale answer example.
+    try {
+      const query = latestUserQueryFromMessages(directBody.messages);
+      if (query) {
+        const feedbackContext = await loadPortalFeedbackContext({
+          actor: { tenantId: session.tenantId, userId: session.userId },
+          query,
+          subjectId: subjectIdFromMessages(directBody.messages),
+        });
+        if (feedbackContext.text) {
+          directBody = withFeedbackContext(directBody, feedbackContext.text);
+        }
+      }
+    } catch (error) {
+      // Feedback learning is supplementary. A transient database failure must
+      // leave the normal chat path available and must never leak a fallback
+      // identity or client-provided text into the prompt.
+      console.warn(
+        "[chat-feedback-context] recall skipped:",
+        error instanceof Error ? error.message : error,
+      );
+    }
+    const calculatedBody = await withCalculatorContext(
+      directBody,
+      {
+        url: GATEWAY_COMPLETIONS_URL,
+        headers: gatewayHeaders,
+        signal: request.signal,
+      },
+      {
+        // Automatic routing already read this turn on its way to choosing plain
+        // chat; if it said the answer needs arithmetic, that outranks the
+        // pattern.
+        ...(turnPlan.mode === "plain" ? { intent: turnPlan.calculationIntent } : {}),
+        // Read only if something is actually going to be planned, and through
+        // the promise the search and research paths already share.
+        isEnabled: async () => isCalculatorEnabled(await loadTenantSearchConfigForWeb()),
+      },
+    );
+    forwardBody = JSON.stringify(calculatedBody ?? directBody);
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(GATEWAY_COMPLETIONS_URL, {
+      method: "POST",
+      headers: gatewayHeaders,
+      body: forwardBody,
+      signal: request.signal,
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "gateway unreachable";
+    log("error", {
+      event: "chat.completions.gateway_unreachable",
+      trace_id: traceId,
+      error_message: detail,
+    });
+    return NextResponse.json(
+      {
+        error: {
+          code: "50301",
+          message: `Gateway 不可用（${GATEWAY_COMPLETIONS_URL}）：${detail}。请确认已执行 bash scripts/start-dev.sh 且 :8088 网关进程正常。`,
+          trace_id: traceId,
+        },
+      },
+      {
+        status: 503,
+        headers: { "x-agenticx-trace-id": traceId },
+      },
+    );
+  }
+
+  if (!upstream.ok) {
+    log("warn", {
+      event: "chat.completions.gateway_status",
+      trace_id: traceId,
+      status: upstream.status,
+    });
+    const errorBody = await upstream.text();
+    return new NextResponse(errorBody, {
+      status: upstream.status,
+      headers: {
+        "content-type": "application/json",
+        "x-agenticx-trace-id": traceId,
+      },
+    });
+  }
+
+  return new NextResponse(upstream.body, {
+    status: 200,
+    headers: {
+      "content-type": upstream.headers.get("content-type") ?? "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive",
+      "x-agenticx-trace-id": traceId,
+      ...(routedModelId ? { "x-agenticx-routed-model": routedModelId } : {}),
+    },
+  });
+  };
+
+  try {
+    return holdChatTurnUntilResponseEnds(await produceAdmittedTurn(), turnLease);
+  } catch (error) {
+    turnLease.release();
+    throw error;
+  }
+  }, request);
+}

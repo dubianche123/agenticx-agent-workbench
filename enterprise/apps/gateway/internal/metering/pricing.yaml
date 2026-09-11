@@ -1,0 +1,37 @@
+default:
+  input: 0.000001
+  output: 0.000002
+  cached_input: 0.0000001
+  cache_creation: 0.000001
+  cache_read: 0.0000001
+  reasoning_output: 0.000003
+
+models:
+  gpt-4o:
+    input: 0.0000025
+    output: 0.00001
+    cached_input: 0.00000125
+  gpt-4o-mini:
+    input: 0.00000015
+    output: 0.0000006
+    cached_input: 0.000000075
+  claude-3-5-sonnet-latest:
+    input: 0.000003
+    output: 0.000015
+    cache_creation: 0.00000375
+    cache_read: 0.0000003
+  deepseek-chat:
+    input: 0.00000014
+    output: 0.00000028
+    cached_input: 0.000000014
+
+  # 私有化部署：成本是固定的（8 卡昇腾 910B 那套），不随 token 数变化，所以按量计费
+  # 对它没有意义。billing_multiplier: 0 = 当前不计入额度，用来把大家往这边引导。
+  #
+  # 「系数」就是这个字段：想改成按厂家报价打一折，写 0.1，同时把下面的 input/output
+  # 填成参考报价即可（不填则落到 default: 那一档）。**不要**用 input: 0 表达免费——
+  # 0 会被 normalizePricing 当成「没填」替换成默认价，结果正好相反。
+  examplecloud/qwen3:
+    billing_multiplier: 0
+  privatecloud/Qwen2.5-32B-Instruct:
+    billing_multiplier: 0

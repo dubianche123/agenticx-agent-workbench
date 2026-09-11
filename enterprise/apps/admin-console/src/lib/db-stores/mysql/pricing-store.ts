@@ -1,0 +1,180 @@
+import { getAdminMysqlDb } from "./database";
+import { enterpriseRuntimePricing as pricingTable } from "@agenticx/db-schema/mysql";
+import { eq } from "drizzle-orm";
+import { createHash } from "node:crypto";
+import { normalizeBillingMultiplier } from "../../model-pricing";
+
+export type SurchargeWhen = {
+  contextTokensGte?: number;
+  hasReasoning?: boolean;
+  toolCallsGte?: number;
+};
+
+export type SurchargeRule = {
+  name?: string;
+  when: SurchargeWhen;
+  addPerM?: number;
+  multiplierPct?: number;
+  applyTo?: "input" | "output" | "reasoning" | "total";
+};
+
+export type ModelPricingEntry = {
+  tier?: string;
+  input: number;
+  output: number;
+  cachedInput?: number;
+  cacheCreation?: number;
+  cacheRead?: number;
+  reasoningOutput?: number;
+  inputPerM?: number;
+  outputPerM?: number;
+  reasoningPerM?: number;
+  billingMultiplier?: number;
+  surcharges?: SurchargeRule[];
+  effectiveDate?: string;
+};
+
+export type PricingConfig = {
+  version: string;
+  default: ModelPricingEntry;
+  models: Record<string, ModelPricingEntry[]>;
+  updatedAt: string;
+};
+
+const DEFAULT_CONFIG: PricingConfig = {
+  version: "default-v1",
+  default: {
+    input: 0.000001,
+    output: 0.000002,
+    cachedInput: 0.0000001,
+    cacheCreation: 0.000001,
+    cacheRead: 0.0000001,
+    reasoningOutput: 0.000003,
+  },
+  models: {},
+  updatedAt: new Date().toISOString(),
+};
+
+function tenant(): string {
+  const t = process.env.DEFAULT_TENANT_ID?.trim();
+  if (!t) throw new Error("DEFAULT_TENANT_ID is required for pricing config.");
+  return t;
+}
+
+function normalizeEntry(input: Partial<ModelPricingEntry> | undefined, fallback: ModelPricingEntry): ModelPricingEntry {
+  const base = fallback;
+  const next: ModelPricingEntry = {
+    tier: input?.tier?.trim() || undefined,
+    input: Number(input?.input ?? base.input),
+    output: Number(input?.output ?? base.output),
+    cachedInput: input?.cachedInput ?? base.cachedInput,
+    cacheCreation: input?.cacheCreation ?? base.cacheCreation,
+    cacheRead: input?.cacheRead ?? base.cacheRead,
+    reasoningOutput: input?.reasoningOutput ?? base.reasoningOutput,
+    inputPerM: input?.inputPerM,
+    outputPerM: input?.outputPerM,
+    reasoningPerM: input?.reasoningPerM,
+    billingMultiplier:
+      input?.billingMultiplier === undefined
+        ? base.billingMultiplier
+        : normalizeBillingMultiplier(input.billingMultiplier),
+    effectiveDate: input?.effectiveDate?.trim() || undefined,
+    surcharges: Array.isArray(input?.surcharges) ? input!.surcharges!.map(normalizeSurcharge) : [],
+  };
+  return next;
+}
+
+function normalizeSurcharge(rule: SurchargeRule): SurchargeRule {
+  const when: SurchargeWhen = {};
+  if (rule.when?.contextTokensGte != null) when.contextTokensGte = Math.max(0, Math.floor(Number(rule.when.contextTokensGte)));
+  if (rule.when?.hasReasoning != null) when.hasReasoning = !!rule.when.hasReasoning;
+  if (rule.when?.toolCallsGte != null) when.toolCallsGte = Math.max(0, Math.floor(Number(rule.when.toolCallsGte)));
+  const applyTo = rule.applyTo;
+  return {
+    name: rule.name?.trim() || undefined,
+    when,
+    addPerM: rule.addPerM != null && Number.isFinite(Number(rule.addPerM)) ? Number(rule.addPerM) : undefined,
+    multiplierPct:
+      rule.multiplierPct != null && Number.isFinite(Number(rule.multiplierPct)) ? Number(rule.multiplierPct) : undefined,
+    applyTo: applyTo === "input" || applyTo === "output" || applyTo === "reasoning" || applyTo === "total" ? applyTo : "total",
+  };
+}
+
+function normalizePricing(input: Partial<PricingConfig> | undefined): PricingConfig {
+  const seedDefault = normalizeEntry(input?.default, DEFAULT_CONFIG.default);
+  const models: Record<string, ModelPricingEntry[]> = {};
+  for (const [model, entries] of Object.entries(input?.models ?? {})) {
+    const key = model.trim();
+    if (!key) continue;
+    const list = Array.isArray(entries) ? entries : [entries as ModelPricingEntry];
+    models[key] = list.map((entry) => normalizeEntry(entry, seedDefault));
+  }
+  const updatedAt = new Date().toISOString();
+  const versionBase = input?.version?.trim() || `pricing-${updatedAt.slice(0, 10)}`;
+  const version = `${versionBase}-${createHash("sha256").update(JSON.stringify({ default: seedDefault, models })).digest("hex").slice(0, 8)}`;
+  return {
+    version,
+    default: seedDefault,
+    models,
+    updatedAt,
+  };
+}
+
+/** 供跨数据库契约测试验证动态计价字段不会在规范化时丢失。 */
+export const normalizePricingConfig = normalizePricing;
+
+function configFromRow(payload: Record<string, unknown> | undefined | null): PricingConfig | null {
+  if (!payload || typeof payload !== "object") return null;
+  return normalizePricing(payload as Partial<PricingConfig>);
+}
+
+/** 租户动态计价整包读取。 */
+export async function getPricingConfig(): Promise<PricingConfig> {
+  const tid = tenant();
+  const db = getAdminMysqlDb();
+  const row = await db.select().from(pricingTable).where(eq(pricingTable.tenantId, tid)).limit(1);
+  if (!row.length) {
+    const seed = normalizePricing(DEFAULT_CONFIG);
+    await db
+      .insert(pricingTable)
+      .values({
+        tenantId: tid,
+        config: seed as unknown as Record<string, unknown>,
+        updatedAt: new Date(seed.updatedAt),
+      })
+      .onDuplicateKeyUpdate({
+        set: {
+          config: seed as unknown as Record<string, unknown>,
+          updatedAt: new Date(seed.updatedAt),
+        },
+      });
+    return seed;
+  }
+  const parsed = configFromRow(row[0]?.config as Record<string, unknown>);
+  return parsed ?? normalizePricing(DEFAULT_CONFIG);
+}
+
+export async function setPricingConfig(input: Partial<PricingConfig>): Promise<PricingConfig> {
+  const tid = tenant();
+  const next = normalizePricing(input);
+  const db = getAdminMysqlDb();
+  await db
+    .insert(pricingTable)
+    .values({
+      tenantId: tid,
+      config: next as unknown as Record<string, unknown>,
+      updatedAt: new Date(next.updatedAt),
+    })
+    .onDuplicateKeyUpdate({
+      set: {
+        config: next as unknown as Record<string, unknown>,
+        updatedAt: new Date(next.updatedAt),
+      },
+    });
+  return next;
+}
+
+/** 网关拉取用的 active 计价快照（camelCase 字段对齐 Go json tags）。 */
+export async function buildPricingSnapshotForGateway(): Promise<PricingConfig> {
+  return getPricingConfig();
+}

@@ -1,0 +1,335 @@
+{
+  "version": "7",
+  "dialect": "mysql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "5",
+      "when": 1784158783965,
+      "tag": "0000_mysql_baseline",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1784158783966,
+      "tag": "0001_audit_checksum_payload",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1784158783967,
+      "tag": "0002_desktop_device_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1784158783968,
+      "tag": "0003_enterprise_runtime_web_search",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1784158783969,
+      "tag": "0004_web_search_max_results_default",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "5",
+      "when": 1784158783970,
+      "tag": "0005_enterprise_runtime_deep_research",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "5",
+      "when": 1784158783971,
+      "tag": "0006_deep_research_enabled_default_true",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "5",
+      "when": 1784158783972,
+      "tag": "0007_enterprise_chat_artifacts",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "5",
+      "when": 1784158783973,
+      "tag": "0008_chat_sessions_pinned_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "5",
+      "when": 1785322028583,
+      "tag": "0009_user_password_change_required",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "5",
+      "when": 1785322028584,
+      "tag": "0010_chat_history_operations",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "5",
+      "when": 1785600000001,
+      "tag": "0011_enterprise_chat_attachments",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "5",
+      "when": 1785700000001,
+      "tag": "0012_chat_share_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "5",
+      "when": 1785800000001,
+      "tag": "0013_enterprise_deep_research_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "5",
+      "when": 1785900000001,
+      "tag": "0014_chat_artifacts_content_mediumtext",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "5",
+      "when": 1786000000001,
+      "tag": "0015_chat_messages_content_mediumtext",
+      "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "5",
+      "when": 1786522380151,
+      "tag": "0016_web_search_provider_pool",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "5",
+      "when": 1786608000001,
+      "tag": "0017_web_search_call_budget",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "5",
+      "when": 1786694400001,
+      "tag": "0018_deep_research_provider_budget",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "5",
+      "when": 1786780800001,
+      "tag": "0019_deep_research_run_coordination",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "5",
+      "when": 1786867200001,
+      "tag": "0020_web_search_daily_provider_quota",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "5",
+      "when": 1786953600000,
+      "tag": "0021_calculator_enabled",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "5",
+      "when": 1787040000001,
+      "tag": "0022_gateway_audit_trace_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "5",
+      "when": 1787126400001,
+      "tag": "0023_portal_request_logs",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "5",
+      "when": 1787212800001,
+      "tag": "0024_deep_research_runs_trace_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "5",
+      "when": 1787299200001,
+      "tag": "0025_portal_request_logs_mode",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "5",
+      "when": 1787385600001,
+      "tag": "0026_portal_request_logs_session_idx",
+      "breakpoints": true
+    },
+    {
+      "idx": 27,
+      "version": "5",
+      "when": 1787471000000,
+      "tag": "0027_enterprise_capability_packs",
+      "breakpoints": true
+    },
+    {
+      "idx": 28,
+      "version": "5",
+      "when": 1787557400000,
+      "tag": "0028_enterprise_user_groups",
+      "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "5",
+      "when": 1787643800000,
+      "tag": "0029_enterprise_feature_assignments",
+      "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "5",
+      "when": 1787730200000,
+      "tag": "0030_enterprise_user_opt_outs",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "5",
+      "when": 1787816600000,
+      "tag": "0031_enterprise_skill_scan_result",
+      "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "5",
+      "when": 1787903000000,
+      "tag": "0032_drop_feature_assignments",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "5",
+      "when": 1787989400000,
+      "tag": "0033_enterprise_runtime_attachment_routing",
+      "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "5",
+      "when": 1788075800001,
+      "tag": "0034_enterprise_config_share_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "5",
+      "when": 1788162200001,
+      "tag": "0035_enterprise_config_market_items",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "5",
+      "when": 1788248600001,
+      "tag": "0036_enterprise_config_market_releases",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "5",
+      "when": 1788335000001,
+      "tag": "0037_mcp_server_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "5",
+      "when": 1788421400001,
+      "tag": "0038_enterprise_capability_shelf_order",
+      "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "5",
+      "when": 1788421400002,
+      "tag": "0039_chat_message_feedback",
+      "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "5",
+      "when": 1788507800003,
+      "tag": "0040_capability_sync_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "5",
+      "when": 1788594200001,
+      "tag": "0041_chat_message_feedback_source",
+      "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "5",
+      "when": 1788680600001,
+      "tag": "0042_config_market_delivery_state",
+      "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "5",
+      "when": 1788680600002,
+      "tag": "0043_config_market_download_receipts",
+      "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "5",
+      "when": 1789014743001,
+      "tag": "0044_principals_role_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 45,
+      "version": "5",
+      "when": 1789014743002,
+      "tag": "0045_assistant_actions",
+      "breakpoints": true
+    },
+    {
+      "idx": 46,
+      "version": "5",
+      "when": 1789084800001,
+      "tag": "0046_assistant_session_provenance",
+      "breakpoints": true
+    }
+  ]
+}

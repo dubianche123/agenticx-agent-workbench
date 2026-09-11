@@ -1,0 +1,438 @@
+import { useEffect, useState } from "react";
+import { ChevronRight, X } from "lucide-react";
+import { AvatarToolPermissionDialog } from "./AvatarToolPermissionDialog";
+import { DefaultModelSelect } from "./DefaultModelSelect";
+
+type SkillRow = { name: string; description: string };
+
+type Props = {
+  open: boolean;
+  onClose: () => void;
+  onCreate: (data: {
+    name: string;
+    role: string;
+    systemPrompt: string;
+    blurb?: string;
+    tags?: string[];
+    toolsEnabled: Record<string, boolean>;
+    skillsEnabled?: Record<string, boolean>;
+    defaultProvider?: string;
+    defaultModel?: string;
+    workspaceDir?: string;
+  }) => Promise<void>;
+  /** "AI 创建" tab: hand the description off to a new Meta chat draft instead of a one-shot API call. */
+  onCreateViaChat: (description: string) => void;
+};
+
+type Mode = "manual" | "ai";
+export function AvatarCreateDialog({ open, onClose, onCreate, onCreateViaChat }: Props) {
+  const [mode, setMode] = useState<Mode>("ai");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState("");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [blurb, setBlurb] = useState("");
+  const [tagsInput, setTagsInput] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [aiError, setAiError] = useState("");
+  const [toolsDialogOpen, setToolsDialogOpen] = useState(false);
+  const [toolsEnabled, setToolsEnabled] = useState<Record<string, boolean>>({});
+  const [skillsSectionOpen, setSkillsSectionOpen] = useState(false);
+  const [skillsItems, setSkillsItems] = useState<SkillRow[]>([]);
+  const [loadingSkills, setLoadingSkills] = useState(false);
+  /** Per-skill `false` = disabled for this avatar (aligned with avatar.yaml skills_enabled). */
+  const [skillsEnabledDraft, setSkillsEnabledDraft] = useState<Record<string, boolean>>({});
+  const [defaultProvider, setDefaultProvider] = useState("");
+  const [defaultModel, setDefaultModel] = useState("");
+  const [workspaceDir, setWorkspaceDir] = useState("");
+  const customizedCount = Object.keys(toolsEnabled).filter((key) => toolsEnabled[key] !== undefined).length;
+  const skillsCustomizedCount = Object.keys(skillsEnabledDraft).filter((k) => skillsEnabledDraft[k] === false).length;
+
+  // AI creation is the onboarding default, including when the dialog is reopened.
+  useEffect(() => {
+    if (open) setMode("ai");
+  }, [open]);
+
+  useEffect(() => {
+    if (!open || mode !== "manual" || !skillsSectionOpen) return;
+    let cancelled = false;
+    (async () => {
+      setLoadingSkills(true);
+      try {
+        const r = await window.agenticxDesktop.loadSkills();
+        if (!cancelled && r.ok) {
+          const list = (r.items ?? []).filter((s) => !s.globally_disabled);
+          setSkillsItems(list.map((s) => ({ name: s.name, description: s.description })));
+        }
+      } finally {
+        if (!cancelled) setLoadingSkills(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open, mode, skillsSectionOpen]);
+
+  if (!open) return null;
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setBusy(true);
+    try {
+      const skillsOnlyFalse = Object.fromEntries(
+        Object.entries(skillsEnabledDraft).filter(([, v]) => v === false),
+      );
+      const tags = tagsInput
+        .split(/[,，]/)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      await onCreate({
+        name: name.trim(),
+        role: role.trim(),
+        systemPrompt: systemPrompt.trim(),
+        blurb: blurb.trim(),
+        tags,
+        toolsEnabled: { ...toolsEnabled },
+        ...(Object.keys(skillsOnlyFalse).length > 0 ? { skillsEnabled: skillsOnlyFalse } : {}),
+        defaultProvider: defaultProvider.trim(),
+        defaultModel: defaultModel.trim(),
+        workspaceDir: workspaceDir.trim(),
+      });
+      setName("");
+      setRole("");
+      setSystemPrompt("");
+      setBlurb("");
+      setTagsInput("");
+      setToolsEnabled({});
+      setSkillsEnabledDraft({});
+      setDefaultProvider("");
+      setDefaultModel("");
+      setWorkspaceDir("");
+      setSkillsSectionOpen(false);
+      setToolsDialogOpen(false);
+      onClose();
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreateViaChat = () => {
+    const desc = description.trim();
+    if (!desc) return;
+    onCreateViaChat(desc);
+    setDescription("");
+    setAiError("");
+    resetAndClose();
+  };
+
+  const resetAndClose = () => {
+    setName("");
+    setRole("");
+    setSystemPrompt("");
+    setBlurb("");
+    setTagsInput("");
+    setDescription("");
+    setAiError("");
+    setToolsEnabled({});
+    setSkillsEnabledDraft({});
+    setSkillsSectionOpen(false);
+    setToolsDialogOpen(false);
+    setDefaultProvider("");
+    setDefaultModel("");
+    setWorkspaceDir("");
+    onClose();
+  };
+
+  const handleChooseWorkspace = async () => {
+    const picker = window.agenticxDesktop.chooseDirectory;
+    if (typeof picker !== "function") {
+      setAiError("当前桌面版本不支持选择文件夹。");
+      return;
+    }
+    try {
+      const result = await picker();
+      if (result?.ok && result.path) {
+        setWorkspaceDir(result.path);
+        setAiError("");
+      } else if (!result?.canceled && result?.error) {
+        setAiError(`选择工作区失败: ${result.error}`);
+      }
+    } catch (err) {
+      setAiError(`选择工作区失败: ${String(err)}`);
+    }
+  };
+
+  return (
+    <>
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-none">
+        <div
+          className="agx-avatar-create-dialog flex max-h-[calc(100vh-2rem)] w-[440px] max-w-[95vw] flex-col overflow-hidden rounded-xl border border-border shadow-2xl"
+          style={{ backgroundColor: "var(--surface-base-fallback, var(--surface-panel))" }}
+        >
+          <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-surface-panel px-5 py-3">
+            <h3 className="text-[16px] font-semibold text-text-primary">创建数字专家</h3>
+            <button
+              type="button"
+              aria-label="关闭"
+              title="关闭"
+              className="shrink-0 rounded-md p-1.5 text-text-muted transition hover:bg-surface-hover hover:text-text-strong"
+              onClick={resetAndClose}
+            >
+              <X className="h-5 w-5" strokeWidth={2.25} />
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">
+          <div className="mb-4 flex gap-1 rounded-lg bg-surface-card p-0.5">
+          {([["ai", "AI 创建"], ["manual", "手动创建"]] as const).map(([key, label]) => (
+            <button
+              key={key}
+              className={`flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition ${
+                mode === key
+                  ? "border-transparent bg-btnPrimary text-btnPrimary-text"
+                  : "border-transparent text-text-subtle hover:border-border-strong hover:bg-surface-card hover:text-text-strong"
+              }`}
+              onClick={() => setMode(key)}
+            >
+              {label}
+            </button>
+          ))}
+          </div>
+
+          {mode === "manual" ? (
+          <>
+            <div className="space-y-3">
+              <label className="block text-sm text-text-muted">
+                名称 <span className="text-rose-400">*</span>
+                <input
+                  className="mt-1 w-full rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="例：Coder、Researcher、Writer"
+                  autoFocus
+                />
+              </label>
+              <label className="block text-sm text-text-muted">
+                角色
+                <input
+                  className="mt-1 w-full rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  value={role}
+                  onChange={(e) => setRole(e.target.value)}
+                  placeholder="例：全栈开发工程师、数据分析师"
+                />
+              </label>
+              <label className="block text-sm text-text-muted">
+                系统提示
+                <span className="ml-1 text-xs text-text-faint">(可选)</span>
+                <textarea
+                  className="mt-1 w-full resize-none rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  rows={3}
+                  value={systemPrompt}
+                  onChange={(e) => setSystemPrompt(e.target.value)}
+                  placeholder="自定义角色行为指令..."
+                />
+              </label>
+              <label className="block text-sm text-text-muted">
+                简介
+                <span className="ml-1 text-xs text-text-faint">(可选，展示在专家卡片上)</span>
+                <textarea
+                  className="mt-1 w-full resize-none rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  rows={2}
+                  value={blurb}
+                  onChange={(e) => setBlurb(e.target.value)}
+                  placeholder="一两句话说明该专家能做什么，会展示在专家卡片上..."
+                />
+              </label>
+              <label className="block text-sm text-text-muted">
+                标签
+                <span className="ml-1 text-xs text-text-faint">(可选，逗号分隔，最多 8 个)</span>
+                <input
+                  className="mt-1 w-full rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  value={tagsInput}
+                  onChange={(e) => setTagsInput(e.target.value)}
+                  placeholder="例：PyTorch优化, 大模型运行框架, GPU性能调优"
+                />
+              </label>
+              <label className="block text-sm text-text-muted">
+                默认模型
+                <span className="ml-1 text-xs text-text-faint">(新建会话时使用)</span>
+                <DefaultModelSelect
+                  provider={defaultProvider}
+                  model={defaultModel}
+                  onChange={(p, m) => {
+                    setDefaultProvider(p);
+                    setDefaultModel(m);
+                  }}
+                />
+              </label>
+              <div className="block text-sm text-text-muted">
+                工作区目录
+                <span className="ml-1 text-xs text-text-faint">(可选)</span>
+                <div className="mt-1 flex items-center gap-2">
+                  <div
+                    className="min-w-0 flex-1 truncate rounded-md border border-border bg-surface-panel px-3 py-2 text-xs text-text-subtle"
+                    title={workspaceDir}
+                  >
+                    {workspaceDir || "未选择（创建后使用默认工作区）"}
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md border border-border px-3 py-2 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                    onClick={() => void handleChooseWorkspace()}
+                  >
+                    选择文件夹
+                  </button>
+                  {workspaceDir ? (
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md border border-border px-2 py-2 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                      onClick={() => setWorkspaceDir("")}
+                    >
+                      恢复默认
+                    </button>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-[11px] text-text-faint">
+                  仅使用系统文件夹选择器，避免把任意路径误绑定到专家。
+                </p>
+              </div>
+
+              <button
+                type="button"
+                className="w-full rounded-md border border-border bg-surface-card px-3 py-2 text-left text-sm text-text-muted transition hover:bg-surface-hover"
+                onClick={() => setToolsDialogOpen(true)}
+              >
+                工具权限（{customizedCount > 0 ? `已自定义 ${customizedCount} 项` : "继承全局默认"}）
+              </button>
+
+              <div className="rounded-md border border-border bg-surface-card">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left text-sm text-text-muted transition hover:bg-surface-hover focus:outline-none focus-visible:ring-1 focus-visible:ring-[rgba(var(--theme-color-rgb),0.35)]"
+                  onClick={() => setSkillsSectionOpen((v) => !v)}
+                >
+                  <ChevronRight
+                    className={`h-4 w-4 shrink-0 text-text-faint transition-transform ${skillsSectionOpen ? "rotate-90" : ""}`}
+                  />
+                  <span>
+                    技能（{skillsCustomizedCount > 0 ? `已禁用 ${skillsCustomizedCount} 项` : "默认全部启用"}）
+                  </span>
+                </button>
+                {skillsSectionOpen && (
+                  <div className="space-y-2 border-t border-[var(--border-muted)] px-3 py-2">
+                    <p className="text-[11px] text-text-faint">
+                      全局已在设置中禁用的技能不会列出。关闭表示该专家不使用对应技能。
+                    </p>
+                    {loadingSkills ? (
+                      <div className="py-2 text-xs text-text-faint">加载中...</div>
+                    ) : skillsItems.length === 0 ? (
+                      <div className="py-2 text-xs text-text-faint">暂无可配置技能。</div>
+                    ) : (
+                      <div className="max-h-[200px] divide-y divide-[var(--border-muted)] overflow-y-auto rounded-md border border-border bg-surface-card">
+                        {skillsItems.map((skill) => {
+                          const disabled = skillsEnabledDraft[skill.name] === false;
+                          return (
+                            <div
+                              key={skill.name}
+                              className="flex items-center justify-between gap-2 px-2.5 py-2"
+                            >
+                              <span className="min-w-0 truncate text-xs text-text-primary">{skill.name}</span>
+                              <button
+                                type="button"
+                                className={`shrink-0 rounded border px-2 py-0.5 text-[11px] transition focus:outline-none focus-visible:ring-1 focus-visible:ring-[rgba(var(--theme-color-rgb),0.35)] ${
+                                  disabled
+                                    ? "border-[var(--border-muted)] text-text-muted hover:bg-surface-hover"
+                                    : "border-[var(--ui-btn-primary-border)] bg-[rgba(var(--theme-color-rgb),0.1)] text-[var(--kb-citation-fg)] hover:bg-[rgba(var(--theme-color-rgb),0.16)]"
+                                }`}
+                                onClick={() => {
+                                  setSkillsEnabledDraft((prev) => {
+                                    const next = { ...prev };
+                                    if (disabled) delete next[skill.name];
+                                    else next[skill.name] = false;
+                                    return next;
+                                  });
+                                }}
+                              >
+                                {disabled ? "已禁用" : "启用"}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                className="rounded-md border border-border px-4 py-1.5 text-sm text-text-subtle transition hover:bg-surface-hover"
+                onClick={resetAndClose}
+              >
+                取消
+              </button>
+              <button
+                className="rounded-md bg-btnPrimary px-4 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-40"
+                disabled={busy || !name.trim()}
+                onClick={handleCreate}
+              >
+                {busy ? "创建中..." : "创建"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div className="space-y-3">
+              <div className="rounded-lg border border-[rgba(var(--theme-color-rgb),0.2)] bg-[rgba(var(--theme-color-rgb),0.06)] px-3 py-2.5 text-xs leading-5 text-text-muted">
+                AI 会根据你的需求自动补全名称、签名、角色、标签、运行权限和必要的核心资料；工作区默认使用专家专属隔离目录。确认前会一次展示完整方案，无需重复填写这些字段。
+              </div>
+              <label className="block text-sm text-text-muted">
+                描述你想要的专家
+                <textarea
+                  className="mt-1 w-full resize-none rounded-md border border-border bg-surface-panel px-3 py-2 text-sm"
+                  rows={4}
+                  value={description}
+                  onChange={(e) => setDescription(e.target.value)}
+                  placeholder="描述专家的能力、性格和专长..."
+                  autoFocus
+                />
+              </label>
+              {aiError && (
+                <div className="rounded-md bg-rose-500/10 px-3 py-2 text-xs text-rose-400">
+                  {aiError}
+                </div>
+              )}
+            </div>
+            <div className="mt-5 flex items-center justify-end gap-2">
+              <button
+                className="rounded-md border border-border px-4 py-1.5 text-sm text-text-subtle transition hover:bg-surface-hover"
+                onClick={resetAndClose}
+              >
+                取消
+              </button>
+              <button
+                className="rounded-md bg-btnPrimary px-4 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-40"
+                disabled={!description.trim()}
+                onClick={handleCreateViaChat}
+              >
+                开始创建
+              </button>
+            </div>
+          </>
+          )}
+          </div>
+        </div>
+      </div>
+      <AvatarToolPermissionDialog
+        open={toolsDialogOpen}
+        mode="avatar"
+        title="新专家 · 工具权限"
+        initialToolsEnabled={toolsEnabled}
+        onClose={() => setToolsDialogOpen(false)}
+        onSave={async (next) => {
+          setToolsEnabled(next);
+        }}
+      />
+    </>
+  );
+}

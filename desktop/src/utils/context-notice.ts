@@ -1,0 +1,112 @@
+import type { ContextNoticeKind, Message } from "../store";
+
+export type { ContextNoticeKind };
+
+const LEGACY_PREFIX_RE = /^(?:⚠️|🗜️|❌)\s*/u;
+
+export function stripLegacyNoticePrefix(content: string): string {
+  return String(content ?? "").trim().replace(LEGACY_PREFIX_RE, "").trim();
+}
+
+function detectKindFromText(text: string): ContextNoticeKind | null {
+  // 剪枝的两句文案都不含「已压缩」，但兜底那句含「任务继续」——必须排在下面的
+  // 通用规则之前，否则会被误判成 compaction_proactive。
+  if (text.includes("过大的工具结果") || text.includes("超大工具结果")) {
+    return "compaction_prune";
+  }
+  if (
+    text.includes("已自动切换为精简模式")
+    || text.includes("已自动切换精简模式")
+    || text.includes("已自动切换精简 Meta")
+  ) {
+    return "context_compact";
+  }
+  if (text.includes("精简模式仍超出") || text.includes("上下文超限")) return "context_compact";
+  if (text.includes("上下文 token 接近上限")) return "budget_compress";
+  if (text.includes("自动上下文压缩已暂停")) return "compactor_cb";
+  if (text.includes("上下文接近上限，已压缩")) return "compaction_reactive";
+  if (text.includes("Token 接近上限，已自动压缩")) return "compaction_reactive";
+  if (text.includes("已压缩") && text.includes("任务继续")) return "compaction_proactive";
+  if (text.includes("已自动压缩") && text.includes("历史")) return "compaction_proactive";
+  return null;
+}
+
+export function noticeKindForRuntimeWarning(
+  detector: string,
+  warningLevel: string,
+): ContextNoticeKind {
+  if (detector === "enterprise_quota") return "enterprise_quota";
+  if (warningLevel === "red") return "token_warning_red";
+  if (warningLevel === "yellow") return "token_warning_yellow";
+  if (detector === "context_budget_compact" || detector === "context_window") {
+    return "context_compact";
+  }
+  if (detector === "compactor_circuit_breaker") return "compactor_cb";
+  return "budget_compress";
+}
+
+/** keep in sync with agenticx/studio/compaction_notice.py build_compaction_notice_content */
+export function buildCompactionNoticeText(count: number, reactive: boolean): string {
+  if (reactive) {
+    return `上下文接近上限，已压缩 ${count} 条历史，任务继续。`;
+  }
+  return `已压缩 ${count} 条较早历史，任务继续。`;
+}
+
+/** keep in sync with agenticx/studio/compaction_notice.py DEFAULT_PRUNE_NOTICE */
+export const DEFAULT_PRUNE_NOTICE_TEXT = "已清理较早的超大工具结果，历史未被摘要，任务继续。";
+
+/** keep in sync with agenticx/studio/compaction_notice.py build_prune_notice_content */
+export function buildPruneNoticeText(summary: string): string {
+  return String(summary ?? "").trim() || DEFAULT_PRUNE_NOTICE_TEXT;
+}
+
+/**
+ * 剪枝独自解除了压力：动了历史，但一条都没被摘要替换掉。
+ * 对齐 Python 侧 agenticx/runtime/compactor.py is_prune_only_result。
+ */
+export function isPruneOnlyCompaction(compactedCount: number): boolean {
+  return compactedCount === 0;
+}
+
+/**
+ * COMPACTION 事件 → 可见通知。剪枝和摘要是两件事，别共用文案：剪枝时消息还在原位，
+ * 说「已压缩 0 条较早历史」既不准确也看不懂，改用 compactor 自己给的说明。
+ */
+export function buildCompactionEventNotice(
+  compactedCount: number,
+  reactive: boolean,
+  summary: string,
+): { text: string; noticeKind: ContextNoticeKind } {
+  if (isPruneOnlyCompaction(compactedCount)) {
+    return { text: buildPruneNoticeText(summary), noticeKind: "compaction_prune" };
+  }
+  return {
+    text: buildCompactionNoticeText(compactedCount, reactive),
+    noticeKind: reactive ? "compaction_reactive" : "compaction_proactive",
+  };
+}
+
+/** Context/token budget notices should render as a flat inline line, not ToolCallCard. */
+export function parseContextNotice(
+  message: Pick<Message, "role" | "content" | "toolName" | "toolCallId" | "noticeKind">
+): { kind: ContextNoticeKind; text: string } | null {
+  if (message.role !== "tool") return null;
+  if (message.noticeKind === "budget_exceeded") return null;
+  if ((message.toolName ?? "").trim()) return null;
+  if ((message.toolCallId ?? "").trim()) return null;
+
+  const text = stripLegacyNoticePrefix(message.content);
+  if (!text) return null;
+
+  const kind = message.noticeKind ?? detectKindFromText(text);
+  if (!kind) return null;
+
+  return { kind, text };
+}
+
+export function isContextNoticeMessage(
+  message: Pick<Message, "role" | "content" | "toolName" | "toolCallId" | "noticeKind">
+): boolean {
+  return parseContextNotice(message) !== null;
+}

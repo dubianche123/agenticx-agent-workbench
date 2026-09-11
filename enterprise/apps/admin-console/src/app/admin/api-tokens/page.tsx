@@ -1,0 +1,496 @@
+"use client";
+import { adminFetch } from "../../../lib/admin-client-auth";
+
+import { Suspense, useCallback, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+
+import { SessionGrantsPanel } from "../../../components/credentials/SessionGrantsPanel";
+import { QuotaScopeEditor } from "../../../components/quota/QuotaScopeEditor";
+import {
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Dialog,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Label,
+  PageHeader,
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  toast,
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "@agenticx/ui";
+import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { useLocale, useTranslations } from "next-intl";
+import {
+  getPatPlainFromVault,
+  plainMatchesTokenPrefix,
+  removePatFromVault,
+  upsertPatVault,
+} from "../../../lib/pat-vault";
+import {
+  GatewayPanelHeader,
+  useGatewayWorkspace,
+} from "../../../components/gateway/GatewayWorkspaceContext";
+import { gatewayHref } from "../../../lib/gateway-navigation";
+
+type PatRow = {
+  id: number;
+  name: string;
+  tokenPrefix: string;
+  status: string;
+  expireAt: string | null;
+  lastUsedAt: string | null;
+  userId: string;
+};
+
+type HolderUser = { id: string; displayName: string; email: string };
+
+function formatDateTime(value: string, locale: string): string {
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return value;
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function displayTokenName(value: string): string {
+  return value.replace(/\s*[·•-]\s*unknown\s*$/i, "").trim() || value;
+}
+
+async function readJsonBody<T>(res: Response, fallback: T): Promise<T> {
+  const text = await res.text();
+  if (!text.trim()) return fallback;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+/**
+ * userId 是一串 ULID。列表上直接印出来，管理员没法判断这是谁——要么去数据库查，
+ * 要么挨个点开用户页比对。拉一次用户目录换成姓名+邮箱，认不出来的才回落到 ID。
+ */
+function useHolderDirectory() {
+  const [items, setItems] = useState<HolderUser[]>([]);
+  useEffect(() => {
+    void (async () => {
+      try {
+        const res = await adminFetch("/api/admin/users?limit=500", { cache: "no-store" });
+        const json = (await res.json()) as {
+          data?: { items?: Array<{ id: string; displayName?: string; email?: string }> };
+        };
+        setItems(
+          (json.data?.items ?? []).map((user) => ({
+            id: user.id,
+            displayName: user.displayName ?? "",
+            email: user.email ?? "",
+          })),
+        );
+      } catch {
+        // 目录拉不到就退回显示 ID，不影响令牌本身的操作。
+      }
+    })();
+  }, []);
+  return {
+    items,
+    byId: new Map(items.map((user) => [user.id, user])),
+  };
+}
+
+function ApiTokensContent() {
+  const embedded = useGatewayWorkspace();
+  const locale = useLocale();
+  const copy = (zh: string, en: string) => (locale === "en" ? en : zh);
+  const holders = useHolderDirectory();
+  const [quotaFor, setQuotaFor] = useState<number | null>(null);
+  const t = useTranslations("pages.admin.apiTokens");
+  const tc = useTranslations("common");
+  const [tokens, setTokens] = useState<PatRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [open, setOpen] = useState(false);
+  const [plainToken, setPlainToken] = useState<string | null>(null);
+  const [form, setForm] = useState({ name: "", userId: "", expireDays: "90" });
+  const [vaultVersion, setVaultVersion] = useState(0);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteTarget, setPasteTarget] = useState<PatRow | null>(null);
+  const [pasteValue, setPasteValue] = useState("");
+
+  const bumpVault = () => setVaultVersion((v) => v + 1);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await adminFetch("/api/admin/api-tokens");
+      const json = await readJsonBody(res, { code: "50000", message: "empty response", data: { tokens: [] as PatRow[] } });
+      if (!res.ok || json.code !== "00000") throw new Error(json.message || "load failed");
+      const all = json.data?.tokens ?? [];
+      for (const row of all) {
+        if (row.status !== "active") removePatFromVault(row.id);
+      }
+      setTokens(all.filter((row) => row.status === "active"));
+      bumpVault();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : tc("toast.loadFailed"));
+    } finally {
+      setLoading(false);
+    }
+  }, [tc]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const openPasteDialog = (row: PatRow) => {
+    setPasteTarget(row);
+    setPasteValue("");
+    setPasteOpen(true);
+  };
+
+  const savePastedKey = () => {
+    if (!pasteTarget) return;
+    const trimmed = pasteValue.trim();
+    if (!plainMatchesTokenPrefix(trimmed, pasteTarget.tokenPrefix)) {
+      toast.error(t("pasteKeyMismatch"));
+      return;
+    }
+    upsertPatVault({
+      id: pasteTarget.id,
+      name: pasteTarget.name,
+      tokenPrefix: pasteTarget.tokenPrefix,
+      plainToken: trimmed,
+    });
+    bumpVault();
+    setPasteOpen(false);
+    setPasteTarget(null);
+    setPasteValue("");
+    toast.success(tc("actions.save"));
+  };
+
+  const onCreate = async () => {
+    if (!form.name.trim()) {
+      toast.error(t("nameRequired"));
+      return;
+    }
+    if (!form.userId) {
+      toast.error(t("userRequired"));
+      return;
+    }
+    try {
+      const res = await adminFetch("/api/admin/api-tokens", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: form.name,
+          userId: form.userId,
+          expireDays: Number(form.expireDays) || 90,
+        }),
+      });
+      const json = await readJsonBody(res, { code: "50000", message: "empty response", data: {} as { token?: string; record?: PatRow } });
+      if (!res.ok || json.code !== "00000") throw new Error(json.message || "create failed");
+      const plain = json.data?.token?.trim() ?? "";
+      const record = json.data?.record;
+      if (plain && record) {
+        upsertPatVault({
+          id: record.id,
+          name: record.name,
+          tokenPrefix: record.tokenPrefix,
+          plainToken: plain,
+        });
+        bumpVault();
+      }
+      setPlainToken(plain || null);
+      setOpen(false);
+      setForm({ name: "", userId: "", expireDays: "90" });
+      await load();
+      toast.success(t("toast.createSuccess"));
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : t("toast.createFailed"));
+    }
+  };
+
+  const onRevoke = async (id: number) => {
+    if (!confirm(t("confirmRevoke"))) return;
+    const res = await adminFetch(`/api/admin/api-tokens/${id}`, { method: "DELETE" });
+    const json = await readJsonBody(res, { code: "50000", message: "empty response" });
+    if (!res.ok || json.code !== "00000") {
+      toast.error(json.message || t("toast.revokeFailed"));
+      return;
+    }
+    removePatFromVault(id);
+    bumpVault();
+    toast.success(t("toast.revoked"));
+    await load();
+  };
+
+  return (
+    <div className="flex flex-col gap-6">
+      <GatewayPanelHeader
+        title={embedded ? copy("长期 API 令牌", "Long-lived API tokens") : copy("API 令牌", "API tokens")}
+        description={t("description")}
+        actions={
+          <Button size="sm" onClick={() => setOpen(true)}>
+            <Plus className="mr-1 h-4 w-4" /> {t("newToken")}
+          </Button>
+        }
+      />
+
+      {plainToken ? (
+        <Card className="border-amber-500/50">
+          <CardHeader>
+            <CardTitle className="text-sm">{t("plainTokenTitle")}</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <code className="block break-all rounded bg-muted p-3 text-xs">{plainToken}</code>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                void navigator.clipboard.writeText(plainToken);
+                toast.success(tc("actions.copy"));
+              }}
+            >
+              {tc("actions.copy")}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setPlainToken(null);
+              }}
+            >
+              {tc("actions.closeSaved")}
+            </Button>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {loading ? (
+        <p className="text-sm text-muted-foreground">{tc("states.loading")}</p>
+      ) : tokens.length === 0 ? (
+        <p className="text-sm text-muted-foreground">{tc("states.empty")}</p>
+      ) : (
+        <div className="grid gap-3">
+          {tokens.map((row) => {
+            const vaultPlain = getPatPlainFromVault(row.id);
+            void vaultVersion;
+            const holder = holders.byId.get(row.userId);
+            const holderLabel = holder
+              ? `${holder.displayName || holder.email}${holder.email && holder.displayName ? ` · ${holder.email}` : ""}`
+              : row.userId;
+            return (
+            <Card key={row.id}>
+              <CardContent className="flex items-center justify-between gap-4 pt-4">
+                <div>
+                  <p className="font-medium flex items-center gap-2">
+                    <KeyRound className="h-4 w-4" /> {displayTokenName(row.name)}
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    {row.tokenPrefix}… · {holderLabel}
+                    {row.lastUsedAt ? t("meta.lastUsed", { lastUsed: formatDateTime(row.lastUsedAt, locale) }) : ""}
+                  </p>
+                  {!vaultPlain ? (
+                    <p className="mt-1 text-xs text-muted-foreground/80">{t("vaultMissingHint")}</p>
+                  ) : null}
+                </div>
+                <div className="flex shrink-0 items-center gap-1">
+                  {vaultPlain ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        void navigator.clipboard.writeText(vaultPlain);
+                        toast.success(tc("actions.copy"));
+                      }}
+                    >
+                      {t("copyKey")}
+                    </Button>
+                  ) : (
+                    <Button size="sm" variant="outline" onClick={() => openPasteDialog(row)}>
+                      {t("pasteKey")}
+                    </Button>
+                  )}
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => setQuotaFor((current) => (current === row.id ? null : row.id))}
+                  >
+                    {copy("额度", "Quota")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="text-destructive"
+                    aria-label={`${t("confirmRevoke")} ${displayTokenName(row.name)}`}
+                    onClick={() => void onRevoke(row.id)}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              </CardContent>
+              {quotaFor === row.id ? (
+                <CardContent className="border-t pt-4">
+                  {/* 令牌额度原来要把 PAT ID 贴进一个输入框才能配。挂在令牌自己身上，
+                      ID 就不必出现在界面上。 */}
+                  <QuotaScopeEditor scope="apiTokens" id={String(row.id)} />
+                </CardContent>
+              ) : null}
+            </Card>
+            );
+          })}
+        </div>
+      )}
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("dialogTitle")}</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div>
+              <Label>{t("nameLabel")}</Label>
+              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+            </div>
+            <div>
+              <Label>{t("userIdLabel")}</Label>
+              <Select value={form.userId} onValueChange={(userId) => setForm({ ...form, userId })}>
+                <SelectTrigger>
+                  <SelectValue placeholder={t("userPlaceholder")} />
+                </SelectTrigger>
+                <SelectContent>
+                  {holders.items.map((user) => (
+                    <SelectItem key={user.id} value={user.id}>
+                      {user.displayName || user.email}{user.displayName && user.email ? ` · ${user.email}` : ""}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <Label>{t("expireDaysLabel")}</Label>
+              <Input value={form.expireDays} onChange={(e) => setForm({ ...form, expireDays: e.target.value })} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setOpen(false)}>
+              {tc("actions.cancel")}
+            </Button>
+            <Button onClick={() => void onCreate()} disabled={!form.name.trim() || !form.userId}>
+              {tc("actions.create")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={pasteOpen} onOpenChange={setPasteOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("pasteKeyTitle")}</DialogTitle>
+          </DialogHeader>
+          {pasteTarget ? (
+            <p className="text-xs text-muted-foreground">
+              {pasteTarget.name} · {pasteTarget.tokenPrefix}…
+            </p>
+          ) : null}
+          <div className="space-y-2">
+            <Label htmlFor="paste-key-input">{t("pasteKey")}</Label>
+            <Input
+              id="paste-key-input"
+              value={pasteValue}
+              onChange={(e) => setPasteValue(e.target.value)}
+              placeholder="agx-pat-..."
+              className="font-mono text-xs"
+            />
+            <p className="text-xs text-muted-foreground">{t("pasteKeyHint")}</p>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPasteOpen(false)}>
+              {tc("actions.cancel")}
+            </Button>
+            <Button onClick={savePastedKey}>{tc("actions.save")}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+/**
+ * 访问凭据：API 令牌与会话临时授权。
+ *
+ * 两者是同一件事的长短两端——都是带 scope 的授权、都能吊销，区别只在 PAT 长期有效、
+ * 会话授权带 TTL 到点自动失效。会话授权原本单独占一个一级菜单，但它是应急用的，
+ * 一年点不了几次，不值得和日常项并列。
+ */
+export default function ApiTokensPage() {
+  const embedded = useGatewayWorkspace();
+  const locale = useLocale();
+  const copy = (zh: string, en: string) => (locale === "en" ? en : zh);
+  return (
+    <div className={embedded ? "space-y-6" : "space-y-6 p-6"}>
+      {!embedded ? (
+        <PageHeader
+          title={copy("访问凭据", "Access credentials")}
+          description={copy(
+            "管理长期访问令牌与临时会话授权，可按权限范围控制并随时撤销。",
+            "Manage long-lived API tokens and temporary session grants with scoped permissions and instant revocation.",
+          )}
+        />
+      ) : null}
+      <Suspense fallback={null}>
+        <CredentialTabs />
+      </Suspense>
+    </div>
+  );
+}
+
+function CredentialTabs() {
+  const embedded = useGatewayWorkspace();
+  const locale = useLocale();
+  const copy = (zh: string, en: string) => (locale === "en" ? en : zh);
+  const router = useRouter();
+  const params = useSearchParams();
+  const active = (embedded ? params.get("credential") : params.get("tab")) === "grants"
+    ? "grants"
+    : "tokens";
+  const onChange = useCallback(
+    (value: string) => {
+      if (embedded) {
+        router.replace(gatewayHref("credentials", value === "grants" ? "grants" : "tokens"));
+        return;
+      }
+      router.replace(value === "grants" ? "/admin/api-tokens?tab=grants" : "/admin/api-tokens");
+    },
+    [embedded, router],
+  );
+  return (
+    <Tabs value={active} onValueChange={onChange}>
+      <TabsList>
+        <TabsTrigger value="tokens">{copy("API 令牌", "API tokens")}</TabsTrigger>
+        <TabsTrigger value="grants">{copy("会话授权", "Session grants")}</TabsTrigger>
+      </TabsList>
+      <TabsContent value="tokens" className="pt-4">
+        <ApiTokensContent />
+      </TabsContent>
+      <TabsContent value="grants" className="pt-4">
+        <SessionGrantsPanel />
+      </TabsContent>
+    </Tabs>
+  );
+}

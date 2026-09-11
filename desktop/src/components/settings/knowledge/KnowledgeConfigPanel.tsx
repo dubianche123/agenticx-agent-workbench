@@ -1,0 +1,927 @@
+// Plan-Id: machi-kb-stage1-local-mvp
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { AlertTriangle, BookOpen, Check, Download, Eye, EyeOff, Loader2, RotateCcw, Sparkles } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { Panel } from "../../ds/Panel";
+import { SettingsSwitch } from "../SettingsSwitch";
+import type { KBApi, ParserStatus } from "./api";
+import {
+  CHUNKING_STRATEGIES,
+  EMBEDDING_PROVIDERS,
+  RETRIEVAL_MODES,
+  defaultKBConfig,
+  type KBConfig,
+  type KBStats,
+} from "./types";
+import { KB_FIELD_BASE } from "./kb-field-classes";
+import { listKbEmbeddingModelOptions } from "../../../utils/embedding-model-options";
+import type { ProviderCatalogEntry } from "../../../utils/model-options";
+import { APP_DISPLAY_NAME } from "../../../constants/branding";
+
+type Props = {
+  api: KBApi;
+  /** Config currently persisted on the backend (used for diffing / rebuild detection). */
+  persistedConfig: KBConfig;
+  /** Working copy owned by the parent so the outer SettingsPanel can flush it. */
+  draft: KBConfig;
+  onDraftChange: (next: KBConfig) => void;
+  initialStats: KBStats | null;
+  /** Model-service catalog (visible models from provider settings / API scan). */
+  providerCatalog?: Record<string, ProviderCatalogEntry>;
+};
+
+export function KnowledgeConfigPanel({
+  api,
+  persistedConfig,
+  draft,
+  onDraftChange,
+  initialStats,
+  providerCatalog = {},
+}: Props) {
+  const config = draft;
+  const setConfig = (updater: KBConfig | ((prev: KBConfig) => KBConfig)) => {
+    const next = typeof updater === "function" ? (updater as (p: KBConfig) => KBConfig)(draft) : updater;
+    onDraftChange(next);
+  };
+  const [rebuildRequired, setRebuildRequired] = useState<boolean>(
+    Boolean(initialStats?.rebuild_required),
+  );
+  useEffect(() => {
+    setRebuildRequired(Boolean(initialStats?.rebuild_required));
+  }, [initialStats?.rebuild_required]);
+  const [ollamaStatus, setOllamaStatus] = useState<"unknown" | "ok" | "missing">("unknown");
+  const [testStatus, setTestStatus] = useState<"idle" | "checking" | "ok" | "fail">("idle");
+  const [testMessage, setTestMessage] = useState<string>("");
+  const [parserStatus, setParserStatus] = useState<ParserStatus | null>(null);
+
+  const refreshParserStatus = useCallback(async () => {
+    try {
+      const status = await api.getParserStatus();
+      setParserStatus(status);
+    } catch {
+      setParserStatus(null);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    void refreshParserStatus();
+  }, [refreshParserStatus]);
+
+  // Reset the inline test badge whenever embedding-relevant fields change,
+  // so users don't read a stale "有效 ✓" next to a key they just edited.
+  useEffect(() => {
+    setTestStatus("idle");
+    setTestMessage("");
+  }, [
+    config.embedding.provider,
+    config.embedding.model,
+    config.embedding.dim,
+    config.embedding.base_url,
+    config.embedding.api_key,
+  ]);
+
+  async function testConnectivity() {
+    setTestStatus("checking");
+    setTestMessage("");
+    try {
+      const result = await api.testEmbedding(config.embedding);
+      if (result.ok) {
+        setTestStatus("ok");
+        setTestMessage(
+          `维度 ${result.actual_dim} · 用时 ${result.latency_ms ?? "?"}ms`,
+        );
+      } else {
+        setTestStatus("fail");
+        setTestMessage(result.error || `${result.stage ?? "unknown"} 阶段失败`);
+      }
+    } catch (exc) {
+      setTestStatus("fail");
+      setTestMessage(String((exc as Error).message ?? exc));
+    }
+  }
+
+  // Plan-Id: machi-kb-stage1-local-mvp (t13) — best-effort Ollama probe.
+  useEffect(() => {
+    let cancelled = false;
+    if (config.embedding.provider !== "ollama") {
+      setOllamaStatus("unknown");
+      return;
+    }
+    const base = config.embedding.base_url || "http://localhost:11434";
+    (async () => {
+      try {
+        const res = await fetch(`${base.replace(/\/+$/, "")}/api/tags`, { method: "GET" });
+        if (cancelled) return;
+        if (res.ok) {
+          const body = await res.json().catch(() => ({}));
+          const models: string[] = Array.isArray(body?.models)
+            ? body.models.map((m: { name?: string }) => (m?.name ? String(m.name) : "")).filter(Boolean)
+            : [];
+          const has = models.some(
+            (name) => name === config.embedding.model || name.startsWith(`${config.embedding.model}:`),
+          );
+          setOllamaStatus(has ? "ok" : "missing");
+        } else {
+          setOllamaStatus("missing");
+        }
+      } catch {
+        if (!cancelled) setOllamaStatus("missing");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [config.embedding.provider, config.embedding.model, config.embedding.base_url]);
+
+  const embeddingModelOptions = useMemo(
+    () =>
+      listKbEmbeddingModelOptions(
+        config.embedding.provider,
+        providerCatalog,
+        config.embedding.model,
+      ),
+    [config.embedding.provider, config.embedding.model, providerCatalog],
+  );
+
+  const embeddingChanged = useMemo(
+    () =>
+      persistedConfig.embedding.provider !== config.embedding.provider ||
+      persistedConfig.embedding.model !== config.embedding.model ||
+      persistedConfig.embedding.dim !== config.embedding.dim,
+    [persistedConfig, config],
+  );
+
+  const dirty = useMemo(
+    () => JSON.stringify(persistedConfig) !== JSON.stringify(config),
+    [persistedConfig, config],
+  );
+
+  function reset() {
+    // Keep the brain's server-resolved storage root while restoring the
+    // editable defaults. The renderer must never manufacture a home path.
+    setConfig(defaultKBConfig(persistedConfig.vector_store.path));
+  }
+
+  function patch<K extends keyof KBConfig>(key: K, value: KBConfig[K]) {
+    setConfig((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function patchEmbeddingProvider(providerId: string) {
+    const preset = EMBEDDING_PROVIDERS.find((p) => p.id === providerId);
+    const options = listKbEmbeddingModelOptions(
+      providerId,
+      providerCatalog,
+      config.embedding.model,
+    );
+    const nextModel =
+      options.find((m) => m === config.embedding.model) ??
+      options[0] ??
+      preset?.defaultModel ??
+      config.embedding.model;
+    setConfig((prev) => ({
+      ...prev,
+      embedding: {
+        ...prev.embedding,
+        provider: providerId,
+        model: nextModel,
+        dim: preset?.defaultDim ?? prev.embedding.dim,
+      },
+    }));
+  }
+
+  return (
+    <div className="space-y-3">
+      {rebuildRequired ? (
+        <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+          ⚠️ 嵌入模型或维度已变更，现有索引与新配置不一致，需要在「资料」页点「重建索引」后才能重新检索。
+        </div>
+      ) : null}
+
+      {config.embedding.provider === "ollama" && ollamaStatus === "missing" ? (
+        <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+          未在本机 ({config.embedding.base_url || "http://localhost:11434"}) 检测到 Ollama 或模型
+          <code className="mx-1 rounded bg-rose-500/20 px-1 py-0.5">{config.embedding.model}</code>。
+          你可以继续保存（稍后启动 Ollama 即可），也可以切换到「OpenAI / SiliconFlow / Bailian」等在线 Provider。
+        </div>
+      ) : null}
+
+      <Panel title="向量库">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <Field label="后端">
+            <input
+              className={`w-full cursor-default opacity-90 ${KB_FIELD_BASE}`}
+              value={config.vector_store.backend}
+              readOnly
+              title="Stage-1 MVP 仅支持 Chroma"
+            />
+          </Field>
+          <Field label="存储路径">
+            <input
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.vector_store.path}
+              onChange={(e) =>
+                patch("vector_store", { ...config.vector_store, path: e.target.value })
+              }
+            />
+          </Field>
+          <Field label="集合名">
+            <input
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.vector_store.collection}
+              onChange={(e) =>
+                patch("vector_store", { ...config.vector_store, collection: e.target.value })
+              }
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel title="嵌入模型">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          <Field label="Provider">
+            <select
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.embedding.provider}
+              onChange={(e) => patchEmbeddingProvider(e.target.value)}
+            >
+              {EMBEDDING_PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="模型">
+            {embeddingModelOptions.length > 0 ? (
+              <select
+                className={`w-full ${KB_FIELD_BASE}`}
+                value={config.embedding.model}
+                onChange={(e) =>
+                  patch("embedding", { ...config.embedding, model: e.target.value })
+                }
+              >
+                {embeddingModelOptions.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                className={`w-full ${KB_FIELD_BASE}`}
+                value={config.embedding.model}
+                onChange={(e) =>
+                  patch("embedding", { ...config.embedding, model: e.target.value })
+                }
+                placeholder="请先在「模型服务」拉取并设为可见的嵌入模型"
+              />
+            )}
+            {embeddingModelOptions.length === 0 &&
+            config.embedding.provider !== "ollama" ? (
+              <p className="mt-1 text-[11px] text-text-faint">
+                在「模型服务」选择对应厂商，从 API 获取模型并将嵌入类模型设为可见后，此处会出现下拉选项。
+              </p>
+            ) : null}
+          </Field>
+          <Field label="向量维度">
+            <input
+              type="number"
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.embedding.dim}
+              min={16}
+              max={4096}
+              onChange={(e) =>
+                patch("embedding", { ...config.embedding, dim: Number(e.target.value) || 0 })
+              }
+            />
+          </Field>
+          <Field label="Base URL">
+            <input
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.embedding.base_url ?? ""}
+              placeholder={
+                config.embedding.provider === "ollama" ? "http://localhost:11434" : "可选"
+              }
+              onChange={(e) =>
+                patch("embedding", {
+                  ...config.embedding,
+                  base_url: e.target.value || null,
+                })
+              }
+            />
+          </Field>
+          <div className="md:col-span-2">
+            <Field label="API Key">
+              <div className="flex gap-2">
+                <div className="min-w-0 flex-1">
+                  <ApiKeyInput
+                    value={config.embedding.api_key ?? ""}
+                    onChange={(v) =>
+                      patch("embedding", {
+                        ...config.embedding,
+                        api_key: v || null,
+                      })
+                    }
+                    placeholder={
+                      config.embedding.provider === "ollama"
+                        ? "本地 Ollama 可留空"
+                        : "请粘贴百炼 / OpenAI / SiliconFlow 等在线服务的 API Key"
+                    }
+                  />
+                </div>
+                <button
+                  type="button"
+                  className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition ${
+                    testStatus === "checking"
+                      ? "border-amber-500/50 text-amber-400"
+                      : testStatus === "ok"
+                      ? "border-emerald-500/50 text-emerald-400"
+                      : testStatus === "fail"
+                      ? "border-rose-500/50 text-rose-400"
+                      : "border-border text-text-subtle hover:bg-surface-hover hover:text-text-primary"
+                  }`}
+                  disabled={testStatus === "checking"}
+                  onClick={testConnectivity}
+                  title="发一条测试 embedding 请求，验证密钥、模型、维度是否可用"
+                >
+                  {testStatus === "checking"
+                    ? "检测中…"
+                    : testStatus === "ok"
+                    ? "有效 ✓"
+                    : testStatus === "fail"
+                    ? "失败 ✗"
+                    : "检 测"}
+                </button>
+              </div>
+              {testMessage ? (
+                <div
+                  className={`mt-1 text-xs ${
+                    testStatus === "ok"
+                      ? "text-emerald-500"
+                      : testStatus === "fail"
+                      ? "text-rose-500"
+                      : "text-text-subtle"
+                  }`}
+                >
+                  {testMessage}
+                </div>
+              ) : null}
+            </Field>
+          </div>
+        </div>
+        {embeddingChanged ? (
+          <p className="mt-3 text-xs text-text-subtle">
+            修改嵌入模型后，保存时将提示现有索引需要重建 —— 该操作不会自动删除向量库。
+          </p>
+        ) : null}
+      </Panel>
+
+      <Panel title="切片策略">
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+          <Field label="Strategy">
+            <select
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.chunking.strategy}
+              onChange={(e) =>
+                patch("chunking", { ...config.chunking, strategy: e.target.value })
+              }
+            >
+              {CHUNKING_STRATEGIES.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <Field label="chunk_size">
+            <input
+              type="number"
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.chunking.chunk_size}
+              min={64}
+              onChange={(e) =>
+                patch("chunking", {
+                  ...config.chunking,
+                  chunk_size: Number(e.target.value) || 800,
+                })
+              }
+            />
+          </Field>
+          <Field label="chunk_overlap">
+            <input
+              type="number"
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.chunking.chunk_overlap}
+              min={0}
+              onChange={(e) =>
+                patch("chunking", {
+                  ...config.chunking,
+                  chunk_overlap: Number(e.target.value) || 0,
+                })
+              }
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel title="文件过滤">
+        <div className="space-y-4">
+          <Field label="扩展名 · 逗号分隔">
+            <div className="flex items-start gap-2">
+              <input
+                className={`min-w-0 flex-1 ${KB_FIELD_BASE}`}
+                value={config.file_filters.extensions.join(",")}
+                onChange={(e) =>
+                  patch("file_filters", {
+                    ...config.file_filters,
+                    extensions: e.target.value
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+              />
+              <button
+                type="button"
+                className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+                onClick={() =>
+                  patch("file_filters", {
+                    ...config.file_filters,
+                    extensions: [...defaultKBConfig().file_filters.extensions],
+                  })
+                }
+                title={`恢复${APP_DISPLAY_NAME}内置的全量支持列表（含 LiteParse 覆盖的旧版 Office、表格、图片）`}
+              >
+                恢复默认
+              </button>
+            </div>
+          </Field>
+          <ParserCapabilitySection parserStatus={parserStatus} onRefresh={refreshParserStatus} />
+          <Field label="单文件上限 MB">
+            <input
+              type="number"
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.file_filters.max_file_size_mb}
+              min={1}
+              onChange={(e) =>
+                patch("file_filters", {
+                  ...config.file_filters,
+                  max_file_size_mb: Number(e.target.value) || 1,
+                })
+              }
+            />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel title="检索">
+        <p className="text-[11px] leading-relaxed text-text-muted">
+          对话侧的「智能 / 始终检索」在页面上方<strong className="font-medium text-text-primary">对话检索</strong>
+          中统一配置；此处仅配置本知识脑的索引与检索通道参数。
+        </p>
+        <div className="space-y-4">
+          <Field label="默认 Top-K">
+            <input
+              type="number"
+              className={`w-full ${KB_FIELD_BASE}`}
+              min={1}
+              max={20}
+              value={config.retrieval.top_k}
+              onChange={(e) =>
+                patch("retrieval", {
+                  ...config.retrieval,
+                  top_k: Math.min(20, Math.max(1, Number(e.target.value) || 5)),
+                })
+              }
+            />
+          </Field>
+          <Field label="检索通道">
+            <select
+              className={`w-full ${KB_FIELD_BASE}`}
+              value={config.retrieval.retrieval_mode ?? "vector"}
+              onChange={(e) =>
+                patch("retrieval", {
+                  ...config.retrieval,
+                  retrieval_mode: e.target.value as KBConfig["retrieval"]["retrieval_mode"],
+                })
+              }
+            >
+              {RETRIEVAL_MODES.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {(config.retrieval.retrieval_mode === "hybrid" ||
+            config.retrieval.retrieval_mode === "hybrid_graph") && (
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="RRF k">
+                <input
+                  type="number"
+                  className={`w-full ${KB_FIELD_BASE}`}
+                  min={1}
+                  value={config.retrieval.rrf_k ?? 60}
+                  onChange={(e) =>
+                    patch("retrieval", {
+                      ...config.retrieval,
+                      rrf_k: Math.max(1, Number(e.target.value) || 60),
+                    })
+                  }
+                />
+              </Field>
+              <Field label="向量权重">
+                <input
+                  type="number"
+                  step="0.1"
+                  className={`w-full ${KB_FIELD_BASE}`}
+                  min={0}
+                  value={config.retrieval.vector_weight ?? 1}
+                  onChange={(e) =>
+                    patch("retrieval", {
+                      ...config.retrieval,
+                      vector_weight: Math.max(0, Number(e.target.value) || 1),
+                    })
+                  }
+                />
+              </Field>
+              <Field label="BM25 权重">
+                <input
+                  type="number"
+                  step="0.1"
+                  className={`w-full ${KB_FIELD_BASE}`}
+                  min={0}
+                  value={config.retrieval.bm25_weight ?? 1}
+                  onChange={(e) =>
+                    patch("retrieval", {
+                      ...config.retrieval,
+                      bm25_weight: Math.max(0, Number(e.target.value) || 1),
+                    })
+                  }
+                />
+              </Field>
+            </div>
+          )}
+          <p className="text-[11px] leading-snug text-text-faint">
+            智能检索：由模型判断何时检索，包含你主动要求「查知识库」的场景；始终检索：每轮都先检索后再回答。
+          </p>
+        </div>
+      </Panel>
+
+      <Panel title="增强能力">
+        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+          <KbCapabilityTile
+            phase="入库后"
+            icon={BookOpen}
+            title="Wiki 编译"
+            description="资料入库完成后，自动生成结构化 Wiki 页"
+            enabled={config.wiki_compiler?.enabled ?? false}
+            onChange={(enabled) =>
+              setConfig({
+                ...config,
+                wiki_compiler: { enabled },
+              })
+            }
+          />
+          <KbCapabilityTile
+            phase="回答时"
+            icon={Sparkles}
+            title="合成答案"
+            description="检索命中多段内容后，合并为一条带来源的回答"
+            enabled={config.synthesis?.enabled ?? false}
+            onChange={(enabled) =>
+              setConfig({
+                ...config,
+                synthesis: { enabled },
+              })
+            }
+          />
+        </div>
+      </Panel>
+
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        {dirty ? (
+          <span className="text-xs text-amber-500">· 有未保存的改动，请使用下方「保存」</span>
+        ) : null}
+        <button
+          type="button"
+          className="inline-flex items-center gap-1 rounded-md border border-border px-3 py-1.5 text-xs font-medium text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+          onClick={reset}
+        >
+          <RotateCcw className="h-3.5 w-3.5" /> 重置为默认
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function KbCapabilityTile({
+  phase,
+  icon: Icon,
+  title,
+  description,
+  enabled,
+  onChange,
+}: {
+  phase: string;
+  icon: LucideIcon;
+  title: string;
+  description: string;
+  enabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <div
+      className={`flex h-full flex-col rounded-lg border px-3 py-3 transition ${
+        enabled
+          ? "border-[var(--settings-accent-border-strong)] bg-[var(--settings-accent-row-bg)] ring-1 ring-[var(--settings-accent-badge-bg)]"
+          : "border-border bg-surface-panel/60 hover:border-text-subtle/40 hover:bg-surface-hover"
+      }`}
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 flex-1 items-start gap-2.5">
+          <span
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition ${
+              enabled
+                ? "bg-[var(--settings-accent-badge-bg)] text-[var(--settings-accent-fg)]"
+                : "bg-surface-hover text-text-muted"
+            }`}
+          >
+            <Icon className="h-4 w-4" strokeWidth={2} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+              <span className="text-sm font-medium text-text-primary">{title}</span>
+              <span className="rounded-full bg-surface-hover px-1.5 py-0.5 text-[10px] text-text-faint">
+                {phase}
+              </span>
+            </div>
+            <p className="mt-1 text-xs leading-snug text-text-muted">{description}</p>
+          </div>
+        </div>
+        <SettingsSwitch checked={enabled} onChange={onChange} size="sm" aria-label={title} />
+      </div>
+    </div>
+  );
+}
+
+function ParserCapabilitySection({ parserStatus, onRefresh }: { parserStatus: ParserStatus | null; onRefresh?: () => void }) {
+  const liteparseOk = parserStatus?.liteparse?.available === true;
+  const liteparseLoading = parserStatus == null;
+  const libreofficeOk = parserStatus?.libreoffice?.available === true;
+  const showLibreoffice = parserStatus?.libreoffice != null;
+
+  type InstallState = "idle" | "installing" | "done" | "error";
+  const [liteparseInstall, setLiteparseInstall] = useState<InstallState>("idle");
+  const [libreofficeInstall, setLibreofficeInstall] = useState<InstallState>("idle");
+  const [installMsg, setInstallMsg] = useState<Record<string, string>>({});
+  const [installPct, setInstallPct] = useState<Record<string, number>>({});
+  const reqCounter = useRef(0);
+
+  const triggerInstall = useCallback(
+    async (toolId: "liteparse" | "libreoffice") => {
+      const label = toolId === "libreoffice" ? "LibreOffice" : "LiteParse";
+      const detail =
+        toolId === "libreoffice"
+          ? "解析旧版 Office 文档（.doc/.ppt/.xls/.xlsx）需要 LibreOffice 进行格式转换。安装可能耗时数分钟。"
+          : "解析旧版 Office、表格和图片需要 LiteParse。";
+      const r = await window.agenticxDesktop.confirmDialog({
+        title: `安装 ${label}`,
+        message: `是否现在安装 ${label}？`,
+        detail,
+        confirmText: "安装",
+        cancelText: "取消",
+      });
+      if (!r.confirmed) return;
+
+      const setter = toolId === "libreoffice" ? setLibreofficeInstall : setLiteparseInstall;
+      setter("installing");
+      const requestId = `kb-${toolId}-${++reqCounter.current}`;
+      const off = window.agenticxDesktop.onToolInstallProgress((p) => {
+        if (p.requestId !== requestId) return;
+        if (p.phase === "installing" || p.phase === "starting") {
+          setInstallPct((prev) => ({ ...prev, [toolId]: p.percent ?? 0 }));
+          setInstallMsg((prev) => ({ ...prev, [toolId]: String(p.message ?? "") }));
+        } else if (p.phase === "done") {
+          setter("done");
+          setInstallPct((prev) => ({ ...prev, [toolId]: 100 }));
+          off();
+          onRefresh?.();
+        } else if (p.phase === "error") {
+          setter("error");
+          setInstallMsg((prev) => ({ ...prev, [toolId]: String(p.message ?? "安装失败") }));
+          off();
+        }
+      });
+      await window.agenticxDesktop.installTool({ requestId, toolId });
+    },
+    [onRefresh],
+  );
+
+  const renderInstallAction = (toolId: "liteparse" | "libreoffice", state: InstallState) => {
+    if (state === "installing") {
+      const pct = installPct[toolId] ?? 0;
+      return (
+        <span className="flex items-center gap-1.5 text-[11px] text-text-muted">
+          <Loader2 className="h-3 w-3 animate-spin" />
+          {pct > 0 ? `${pct}%` : "准备中…"}
+        </span>
+      );
+    }
+    if (state === "done") {
+      return (
+        <span className="flex items-center gap-1 text-[11px] text-emerald-500">
+          <Check className="h-3 w-3" /> 已安装
+        </span>
+      );
+    }
+    if (state === "error") {
+      return (
+        <span className="flex items-center gap-1 text-[11px] text-red-500">
+          <AlertTriangle className="h-3 w-3" /> 失败
+        </span>
+      );
+    }
+    return (
+      <button
+        type="button"
+        className="flex items-center gap-1 rounded-md bg-btnPrimary px-2.5 py-1 text-[11px] font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover"
+        onClick={() => void triggerInstall(toolId)}
+      >
+        <Download className="h-3 w-3" /> 安装
+      </button>
+    );
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="text-xs font-medium text-text-subtle">解析能力</div>
+      <div className="overflow-hidden rounded-lg border border-border bg-surface-panel/60">
+        <ParserCapabilityRow
+          title="内置解析器"
+          state="ok"
+          statusLabel="已就绪"
+          detail="纯文本、PDF、DOCX、PPTX、HTML、JSON、CSV、YAML"
+        />
+        <ParserCapabilityDivider />
+        <ParserCapabilityRow
+          title="LiteParse"
+          state={liteparseLoading ? "loading" : liteparseOk || liteparseInstall === "done" ? "ok" : "warn"}
+          statusLabel={
+            liteparseLoading
+              ? "检测中"
+              : liteparseOk || liteparseInstall === "done"
+                ? `已安装${parserStatus?.liteparse?.version ? ` v${parserStatus.liteparse.version}` : ""}`
+                : liteparseInstall === "installing"
+                  ? "安装中"
+                  : "未安装"
+          }
+          detail={
+            liteparseLoading ? (
+              "正在检测本机是否已安装 LiteParse…"
+            ) : liteparseOk || liteparseInstall === "done" ? (
+              "覆盖 .doc / .ppt / .xls / .xlsx 与图片 OCR"
+            ) : liteparseInstall === "error" ? (
+              <span className="text-red-500">{installMsg.liteparse || "安装失败，请重试"}</span>
+            ) : (
+              <span className="flex items-center justify-between gap-2">
+                <span>旧版 Office、表格与图片暂不可解析</span>
+                {renderInstallAction("liteparse", liteparseInstall)}
+              </span>
+            )
+          }
+        />
+        {showLibreoffice ? (
+          <>
+            <ParserCapabilityDivider />
+            <ParserCapabilityRow
+              title="LibreOffice"
+              state={libreofficeOk || libreofficeInstall === "done" ? "ok" : libreofficeInstall === "installing" ? "loading" : "warn"}
+              statusLabel={
+                libreofficeOk || libreofficeInstall === "done"
+                  ? "已安装"
+                  : libreofficeInstall === "installing"
+                    ? "安装中"
+                    : "未安装"
+              }
+              detail={
+                libreofficeOk || libreofficeInstall === "done" ? (
+                  "LiteParse 解析 .doc / .ppt / .xls / .xlsx 时用于格式转换"
+                ) : libreofficeInstall === "error" ? (
+                  <span className="text-red-500">{installMsg.libreoffice || "安装失败，请重试"}</span>
+                ) : (
+                  <span className="flex items-center justify-between gap-2">
+                    <span>解析旧版 Office 与表格需要它</span>
+                    {renderInstallAction("libreoffice", libreofficeInstall)}
+                  </span>
+                )
+              }
+            />
+          </>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function ParserCapabilityDivider() {
+  return <div className="h-px bg-[var(--border-muted)]" aria-hidden="true" />;
+}
+
+function ParserCapabilityRow({
+  title,
+  state,
+  statusLabel,
+  detail,
+}: {
+  title: string;
+  state: "ok" | "warn" | "loading";
+  statusLabel: string;
+  detail: React.ReactNode;
+}) {
+  const statusClass =
+    state === "ok"
+      ? "bg-[var(--brain-scope-enabled-bg)] text-[var(--brain-scope-enabled-fg)]"
+      : state === "warn"
+        ? "bg-amber-500/15 text-[var(--status-warning)]"
+        : "bg-surface-hover text-text-muted";
+
+  return (
+    <div className="flex items-start gap-3 px-3 py-2.5">
+      <span
+        className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full ${statusClass}`}
+        aria-hidden="true"
+      >
+        {state === "ok" ? (
+          <Check className="h-3 w-3" strokeWidth={2.5} />
+        ) : state === "warn" ? (
+          <AlertTriangle className="h-3 w-3" strokeWidth={2.5} />
+        ) : (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        )}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+          <span className="text-xs font-medium text-text-primary">{title}</span>
+          <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${statusClass}`}>
+            {statusLabel}
+          </span>
+        </div>
+        <p className="mt-1 text-xs leading-relaxed text-text-muted">{detail}</p>
+      </div>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block text-xs text-text-subtle">
+      <span className="mb-1 inline-block">{label}</span>
+      {hint ? (
+        <p className="mb-1.5 text-[11px] leading-relaxed text-text-muted">{hint}</p>
+      ) : null}
+      {children}
+    </label>
+  );
+}
+
+function ApiKeyInput({
+  value,
+  onChange,
+  placeholder,
+}: {
+  value: string;
+  onChange: (next: string) => void;
+  placeholder?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  return (
+    <div className="relative">
+      <input
+        type={visible ? "text" : "password"}
+        autoComplete="off"
+        className={`w-full pr-10 ${KB_FIELD_BASE}`}
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+      <button
+        type="button"
+        tabIndex={-1}
+        aria-label={visible ? "隐藏密钥" : "显示密钥"}
+        className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-text-faint transition hover:bg-surface-hover hover:text-text-subtle"
+        onClick={() => setVisible((v) => !v)}
+      >
+        {visible ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+      </button>
+    </div>
+  );
+}

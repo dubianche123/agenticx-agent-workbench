@@ -1,0 +1,77 @@
+import assert from "node:assert/strict";
+import { test } from "vitest";
+
+import {
+  clearPaneAwaitingFreshSession,
+  clearPaneNewTopicRequest,
+  markPaneAwaitingFreshSession,
+  queuePaneNewTopicRequest,
+  takePaneNewTopicRequest,
+} from "./pane-fresh-session.ts";
+import {
+  bootstrapMarkerForSessionBinding,
+  isNewTaskNavActive,
+  shouldKeepWorkspaceVisibleWhenSessionMissing,
+} from "./workspace-session-visibility.ts";
+
+test("keeps workspace visible while waiting for a fresh session", () => {
+  assert.equal(shouldKeepWorkspaceVisibleWhenSessionMissing("", true), true);
+});
+
+test("does not keep workspace when session already exists", () => {
+  assert.equal(shouldKeepWorkspaceVisibleWhenSessionMissing("sid-1", true), false);
+});
+
+test("does not keep workspace when not awaiting fresh session", () => {
+  assert.equal(shouldKeepWorkspaceVisibleWhenSessionMissing("", false), false);
+});
+
+test("skips history bootstrap only for the session freshly created by this pane", () => {
+  assert.equal(bootstrapMarkerForSessionBinding("sid-new", "sid-new"), "sid-new");
+  assert.equal(bootstrapMarkerForSessionBinding("sid-history", "sid-new"), "");
+  assert.equal(bootstrapMarkerForSessionBinding("", "sid-new"), "");
+});
+
+test("new task nav active only for meta pane awaiting first send", () => {
+  const paneId = "pane-meta-test";
+  markPaneAwaitingFreshSession(paneId);
+  try {
+    assert.equal(
+      isNewTaskNavActive("chat", { id: paneId, avatarId: null, sessionId: "" }),
+      true
+    );
+    assert.equal(
+      isNewTaskNavActive("chat", { id: paneId, avatarId: null, sessionId: "sid-1" }),
+      false
+    );
+    assert.equal(
+      isNewTaskNavActive("avatars", { id: paneId, avatarId: null, sessionId: "" }),
+      false
+    );
+    assert.equal(
+      isNewTaskNavActive("chat", { id: paneId, avatarId: "avatar-1", sessionId: "" }),
+      false
+    );
+  } finally {
+    clearPaneAwaitingFreshSession(paneId);
+  }
+});
+
+test("new task nav inactive when meta pane is not awaiting fresh session", () => {
+  assert.equal(
+    isNewTaskNavActive("chat", { id: "pane-idle", avatarId: null, sessionId: "" }),
+    false
+  );
+});
+
+test("a landing-page new-topic request survives a missed event and is consumed once", () => {
+  const paneId = "pane-group-unmounted";
+  clearPaneNewTopicRequest(paneId);
+  const request = queuePaneNewTopicRequest(paneId);
+  assert.ok(request);
+
+  // A stale wake-up event must not steal the current request.
+  assert.equal(takePaneNewTopicRequest(paneId, "stale-request"), undefined);
+  assert.deepEqual(takePaneNewTopicRequest(paneId, request.requestId), request);
+  assert.equal(takePaneNewTopicRequest(paneId), undefined);
+});

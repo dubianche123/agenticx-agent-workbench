@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+"""Tests for Meta context budget compaction."""
+
+from __future__ import annotations
+
+from agenticx.cli.studio import StudioSession
+from agenticx.runtime.context_budget import (
+    build_compact_meta_system_prompt,
+    force_compact_meta_turn_context,
+    maybe_compact_meta_turn_context,
+    model_prefers_compact_meta_context,
+)
+from agenticx.runtime.meta_tools import META_AGENT_TOOLS
+from agenticx.runtime.prompts.file_delivery import FILE_DELIVERY_CHOICE_PROMPT_MARKER
+from agenticx.runtime.prompts.meta_agent import build_meta_agent_system_prompt
+
+
+def test_model_prefers_compact_for_qwen3_32b() -> None:
+    assert model_prefers_compact_meta_context("Qwen3-32B", "custom_openai_v") is True
+    assert model_prefers_compact_meta_context("glm-4-9b-chat-1m", "custom_openai_v") is False
+    assert model_prefers_compact_meta_context("doubao-seed-2-0-pro-260215", "volcengine") is False
+
+
+def test_force_compact_meta_turn_context() -> None:
+    session = StudioSession()
+    session.provider_name = "custom_openai_v"
+    session.model_name = "Qwen3-32B"
+    compact_prompt, compact_tools, notice = force_compact_meta_turn_context(
+        session,
+        tools=list(META_AGENT_TOOLS),
+    )
+    assert notice
+    assert "32K" in notice
+    assert "精简模式" in notice
+    assert "个人助手" in compact_prompt
+    assert compact_prompt.startswith("你是 AgenticX Ontology 的个人助手")
+    assert "你是 Machi（Near Meta-Agent）" not in compact_prompt
+    assert "个人助手" in notice
+    assert "Machi" not in notice
+    assert "Near" not in notice
+    assert len(compact_prompt) < 25_000
+    assert len(compact_tools) < len(META_AGENT_TOOLS)
+    assert FILE_DELIVERY_CHOICE_PROMPT_MARKER not in compact_prompt
+
+
+def test_maybe_compact_meta_turn_context_shrinks_full_meta_prompt() -> None:
+    session = StudioSession()
+    session.provider_name = "custom_openai_v"
+    session.model_name = "Qwen3-32B"
+    full_prompt = build_meta_agent_system_prompt(
+        session,
+        mode="interactive",
+        taskspaces=[],
+        include_file_delivery_choice=True,
+    )
+    # 触发压缩的是工具数量（META_AGENT_TOOLS 有 83 个，阈值 40），不是提示词长度。
+    # 原来这里钉的是 `len(full_prompt) > 30_000`，和 context_budget 里的
+    # _COMPACT_PROMPT_CHAR_THRESHOLD 是同一个数——但提示词长度会随本机装了多少技能、
+    # 知识库上下浮动，实测干净环境下是 29,988，正好压线挂掉。把会漂的环境量从前提里
+    # 拿掉。
+    assert len(META_AGENT_TOOLS) >= 40
+    assert full_prompt.count(FILE_DELIVERY_CHOICE_PROMPT_MARKER) == 1
+    compact_prompt, compact_tools, notice = maybe_compact_meta_turn_context(
+        session,
+        system_prompt=full_prompt,
+        tools=list(META_AGENT_TOOLS),
+    )
+    assert notice
+    assert len(compact_prompt) < len(full_prompt)
+    assert len(compact_tools) <= len(META_AGENT_TOOLS)
+    assert compact_prompt.count(FILE_DELIVERY_CHOICE_PROMPT_MARKER) == 1
+    assert compact_prompt == build_compact_meta_system_prompt(
+        session,
+        source_system_prompt=full_prompt,
+    )
+
+
+def test_force_compact_preserves_opted_in_delivery_rule() -> None:
+    session = StudioSession()
+    session.provider_name = "custom_openai_v"
+    session.model_name = "Qwen3-32B"
+    full_prompt = build_meta_agent_system_prompt(
+        session,
+        mode="interactive",
+        taskspaces=[],
+        include_file_delivery_choice=True,
+    )
+    compact_prompt, _, _ = force_compact_meta_turn_context(
+        session,
+        tools=list(META_AGENT_TOOLS),
+        source_system_prompt=full_prompt,
+    )
+    assert compact_prompt.count(FILE_DELIVERY_CHOICE_PROMPT_MARKER) == 1
+
+
+def test_meta_prompt_includes_large_artifact_file_write_discipline() -> None:
+    session = StudioSession()
+    prompt = build_meta_agent_system_prompt(session, mode="interactive", taskspaces=[])
+    assert "大文件落盘" in prompt
+    assert "骨架" in prompt
+    assert "再分章追加" in prompt
+    assert FILE_DELIVERY_CHOICE_PROMPT_MARKER not in prompt

@@ -1,0 +1,2123 @@
+import type { EnterpriseCapabilitySyncStatus } from "../shared/enterprise-capability-sync";
+
+export {};
+
+declare global {
+  /** Electron <webview> in renderer (requires webPreferences.webviewTag). */
+  type NearElectronWebview = HTMLElement & {
+    src: string;
+    partition?: string;
+    /** Rejects with ERR_ABORTED when a newer navigation supersedes this one. */
+    loadURL: (url: string) => Promise<void> | void;
+    reload: () => Promise<void> | void;
+    getURL: () => string;
+    /** Open Chromium DevTools for this guest (Trae-style HTML/browser preview). */
+    openDevTools: () => void;
+    /** Run script in the guest page (used for WorkPanel browser text selection). */
+    executeJavaScript: (code: string, userGesture?: boolean) => Promise<unknown>;
+  };
+
+  /** Web Speech API recognition types are not included by TypeScript's DOM lib. */
+  interface SpeechRecognition extends EventTarget {
+    lang: string;
+    interimResults: boolean;
+    continuous: boolean;
+    maxAlternatives: number;
+    start: () => void;
+    stop: () => void;
+    abort: () => void;
+    onresult: ((this: SpeechRecognition, event: SpeechRecognitionEvent) => void) | null;
+    onerror: ((this: SpeechRecognition, event: Event) => void) | null;
+    onend: ((this: SpeechRecognition, event: Event) => void) | null;
+  }
+
+  interface SpeechRecognitionEvent extends Event {
+    readonly resultIndex: number;
+    readonly results: SpeechRecognitionResultList;
+  }
+
+  interface Window {
+    SpeechRecognition?: new () => SpeechRecognition;
+    webkitSpeechRecognition?: new () => SpeechRecognition;
+  }
+
+}
+
+declare module "react" {
+  interface CSSProperties {
+    WebkitAppRegion?: string;
+  }
+}
+/** Narrow renderer/preload contract for per-message assistant feedback. */
+declare global {
+type DesktopChatFeedbackValue = "like" | "dislike";
+type DesktopChatFeedbackScopeGuard = {
+  /** Complete account stamp captured from the trusted main-process snapshot. */
+  expectedScopeId: string;
+  expectedAuthGeneration: number;
+};
+type DesktopChatFeedbackApi = {
+  scope: (guard: DesktopChatFeedbackScopeGuard) => Promise<unknown>;
+  list: (sessionId: string, expectedScopeId?: string) => Promise<unknown>;
+  set: (payload: {
+    sessionId: string;
+    messageId: string;
+    value: DesktopChatFeedbackValue;
+    expectedScopeId: string;
+  }) => Promise<unknown>;
+  clear: (payload: {
+    sessionId: string;
+    messageId: string;
+    expectedScopeId: string;
+  }) => Promise<unknown>;
+};
+
+type ProviderConfig = {
+  api_key?: string;
+  base_url?: string;
+  model?: string;
+  models?: string[];
+  drop_params?: boolean;
+  display_name?: string;
+  interface?: "openai" | "ollama";
+  enabled?: boolean;
+  managed?: boolean;
+};
+
+type EnterpriseModelCatalogItem = {
+  id: string;
+  provider: string;
+  providerLabel: string;
+  model: string;
+  label: string;
+  route?: "local" | "private-cloud" | "third-party";
+  isDefault?: boolean;
+  capabilities?: string[];
+  /** 管理员在企业后台声明的上下文窗口；缺省时由后端按模型名兜底。 */
+  contextWindow?: number;
+};
+
+/** 企业能力包下发的一条能力（MCP / Skill）。 */
+type EnterpriseCapabilityItem = {
+  /** `mcp:<ulid>` / `skill:<ulid>` */
+  id: string;
+  kind: "mcp" | "skill";
+  name: string;
+  displayName: string;
+  requires: string[];
+  version?: string;
+  bundleUri?: string;
+  bundleDigest?: string;
+  /** MCP 专有：网关反代入口。 */
+  endpointUrl?: string;
+};
+
+type LoadConfigResult = {
+  defaultProvider: string;
+  providers: Record<string, ProviderConfig>;
+  onboardingCompleted?: boolean;
+  /** 旧配置里可能还是 "semi-auto"；读的时候走 normalizeConfirmStrategy 迁移。 */
+  activeProvider?: string;
+  activeModel?: string;
+  userAccount?: {
+    loggedIn: boolean;
+    email: string;
+    displayName: string;
+    baseUrl?: string;
+    managedPortablePackageCount?: number;
+  };
+  enterprise?: {
+    enabled: boolean;
+    baseUrl: string;
+    email: string;
+    displayName: string;
+    strict: boolean;
+    models: string[];
+    modelCatalog: EnterpriseModelCatalogItem[];
+    managedPortablePackageCount: number;
+    syncedAt: string;
+  };
+};
+
+type ValidateKeyResult = { ok: boolean; error?: string; status?: number; warning?: string };
+type FetchModelsResult = { ok: boolean; models: string[]; error?: string; warning?: string };
+type HealthCheckResult = {
+  ok: boolean;
+  error?: string;
+  latencyMs?: number;
+  reason?: "unauthorized" | "error";
+};
+type EmailConfig = {
+  enabled: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_username: string;
+  smtp_password: string;
+  smtp_use_tls: boolean;
+  from_email: string;
+  default_to_email: string;
+};
+
+type TrinityConfig = {
+  skill_protocol: boolean;
+  session_summary: boolean;
+  learning_enabled: boolean;
+  skill_manage_enabled: boolean;
+  learning_nudge_interval: number;
+  learning_min_tool_calls: number;
+};
+
+type TurnArchiveConfig = {
+  enabled: boolean;
+  min_chunk_chars: number;
+  max_chunks_per_turn: number;
+  recall_turns_limit: number;
+  halflife_days: number;
+};
+
+type AutomationConfig = {
+  prevent_sleep: boolean;
+};
+
+type RuntimeConfig = {
+  max_tool_rounds: number;
+  max_taskspaces: number;
+  tool_search_mode?: "off" | "auto" | "always";
+  tool_search_auto_schema_token_threshold?: number;
+  tool_search_threshold_strategy?: "adaptive" | "manual";
+  tool_search_context_budget_ratio?: number;
+};
+
+type AutomationFrequencyData =
+  | { type: "daily"; time: string; days: number[] }
+  | { type: "interval"; hours: number; days: number[] }
+  | { type: "once"; time: string; date: string };
+
+type AutomationTaskData = {
+  id: string;
+  name: string;
+  prompt: string;
+  workspace?: string;
+  sessionId?: string;
+  frequency: AutomationFrequencyData;
+  effectiveDateRange?: { start?: string; end?: string };
+  enabled: boolean;
+  createdAt: string;
+  lastRunAt?: string;
+  lastRunStatus?: "success" | "error";
+  fromTemplate?: string;
+};
+
+type AutomationTaskProgress = {
+  taskId: string;
+  taskName: string;
+  trigger: "schedule" | "manual";
+  phase: "queued" | "running" | "success" | "error";
+  sessionId?: string;
+  message?: string;
+  ts: number;
+};
+
+type SkillInstallPolicyConfig = {
+  non_high_risk_auto_install: boolean;
+};
+
+type SkillScanPayload = {
+  overall: string;
+  skills: Array<{
+    skill_name: string;
+    verdict: string;
+    findings: Array<{
+      severity: string;
+      pattern_name: string;
+      matched_text: string;
+      file_path: string;
+      line_number: number;
+    }>;
+  }>;
+  bundle_name?: string;
+};
+type AvatarItem = {
+  id: string;
+  name: string;
+  role?: string;
+  avatar_url?: string;
+  pinned?: boolean;
+  created_by?: string;
+  system_prompt?: string;
+  tools_enabled?: Record<string, boolean>;
+  skills_enabled?: Record<string, boolean> | null;
+  brains_enabled?: "*" | string[] | null;
+  /** Default provider/model the avatar falls back to when a session has none. */
+  default_provider?: string;
+  default_model?: string;
+  default_permission_mode?: "plan" | "ask" | "auto";
+  /** Expert background color: blue | white | black. */
+  color?: string;
+  /** User-defined display order (lower = earlier). 0 = unset. */
+  sort_order?: number;
+  workspace_dir?: string;
+  description?: string;
+  tags?: string[];
+  portable_artifact_id?: string;
+  portable_release_version?: string;
+};
+
+type ToolStatusItem = {
+  id: string;
+  name: string;
+  description: string;
+  installed: boolean;
+  version?: string;
+  install_command?: string;
+  auto_installable?: boolean;
+};
+
+type ToolInstallProgress = {
+  requestId: string;
+  tool_id: string;
+  phase: string;
+  percent: number;
+  message: string;
+  installed?: boolean;
+  version?: string;
+  install_command?: string;
+};
+
+type ToolsOptionsPayload = {
+  bash_exec?: { default_timeout_sec?: number };
+};
+
+type ToolsPolicy = {
+  tools_enabled: Record<string, boolean>;
+  tools_options?: ToolsOptionsPayload;
+};
+
+type GroupItem = {
+  id: string;
+  name: string;
+  avatar_ids: string[];
+  description?: string;
+  avatar_url?: string;
+  workspace_dir?: string;
+  routing?: string;
+  host_avatar_id?: string;
+  created_by?: string;
+  portable_artifact_id?: string;
+  portable_release_version?: string;
+};
+
+type PortablePackageKind = "expert" | "group" | "skill";
+type PortablePackagePermissionMode = "plan" | "ask" | "auto";
+
+type PortablePackageScanFinding = {
+  rule_id: string;
+  category: string;
+  severity: string;
+  blocking: boolean;
+  field: string;
+  line: number;
+  column: number;
+};
+
+type PortablePackageScanReport = {
+  scanner_version: string;
+  has_findings: boolean;
+  should_block: boolean;
+  findings: PortablePackageScanFinding[];
+};
+
+type PortablePackagePreview = {
+  schema_version: 2;
+  artifact_id: string;
+  release_version: string;
+  kind: PortablePackageKind;
+  title: string;
+  description: string;
+  summary: string;
+  byte_size: number;
+  recommended_permission_mode: PortablePackagePermissionMode;
+  skill_dependencies: string[];
+  mcp_dependencies: string[];
+  resource_paths: string[];
+  workspace_slots: string[];
+  scan_report: PortablePackageScanReport;
+  role: string;
+  tags: string[];
+  system_prompt: string;
+  member_count: number;
+  member_names: string[];
+  member_roles: string[];
+  member_system_prompts: string[];
+  host_member_name: string;
+  routing: string;
+};
+
+type PortablePackageInspectFileResult = {
+  ok: boolean;
+  canceled?: boolean;
+  filePath?: string;
+  raw?: string;
+  confirmationToken?: string;
+  preview?: PortablePackagePreview;
+  error?: string;
+};
+
+type PortablePackageImportResult = {
+  ok: boolean;
+  kind?: PortablePackageKind;
+  avatar?: AvatarItem;
+  group?: GroupItem;
+  avatars?: AvatarItem[];
+  error?: string;
+};
+
+type PortableMarketVisibilityType = "company" | "departments" | "users" | "personal" | "admins_only";
+type PortableMarketVisibility = {
+  type: PortableMarketVisibilityType;
+  departmentIds: string[];
+  userIds: string[];
+};
+
+type PortableMarketSecurityFinding = {
+  code: string;
+  field: string;
+  category: "secret" | "pii";
+};
+
+type PortableMarketAudienceDepartment = {
+  id: string;
+  name: string;
+  path: string;
+};
+
+type PortableMarketAudienceUser = {
+  id: string;
+  displayName: string;
+  email: string;
+  deptId: string | null;
+};
+
+type PortableMarketItem = {
+  id: string;
+  capabilityId: string;
+  sourceArtifactId: string;
+  manifestVersion: 2;
+  releaseId: string;
+  version: string;
+  kind: PortablePackageKind;
+  title: string;
+  description: string;
+  ownerDisplayName: string;
+  visibility: PortableMarketVisibilityType;
+  visibleDepartmentCount: number;
+  visibleUserCount: number;
+  downloadCount: number;
+  status: "published" | "unlisted";
+  deliveryState?: "active" | "revoked";
+  digest: string;
+  releaseNotes: string;
+  releasePublishedAt: string;
+  publishedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PortablePackageStudioOptions = {
+  /** Internal market-only preflight; regular exports force this to false. */
+  allow_scan_findings?: boolean;
+  release_version?: string;
+  recommended_permission_mode?: PortablePackagePermissionMode;
+  dependencies?: {
+    skills: Array<{
+      capability_id: string;
+      version: string;
+      digest: string;
+      required: boolean;
+    }>;
+    mcps: Array<{
+      capability_id: string;
+      version: string;
+      required: boolean;
+    }>;
+  };
+  resource_files?: Array<"IDENTITY.md" | "SOUL.md" | "MEMORY.md">;
+  workspace_slots?: Array<{
+    name: string;
+    access: "read-only" | "read-write";
+    required: boolean;
+  }>;
+};
+
+type PortablePackageInspectMarketResult = {
+  ok: boolean;
+  item?: PortableMarketItem;
+  raw?: string;
+  confirmationToken?: string;
+  preview?: PortablePackagePreview;
+  error?: string;
+};
+type ForwardedHistoryItem = {
+  sender: string;
+  role: string;
+  content: string;
+  avatar_url?: string;
+  timestamp?: number;
+  attachments?: Array<{
+    name?: string;
+    mime_type?: string;
+    size?: number;
+    data_url?: string;
+    source_path?: string;
+    storage_path?: string;
+  }>;
+};
+type ForwardedHistoryCard = {
+  title: string;
+  source_session: string;
+  items: ForwardedHistoryItem[];
+};
+type TaskspaceMountMode = "reference" | "copy" | "link";
+type TaskspaceItem = {
+  id: string;
+  label: string;
+  path: string;
+  available?: boolean;
+  last_used_at?: number;
+  mount_mode?: TaskspaceMountMode;
+  source_path?: string;
+  linked_at?: number;
+};
+type TaskspaceFileItem = {
+  name: string;
+  type: "file" | "dir";
+  path: string;
+  size: number;
+  modified: number;
+  is_symlink?: boolean;
+  dangling?: boolean;
+  mount_mode?: TaskspaceMountMode;
+  source_path?: string;
+  virtual?: boolean;
+};
+
+type McpServerItem = {
+  name: string;
+  connected: boolean;
+  command?: string;
+  /** Remote URL for streamable-http / sse transports (empty for stdio entries). */
+  url?: string;
+  /** Transport kind: "stdio" | "streamable_http" | "sse". Defaults to "stdio". */
+  transport?: string;
+  connection_state?: "healthy" | "error" | "disconnected";
+  tool_count?: number;
+  /** Original tool names registered by this server (available when connected & healthy). */
+  tool_names?: string[];
+  error_detail?: string;
+  op_phase?: string;
+  op_message?: string;
+  op_updated_at?: number;
+};
+type McpStatusResult = {
+  ok: boolean;
+  count?: number;
+  connected_count?: number;
+  servers: McpServerItem[];
+  error?: string;
+};
+
+type SkillItem = {
+  skill_id?: string;
+  name: string;
+  description: string;
+  location: string;
+  base_dir?: string;
+  source?: string;
+  tag?: string;
+  icon?: string;
+  content_hash?: string;
+  globally_disabled?: boolean;
+  conflict_count?: number;
+  variants?: Array<{
+    skill_id?: string;
+    source?: string;
+    base_dir?: string;
+    location?: string;
+    content_hash?: string;
+  }>;
+};
+type SkillListResult = { ok: boolean; items: SkillItem[]; count: number; error?: string };
+type SkillScanPresetRow = { id: string; label: string; path: string; enabled: boolean };
+type SkillScanCustomRow = { path: string; enabled: boolean };
+type SkillSettingsResult = {
+  ok: boolean;
+  preset_paths?: SkillScanPresetRow[];
+  custom_paths?: Array<string | SkillScanCustomRow>;
+  preferred_sources?: Record<string, string>;
+  disabled_skills?: string[];
+  error?: string;
+};
+type GuardSettingsResult = {
+  ok: boolean;
+  version?: number;
+  scan_mode?: string;
+  llm_verify?: boolean;
+  scan_timeout_seconds?: number;
+  ignored?: string[];
+  error?: string;
+};
+type GuardScanAllItem = {
+  skill_name: string;
+  verdict: string;
+  score?: number;
+  grade?: string;
+  tier?: string;
+  source?: string;
+  base_dir?: string;
+  can_fix?: boolean;
+  ignored?: boolean;
+  findings?: Array<{
+    pattern_name: string;
+    severity?: string;
+    matched_text?: string;
+    file_path?: string;
+    line_number?: number;
+    category?: string;
+  }>;
+};
+type GuardScanAllResult = {
+  ok: boolean;
+  results?: GuardScanAllItem[];
+  ignored?: string[];
+  scanned?: number;
+  error?: string;
+};
+type SkillSnapshotEntry = {
+  id: string;
+  ts: string;
+  files_count: number;
+  trigger?: string;
+};
+type SkillSnapshotCreateResult = {
+  ok: boolean;
+  snapshot_id?: string;
+  timestamp?: string;
+  files_count?: number;
+  error?: string;
+};
+type SkillSnapshotsListResult = {
+  ok: boolean;
+  snapshots?: SkillSnapshotEntry[];
+  error?: string;
+};
+type SkillSnapshotRestoreResult = {
+  ok: boolean;
+  restored_files?: string[];
+  error?: string;
+};
+type GuardScanResult = {
+  ok: boolean;
+  scan?: {
+    skill_name?: string;
+    verdict?: string;
+    score?: number;
+    grade?: string;
+    tier?: string;
+    pattern_set_version?: string;
+    findings?: Array<{
+      pattern_name: string;
+      severity?: string;
+      matched_text?: string;
+      file_path?: string;
+      line_number?: number;
+      category?: string;
+    }>;
+  };
+  error?: string;
+};
+type SkillDetailResult = {
+  ok: boolean;
+  name: string;
+  description: string;
+  location: string;
+  source?: string;
+  content: string;
+  error?: string;
+};
+type SkillRefreshResult = { ok: boolean; count: number; error?: string };
+
+type BundleItem = {
+  name: string;
+  version: string;
+  description: string;
+  author: string;
+  installed_at: string;
+  source_dir: string;
+  skills: string[];
+  mcp_servers: string[];
+  avatars: string[];
+  memory_templates: string[];
+};
+type BundleListResult = { ok: boolean; items: BundleItem[]; count: number; error?: string };
+type BundleInstallResult = {
+  ok: boolean;
+  name?: string;
+  version?: string;
+  skills_installed?: string[];
+  mcp_servers_installed?: string[];
+  avatars_installed?: string[];
+  memory_templates_installed?: string[];
+  error?: string;
+  error_code?: string;
+  scan_summary?: SkillScanPayload;
+};
+type BundleUninstallResult = { ok: boolean; name?: string; error?: string };
+
+type RegistrySearchItem = {
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  source: string;
+  source_type: string;
+  install_hint: string;
+  namespace?: string;
+  canonical_name?: string;
+  origin_source?: string;
+  detail_url?: string;
+  requires_api_key?: boolean;
+  provenance_source?: "registry" | "skillhub";
+};
+type RegistrySearchResult = {
+  ok: boolean;
+  items: RegistrySearchItem[];
+  count: number;
+  error?: string;
+  hint?: string;
+  using_default_clawhub?: boolean;
+};
+
+type SkillHubSearchItem = {
+  slug: string;
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  downloads?: string | number;
+  icon_url?: string;
+  source: string;
+  source_type: string;
+  namespace?: string;
+  canonical_name?: string;
+  origin_source?: string;
+  detail_url?: string;
+  requires_api_key?: boolean;
+};
+type SkillHubSearchResult = {
+  ok: boolean;
+  items: SkillHubSearchItem[];
+  count?: number;
+  source?: string;
+  hint?: string;
+  error?: string;
+};
+
+type RegistryInstallResult = {
+  ok: boolean;
+  name?: string;
+  installed_path?: string;
+  error?: string;
+  error_code?: string;
+  preview_token?: string;
+  scan_summary?: SkillScanPayload;
+};
+type RegistryUninstallResult = {
+  ok: boolean;
+  name?: string;
+  removed?: boolean;
+  error?: string;
+  error_code?: string;
+};
+type BundleInstallPreviewResult = {
+  ok: boolean;
+  scan?: SkillScanPayload;
+  error?: string;
+};
+type RegistryInstallPreviewResult = {
+  ok: boolean;
+  scan?: SkillScanPayload;
+  preview_token?: string;
+  archive_sha256?: string;
+  error?: string;
+};
+
+}
+
+declare global {
+  interface Window {
+    /** Newer preload naming; kept optional while desktop uses agenticxDesktop. */
+    electronAPI?: {
+      feedback?: DesktopChatFeedbackApi;
+    };
+    agenticxDesktop: {
+      /** Optional in older preload builds; feedback controls stay hidden when absent. */
+      feedback?: DesktopChatFeedbackApi;
+      version: string;
+      getApiBase: () => Promise<string>;
+      waitForStudio: (timeoutMs?: number) => Promise<{ ok: boolean }>;
+      getApiAuthToken: () => Promise<string>;
+      getEnvironmentAssistantScope: () => Promise<string>;
+      enterpriseAssistantPreflight: (payload: {
+        sessionId: string;
+        permissionMode: "plan" | "ask" | "auto";
+      }) => Promise<{
+        ok: boolean;
+        authorizationVersion?: string | number | null;
+        authGeneration?: number;
+        code?: string;
+        message?: string;
+        error?: string;
+        stale?: boolean;
+      }>;
+      enterpriseAssistantConfirmOperation: (payload: {
+        operationId: string;
+        sessionId: string;
+        permissionMode: "plan" | "ask" | "auto";
+        authGeneration: number;
+      }) => Promise<{
+        ok: boolean;
+        status?: "succeeded" | "awaiting_confirmation" | "pending" | "failed";
+        operationId?: string;
+        result?: unknown;
+        proposal?: { title: string; changes: unknown; expiresAt?: string | number | null };
+        authorizationVersion?: string | number | null;
+        authGeneration?: number;
+        code?: string;
+        message?: string;
+        error?: string;
+        stale?: boolean;
+      }>;
+      enterpriseAssistantGetOperation: (payload: {
+        operationId: string;
+        sessionId: string;
+        permissionMode: "plan" | "ask" | "auto";
+        authGeneration: number;
+      }) => Promise<{
+        ok: boolean;
+        status?: "succeeded" | "awaiting_confirmation" | "pending" | "failed";
+        operationId?: string;
+        result?: unknown;
+        proposal?: { title: string; changes: unknown; expiresAt?: string | number | null };
+        authorizationVersion?: string | number | null;
+        authGeneration?: number;
+        code?: string;
+        message?: string;
+        error?: string;
+        stale?: boolean;
+      }>;
+      platform: () => Promise<string>;
+      syncTitleBarOverlay: (theme: "dark" | "light" | "dim") => Promise<{ ok: boolean; skipped?: boolean; error?: string }>;
+      getConnectionMode: () => Promise<"local" | "remote">;
+      getBackendScopeSync: () => string;
+      getConnectionModeSync: () => "local" | "remote";
+      onConnectionModeChanged: (callback: () => void) => () => void;
+      onStudioReady: (callback: () => void) => () => void;
+      appRelaunch: () => Promise<{ ok: boolean }>;
+      focusModeEnter: () => Promise<{ ok: boolean; alreadyActive?: boolean; error?: string }>;
+      focusModeExit: () => Promise<{ ok: boolean; alreadyInactive?: boolean; error?: string }>;
+      loadRemoteServer: () => Promise<{ enabled: boolean; url: string; token: string }>;
+      saveRemoteServer: (payload: { enabled: boolean; url: string; token: string }) => Promise<{
+        ok: boolean;
+        restart_required?: boolean;
+        mode_changed?: boolean;
+      }>;
+      testRemoteServer: (payload: { url: string; token: string }) => Promise<{ ok: boolean; status?: number; error?: string }>;
+      loadGatewayIm: () => Promise<{
+        enabled: boolean;
+        url: string;
+        deviceId: string;
+        token: string;
+        studioBaseUrl: string;
+      }>;
+      saveGatewayIm: (payload: {
+        enabled: boolean;
+        url: string;
+        deviceId: string;
+        token: string;
+        studioBaseUrl: string;
+      }) => Promise<{ ok: boolean; restart_required?: boolean }>;
+      loadFeishuConfig: () => Promise<{ enabled: boolean; appId: string; appSecret: string }>;
+      saveFeishuConfig: (payload: { enabled: boolean; appId: string; appSecret: string }) => Promise<{ ok: boolean }>;
+      loadFeishuBinding: () => Promise<{ ok: boolean; bindings: Record<string, unknown> }>;
+      saveFeishuDesktopBinding: (payload: {
+        sessionId: string | null;
+        avatarId?: string | null;
+        avatarName?: string | null;
+        provider?: string | null;
+        model?: string | null;
+      }) => Promise<{ ok: boolean }>;
+
+      loadWechatBinding: () => Promise<{ ok: boolean; bindings: Record<string, unknown> }>;
+      saveWechatDesktopBinding: (payload: {
+        sessionId: string | null;
+        avatarId?: string | null;
+        avatarName?: string | null;
+        provider?: string | null;
+        model?: string | null;
+      }) => Promise<{ ok: boolean }>;
+
+      wechatSidecarStart: () => Promise<{ ok: boolean; port: number }>;
+      wechatSidecarStop: () => Promise<{ ok: boolean }>;
+      wechatSidecarPort: () => Promise<{ port: number; running: boolean }>;
+      wechatClearCredentials: () => Promise<{ ok: boolean }>;
+
+      onOpenSettings: (cb: () => void) => void;
+      onSkillsChanged: (cb: () => void) => () => void;
+      onAutomationTaskProgress: (cb: (payload: AutomationTaskProgress) => void) => () => void;
+
+      diagnoseBackendDeps: () => Promise<{
+        ok: boolean;
+        usingBundled?: boolean;
+        pythonPath?: string;
+        missing?: string[];
+        detail?: string;
+        error?: string;
+        offlineInstallReady?: boolean;
+        networkRequiredForRepair?: boolean;
+        wheelhouse?: string;
+      }>;
+      repairBackendDeps: () => Promise<{
+        ok: boolean;
+        venvPython?: string;
+        error?: string;
+        offline?: boolean;
+        networkRequiredForRepair?: boolean;
+        wheelhouse?: string;
+      }>;
+      onBackendDepsProgress: (
+        cb: (payload: { phase: string; line?: string; pct?: number }) => void,
+      ) => () => void;
+
+      listAvatars: () => Promise<{ ok: boolean; avatars: AvatarItem[] }>;
+      createAvatar: (payload: {
+        name: string;
+        role?: string;
+        avatar_url?: string;
+        system_prompt?: string;
+        description?: string;
+        tags?: string[];
+        created_by?: string;
+        tools_enabled?: Record<string, boolean>;
+        skills_enabled?: Record<string, boolean> | null;
+        default_provider?: string;
+        default_model?: string;
+        default_permission_mode?: "plan" | "ask" | "auto";
+        workspace_dir?: string;
+      }) => Promise<{ ok: boolean; avatar?: AvatarItem; error?: string }>;
+      updateAvatar: (payload: {
+        id: string;
+        name?: string;
+        role?: string;
+        avatar_url?: string;
+        pinned?: boolean;
+        system_prompt?: string;
+        description?: string;
+        tags?: string[];
+        tools_enabled?: Record<string, boolean>;
+        skills_enabled?: Record<string, boolean> | null;
+        brains_enabled?: "*" | string[] | null;
+        default_provider?: string;
+        default_model?: string;
+        default_permission_mode?: "plan" | "ask" | "auto";
+        workspace_dir?: string;
+        color?: string;
+      }) => Promise<{ ok: boolean; avatar?: AvatarItem; error?: string }>;
+      deleteAvatar: (id: string) => Promise<{ ok: boolean; error?: string }>;
+      reorderAvatars: (orders: Record<string, number>) => Promise<{ ok: boolean; updated?: number; error?: string }>;
+      getToolsStatus: () => Promise<{ ok: boolean; tools: ToolStatusItem[]; error?: string }>;
+      getToolsRegistry: () => Promise<{ ok: boolean; tools: Array<{ name: string; description: string; category: string; is_meta: boolean }>; error?: string }>;
+      getToolsPolicy: () => Promise<{
+        ok: boolean;
+        tools_enabled: Record<string, boolean>;
+        tools_options?: ToolsOptionsPayload;
+        error?: string;
+      }>;
+      saveToolsPolicy: (payload: ToolsPolicy) => Promise<{
+        ok: boolean;
+        tools_enabled?: Record<string, boolean>;
+        tools_options?: ToolsOptionsPayload;
+        error?: string;
+      }>;
+      installTool: (payload: { requestId: string; toolId: string }) => Promise<{ ok: boolean; error?: string }>;
+      onToolInstallProgress: (cb: (payload: ToolInstallProgress) => void) => () => void;
+
+      listSessions: (avatarId?: string) => Promise<{
+        ok: boolean;
+        sessions: Array<{
+          session_id: string;
+          avatar_id: string | null;
+          avatar_name?: string | null;
+          session_name: string | null;
+          active_taskspace_id?: string | null;
+          active_taskspace_label?: string | null;
+          updated_at: number;
+          created_at?: number;
+          pinned?: boolean;
+          archived?: boolean;
+          execution_state?: "idle" | "running" | "interrupted" | "failed";
+          provider?: string;
+          model?: string;
+          session_mode?: "code_dev" | "daily_office";
+          permission_mode?: "plan" | "ask" | "auto";
+          harness_phase?: "explore" | "read" | "author";
+          read_files_count?: number;
+          /** Server-authoritative sticky private attachment route marker. */
+          attachment_routing_lock?: {
+            id?: string;
+            provider?: string;
+            model?: string;
+            label?: string;
+          } | null;
+        }>;
+      }>;
+      getSessionLoopReview: (sessionId: string, refresh?: boolean) => Promise<{
+        ok: boolean;
+        review?: {
+          session_id: string;
+          generated_at: string;
+          schema_version: number;
+          overall: number;
+          dimensions: Array<{
+            key: string; label: string; raw_score: number;
+            score: number; evidence: string; rationale: string;
+          }>;
+          findings: Array<{ key: string; impact: string; repair: string; verification: string }>;
+          observations_available?: boolean;
+          messages_available?: boolean;
+        };
+        error?: string;
+      }>;
+      interruptSession: (sessionId: string, purpose?: string, scope?: string) => Promise<{ ok: boolean; session_id?: string; error?: string }>;
+      loadRuntimeConfig: () => Promise<{
+        ok: boolean;
+        max_tool_rounds: number;
+        max_taskspaces: number;
+        auto_resume_on_exhaustion: boolean;
+        max_auto_resumes: number;
+        tool_search_mode?: "off" | "auto" | "always";
+        tool_search_auto_schema_token_threshold?: number;
+        tool_search_threshold_strategy?: "adaptive" | "manual";
+        tool_search_context_budget_ratio?: number;
+        stall_detect_silence_seconds?: number;
+        stall_auto_nudge_enabled?: boolean;
+        stall_auto_nudge_after_seconds?: number;
+        stall_auto_nudge_max_per_session?: number;
+        llm_stall_patience_enabled?: boolean;
+        llm_stall_patience_max_attempts?: number;
+        llm_stall_patience_budget_seconds?: number;
+        unattended_enabled?: boolean;
+        unattended_max_continuations_per_session?: number;
+        unattended_max_wall_clock_hours?: number;
+        unattended_stall_continue_after_seconds?: number;
+        unattended_auto_resume_exhausted?: boolean;
+        unattended_auto_resume_interrupted?: boolean;
+        max_tokens_per_session?: number;
+        warning_tokens_per_session?: number;
+        max_tokens_per_turn?: number;
+        token_budget_managed?: boolean;
+        /** 开发者菜单的按模型上下文窗口覆盖，键为 `provider/model`。 */
+        model_context_windows?: Record<string, number>;
+        live_reattach_enabled?: boolean;
+        error?: string;
+      }>;
+      saveRuntimeConfig: (payload: {
+        max_tool_rounds?: number;
+        max_taskspaces?: number;
+        auto_resume_on_exhaustion?: boolean;
+        max_auto_resumes?: number;
+        tool_search_mode?: "off" | "auto" | "always";
+        tool_search_auto_schema_token_threshold?: number;
+        tool_search_threshold_strategy?: "adaptive" | "manual";
+        tool_search_context_budget_ratio?: number;
+        max_tokens_per_session?: number;
+        warning_tokens_per_session?: number;
+        max_tokens_per_turn?: number;
+        stall_detect_silence_seconds?: number;
+        stall_auto_nudge_enabled?: boolean;
+        stall_auto_nudge_after_seconds?: number;
+        stall_auto_nudge_max_per_session?: number;
+        llm_stall_patience_enabled?: boolean;
+        llm_stall_patience_max_attempts?: number;
+        llm_stall_patience_budget_seconds?: number;
+        unattended_enabled?: boolean;
+        unattended_max_continuations_per_session?: number;
+        unattended_max_wall_clock_hours?: number;
+        unattended_stall_continue_after_seconds?: number;
+        unattended_auto_resume_exhausted?: boolean;
+        unattended_auto_resume_interrupted?: boolean;
+        /** 整表替换：省略某个键即删除该覆盖，回到自动识别。 */
+        model_context_windows?: Record<string, number>;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      searchSessions: (payload: { q: string; avatarId?: string }) => Promise<{
+        ok: boolean;
+        hits?: Array<{ session_id: string; snippet: string }>;
+        error?: string;
+      }>;
+      createSession: (payload: {
+        avatar_id?: string;
+        name?: string;
+        inherit_from_session_id?: string;
+        session_mode?: "code_dev" | "daily_office";
+        permission_mode?: "plan" | "ask" | "auto";
+        provider?: string;
+        model?: string;
+      }) => Promise<{
+        ok: boolean;
+        session_id?: string;
+        inherited?: boolean;
+        session_mode?: "code_dev" | "daily_office";
+        permission_mode?: "plan" | "ask" | "auto";
+        error?: string;
+      }>;
+      renameSession: (payload: { sessionId: string; name: string }) => Promise<{ ok: boolean; error?: string }>;
+      deleteSession: (sessionId: string) => Promise<{ ok: boolean; error?: string }>;
+      deleteSessionsBatch: (sessionIds: string[]) => Promise<{ ok: boolean; deleted?: string[]; failed?: string[]; error?: string }>;
+      pinSession: (payload: { sessionId: string; pinned: boolean }) => Promise<{ ok: boolean; pinned?: boolean; error?: string }>;
+      setSessionModel: (payload: { sessionId: string; provider: string; model: string }) => Promise<{ ok: boolean; provider?: string; model?: string; error?: string }>;
+      loadLayout: () => Promise<{
+        ok: boolean;
+        panes: Array<{
+          id: string;
+          avatarId: string | null;
+          sessionId: string;
+          modelProvider: string;
+          modelName: string;
+        }>;
+        activePaneId: string;
+        theme?: string;
+      }>;
+      saveUiPrefs: (payload: { theme: "dark" | "light" | "dim" }) => Promise<{ ok: boolean; error?: string }>;
+      saveLayout: (payload: {
+        panes?: Array<{
+          id: string;
+          avatarId: string | null;
+          sessionId: string;
+          modelProvider: string;
+          modelName: string;
+        }>;
+        activePaneId?: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      forkSession: (payload: { sessionId: string }) => Promise<{ ok: boolean; session_id?: string; session_name?: string; error?: string }>;
+      archiveSessions: (payload: { sessionId: string; avatarId?: string | null }) => Promise<{ ok: boolean; archived_count?: number; error?: string }>;
+      listTaskspaces: (sessionId: string) => Promise<{
+        ok: boolean;
+        workspaces: TaskspaceItem[];
+        available_workspaces?: TaskspaceItem[];
+        error?: string;
+      }>;
+      registerTaskspace: (payload: { path: string; label?: string }) => Promise<{
+        ok: boolean;
+        workspace?: TaskspaceItem;
+        error?: string;
+      }>;
+      addTaskspace: (payload: { sessionId: string; path?: string; label?: string }) => Promise<{ ok: boolean; workspace?: TaskspaceItem; error?: string }>;
+      removeTaskspace: (payload: { sessionId: string; taskspaceId: string }) => Promise<{ ok: boolean; error?: string }>;
+      chooseDirectory: () => Promise<{ ok: boolean; path?: string; canceled?: boolean; error?: string }>;
+      chooseFiles: () => Promise<{ ok: boolean; paths?: string[]; canceled?: boolean; error?: string }>;
+      scanWorkspaceSensitiveFiles: (payload: {
+        path: string;
+        extensions: string[];
+        maxFiles?: number;
+        maxMatches?: number;
+      }) => Promise<{
+        ok: boolean;
+        matches: string[];
+        scanned: number;
+        truncated: boolean;
+        error?: string;
+      }>;
+      getPathForFile: (file: File) => string;
+      listTaskspaceFiles: (payload: { sessionId: string; taskspaceId: string; path?: string }) => Promise<{
+        ok: boolean;
+        files: TaskspaceFileItem[];
+        truncated?: boolean;
+        total_seen?: number;
+        error?: string;
+      }>;
+      readTaskspaceFile: (payload: { sessionId: string; taskspaceId: string; path: string }) => Promise<{
+        ok: boolean;
+        name?: string;
+        path?: string;
+        absolute_path?: string;
+        content?: string;
+        truncated?: boolean;
+        size?: number;
+        mime_type?: string;
+        preview_kind?: "text" | "markdown" | "code" | "image" | "pdf" | "office" | "binary";
+        is_binary?: boolean;
+        preview_supported?: boolean;
+        error?: string;
+      }>;
+      loadSessionMessages: (sessionId: string) => Promise<{
+        ok: boolean;
+        messages: Array<{
+          id?: string;
+          role: "user" | "assistant" | "tool";
+          content: string;
+          agent_id?: string;
+          avatar_name?: string;
+          avatar_url?: string;
+          provider?: string;
+          model?: string;
+          quoted_message_id?: string;
+          quoted_content?: string;
+          timestamp?: number;
+          attachments?: Array<{ name?: string; mime_type?: string; size?: number; data_url?: string }>;
+          forwarded_history?: ForwardedHistoryCard;
+        }>;
+        error?: string;
+      }>;
+      loadSessionMessagesPage: (
+        sessionId: string,
+        options?: { tailRounds?: number; tailLimit?: number; beforeIndex?: number; limit?: number }
+      ) => Promise<{
+        ok: boolean;
+        messages: Array<{
+          id?: string;
+          role: "user" | "assistant" | "tool";
+          content: string;
+          agent_id?: string;
+          avatar_name?: string;
+          avatar_url?: string;
+          provider?: string;
+          model?: string;
+          quoted_message_id?: string;
+          quoted_content?: string;
+          timestamp?: number;
+          attachments?: Array<{ name?: string; mime_type?: string; size?: number; data_url?: string }>;
+          forwarded_history?: ForwardedHistoryCard;
+        }>;
+        start_index?: number;
+        total_count?: number;
+        has_older?: boolean;
+        error?: string;
+      }>;
+      forkAvatar: (payload: { sessionId: string; name: string; role?: string }) => Promise<{ ok: boolean; avatar?: AvatarItem; error?: string }>;
+      /**
+       * Generate and persist a complete expert draft.  The backend fills the
+       * profile signature/description, tags, default permission mode and core
+       * workspace documents; workspace_dir from model output is ignored and
+       * the registry allocates an isolated default directory.
+       */
+      generateAvatar: (payload: { description: string }) => Promise<{
+        ok: boolean;
+        avatar?: AvatarItem;
+        error?: string;
+      }>;
+
+      exportPortablePackage: (payload: {
+        kind: PortablePackageKind;
+        id: string;
+        name?: string;
+      } & PortablePackageStudioOptions) => Promise<{ ok: boolean; canceled?: boolean; filePath?: string; error?: string }>;
+      createPortablePackageShareLink: (payload: {
+        kind: PortablePackageKind;
+        id: string;
+      } & PortablePackageStudioOptions) => Promise<{ ok: boolean; shareUrl?: string; error?: string }>;
+      publishPortablePackageToMarket: (payload: {
+        kind: "expert" | "group";
+        id: string;
+        visibility: PortableMarketVisibility;
+        security_action?: "none" | "redact";
+        security_findings?: PortableMarketSecurityFinding[];
+        release_notes?: string;
+      } & PortablePackageStudioOptions) => Promise<{
+        ok: boolean;
+        item?: PortableMarketItem;
+        marketUrl?: string;
+        notice?: string;
+        warning?: string;
+        securityFindings?: PortableMarketSecurityFinding[];
+        error?: string;
+      }>;
+      publishSkillToMarket: (payload: {
+        name: string;
+        /** Omit to let the main process select the next patch version. */
+        release_version?: string;
+        skill_id?: string;
+        content_hash?: string;
+        release_notes?: string;
+        security_action?: "none" | "redact";
+        security_findings?: PortableMarketSecurityFinding[];
+        visibility: PortableMarketVisibility;
+      }) => Promise<{
+        ok: boolean;
+        item?: PortableMarketItem;
+        marketUrl?: string;
+        notice?: string;
+        warning?: string;
+        securityFindings?: PortableMarketSecurityFinding[];
+        error?: string;
+      }>;
+      installPortableMarketSkill: (payload: { id: string }) => Promise<{
+        ok: boolean;
+        name?: string;
+        version?: string;
+        digest?: string;
+        error?: string;
+      }>;
+      listPortableMarketInstalledSkills: () => Promise<{
+        ok: boolean;
+        installed: Array<{
+          itemId: string;
+          version: string;
+          digest: string;
+          name: string;
+        }>;
+        error?: string;
+      }>;
+      listPortableMarketAudience: (payload?: {
+        query?: string;
+      }) => Promise<{
+        ok: boolean;
+        departments: PortableMarketAudienceDepartment[];
+        users: PortableMarketAudienceUser[];
+        error?: string;
+      }>;
+      listPortablePackageMarket: (payload: {
+        kind: PortablePackageKind;
+        query?: string;
+        limit?: number;
+        cursor?: string;
+      }) => Promise<{
+        ok: boolean;
+        items: PortableMarketItem[];
+        nextCursor?: string | null;
+        error?: string;
+      }>;
+      inspectPortablePackageMarketItem: (payload: {
+        id: string;
+        kind: PortablePackageKind;
+      }) => Promise<PortablePackageInspectMarketResult>;
+      inspectPortablePackageFile: (payload?: {
+        kind?: PortablePackageKind;
+      }) => Promise<PortablePackageInspectFileResult>;
+      importPortablePackage: (payload: {
+        raw: string;
+        confirmationToken: string;
+      }) => Promise<PortablePackageImportResult>;
+
+      listGroups: () => Promise<{ ok: boolean; groups: GroupItem[] }>;
+      createGroup: (payload: { name: string; avatar_ids: string[]; description?: string; avatar_url?: string; workspace_dir?: string; routing?: string; host_avatar_id: string }) => Promise<{ ok: boolean; group?: GroupItem; error?: string }>;
+      updateGroup: (payload: { id: string; name?: string; avatar_ids?: string[]; description?: string; avatar_url?: string; workspace_dir?: string; routing?: string; host_avatar_id?: string }) => Promise<{ ok: boolean; group?: GroupItem; error?: string }>;
+      deleteGroup: (id: string) => Promise<{ ok: boolean; error?: string }>;
+
+      loadConfig: () => Promise<LoadConfigResult>;
+      loadWorkspaceConfig: () => Promise<{
+        ok: boolean;
+        workspaceDir?: string;
+        resolvedPath?: string;
+        error?: string;
+      }>;
+      saveWorkspaceConfig: (payload: {
+        workspaceDir: string;
+      }) => Promise<{
+        ok: boolean;
+        workspaceDir?: string;
+        resolvedPath?: string;
+        changed?: boolean;
+        error?: string;
+      }>;
+      userAccountLoginStart: (payload: { baseUrl?: string }) => Promise<{
+        ok: boolean;
+        deviceId?: string;
+        openUrl?: string;
+        error?: string;
+      }>;
+      userAccountLoginCancel: () => Promise<{ ok: boolean }>;
+      userAccountLogout: () => Promise<{ ok: boolean }>;
+      loadUserAccount: () => Promise<{
+        ok: boolean;
+        loggedIn?: boolean;
+        email?: string;
+        displayName?: string;
+        baseUrl?: string;
+        /** Trusted complete account stamp used to fence feedback hydration. */
+        scope_id?: string | null;
+        auth_generation?: number;
+        /** Remembered / env-preconfigured portal; employees need not type this. */
+        defaultBaseUrl?: string;
+        inferenceBaseUrl?: string;
+        transport?: string;
+        reauthRequiredForDirect?: boolean;
+        strict?: boolean;
+        /** 企业下发的 Desktop 自助安装策略。 */
+        capabilityPolicy?: unknown;
+        /** 附件自动路由策略；原样透传，由 readAttachmentRoutingPolicy 解释。 */
+        attachmentRouting?: unknown;
+        models?: string[];
+        modelCatalog?: EnterpriseModelCatalogItem[];
+        syncedAt?: string;
+        /** 当前账号经能力包解析后的有效 MCP / Skill allowlist。 */
+        capabilities?: EnterpriseCapabilityItem[];
+        /** 当前账号下发的托管专家/群聊数量（包内容不经渲染进程）。 */
+        managedPortablePackageCount?: number;
+        capabilitySyncStatuses?: EnterpriseCapabilitySyncStatus[];
+        unmetCapabilityDependencies?: string[];
+      }>;
+      loadEnterprise: () => Promise<{
+        ok: boolean;
+        enabled?: boolean;
+        baseUrl?: string;
+        inferenceBaseUrl?: string;
+        transport?: string;
+        reauthRequiredForDirect?: boolean;
+        email?: string;
+        displayName?: string;
+        strict?: boolean;
+        models?: string[];
+        modelCatalog?: EnterpriseModelCatalogItem[];
+        syncedAt?: string;
+        /** 企业下发的 MCP / Skill；没出现在这里就等于已撤销。 */
+        capabilities?: EnterpriseCapabilityItem[];
+        /** 当前账号下发的托管专家/群聊数量（包内容不经渲染进程）。 */
+        managedPortablePackageCount?: number;
+        /** Skill 声明了依赖但依赖没随包下发，装了也调不通。 */
+        unmetCapabilityDependencies?: string[];
+        capabilitySyncStatuses?: EnterpriseCapabilitySyncStatus[];
+      }>;
+      loadEnterpriseCapabilitySyncStatuses: () => Promise<{
+        ok: boolean;
+        capabilitySyncStatuses: EnterpriseCapabilitySyncStatus[];
+      }>;
+      enterpriseLogin: (payload: {
+        baseUrl: string;
+        email: string;
+        password: string;
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        user?: { email: string; displayName: string };
+        models?: string[];
+        transport?: string;
+        reauthRequiredForDirect?: boolean;
+      }>;
+      enterpriseLogout: () => Promise<{ ok: boolean }>;
+      enterpriseRefresh: () => Promise<{
+        ok: boolean;
+        error?: string;
+        unauthorized?: boolean;
+        models?: string[];
+        transport?: string;
+        reauthRequiredForDirect?: boolean;
+      }>;
+      recordAttachmentRoutingPublicOverride: (payload: {
+        sessionId: string;
+        currentModel: string;
+        privateTarget: string;
+        attachmentNames: string[];
+      }) => Promise<{
+        ok: boolean;
+        error?: string;
+        unauthorized?: boolean;
+      }>;
+      onEnterpriseCapabilitiesChanged: (cb: () => void) => () => void;
+      onUserAccountChanged: (
+        cb: (payload: {
+          email: string;
+          displayName: string;
+          loggedIn: boolean;
+          baseUrl?: string;
+          /** Same trusted account stamp returned by loadUserAccount. */
+          scope_id?: string | null;
+          auth_generation?: number;
+        }) => void,
+      ) => () => void;
+      onUserAccountChanging: (cb: (payload: { generation: number }) => void) => () => void;
+      onUserAccountLoginTimeout: (cb: (payload?: { error?: string }) => void) => () => void;
+      updateSplashStage: (
+        stage:
+          | "initializing"
+          | "backend-starting"
+          | "backend-waiting"
+          | "pinging-remote"
+          | "loading-ui"
+          | "preloading-core"
+          | "restoring-session"
+          | "ready"
+      ) => Promise<{ ok: boolean }>;
+      getSplashPreloadEnabled: () => Promise<{ enabled: boolean }>;
+      preloadCoreData: (payload: {
+        avatarId?: string;
+        sessionId?: string;
+      }) => Promise<{
+        ok: boolean;
+        avatars: { ok: boolean; avatars: AvatarItem[] };
+        sessions: { ok: boolean; sessions: Array<Record<string, unknown>> };
+        groups: { ok: boolean; groups: Array<Record<string, unknown>> };
+        taskspaces: { ok: boolean; workspaces: TaskspaceItem[]; error?: string };
+        messages: { ok: boolean; messages: Array<Record<string, unknown>>; error?: string };
+      }>;
+      startupRendererReady: () => Promise<{ ok: boolean; duplicate?: boolean }>;
+      loadMetaSoul: () => Promise<{ ok: boolean; content: string; error?: string }>;
+      saveMetaSoul: (payload: { content: string }) => Promise<{ ok: boolean; error?: string }>;
+      loadMetaIdentity: () => Promise<{ ok: boolean; content: string; error?: string }>;
+      saveMetaIdentity: (payload: { content: string }) => Promise<{ ok: boolean; error?: string }>;
+      aiAssistComplete: (payload: {
+        systemPrompt: string;
+        userPrompt: string;
+        provider?: string;
+        apiKey?: string;
+        baseUrl?: string;
+        model?: string;
+      }) => Promise<{ ok: boolean; content?: string; error?: string }>;
+      listMetaWorkspaceHistory: (payload: {
+        kind: "identity" | "soul";
+      }) => Promise<{
+        ok: boolean;
+        items?: Array<{ id: string; savedAt: string; preview: string }>;
+        error?: string;
+      }>;
+      restoreMetaWorkspaceHistory: (payload: {
+        kind: "identity" | "soul";
+        id: string;
+      }) => Promise<{ ok: boolean; content?: string; error?: string }>;
+      openMetaWorkspaceFile: (payload: { kind: "identity" | "soul" }) => Promise<{ ok: boolean; error?: string }>;
+      loadUserMd: () => Promise<{ ok: boolean; content: string; error?: string }>;
+      saveUserMd: (payload: { content: string }) => Promise<{ ok: boolean; error?: string }>;
+      loadAvatarSoul: (payload: { avatarId: string }) => Promise<{ ok: boolean; content: string; error?: string }>;
+      saveAvatarSoul: (payload: {
+        avatarId: string;
+        content: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      loadAvatarCoreMemory: (payload: { avatarId: string }) => Promise<{
+        ok: boolean;
+        documents?: { "IDENTITY.md": string; "SOUL.md": string; "MEMORY.md": string };
+        error?: string;
+      }>;
+      saveAvatarCoreMemory: (payload: {
+        avatarId: string;
+        documents: { "IDENTITY.md": string; "SOUL.md": string; "MEMORY.md": string };
+      }) => Promise<{
+        ok: boolean;
+        documents?: { "IDENTITY.md": string; "SOUL.md": string; "MEMORY.md": string };
+        error?: string;
+      }>;
+      loadTrinityConfig: () => Promise<{ ok: boolean; config?: TrinityConfig; error?: string }>;
+      saveTrinityConfig: (payload: TrinityConfig) => Promise<{ ok: boolean; error?: string }>;
+      loadTurnArchiveConfig: () => Promise<{ ok: boolean; config?: TurnArchiveConfig; error?: string }>;
+      saveTurnArchiveConfig: (payload: TurnArchiveConfig) => Promise<{ ok: boolean; error?: string }>;
+      loadAutomationConfig: () => Promise<{ ok: boolean; config?: AutomationConfig; error?: string }>;
+      saveAutomationConfig: (payload: AutomationConfig) => Promise<{ ok: boolean; error?: string }>;
+      confirmDialog: (payload: {
+        title?: string;
+        message: string;
+        detail?: string;
+        confirmText?: string;
+        cancelText?: string;
+        destructive?: boolean;
+      }) => Promise<{ ok: boolean; confirmed: boolean; error?: string }>;
+      exportMessagesPdf: (payload: {
+        html: string;
+        defaultFileName?: string;
+      }) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+      loadAutomationTasks: () => Promise<{ ok: boolean; tasks: AutomationTaskData[]; error?: string }>;
+      saveAutomationTask: (task: AutomationTaskData) => Promise<{ ok: boolean; error?: string }>;
+      deleteAutomationTask: (
+        taskIdOrOpts: string | { taskId: string; removeCrontaskDir?: boolean },
+      ) => Promise<{ ok: boolean; error?: string }>;
+      automationCrontaskDirInfo: (
+        taskId: string,
+      ) => Promise<{ ok: boolean; path: string; exists: boolean }>;
+      cancelAutomationTaskRun: (taskId: string) => Promise<{ ok: boolean; error?: string }>;
+      readAutomationTaskLog: (
+        payload: string | { taskId: string; tail?: number },
+      ) => Promise<{
+        ok: boolean;
+        error?: string;
+        path: string;
+        lines: string[];
+        truncated?: boolean;
+        empty?: boolean;
+      }>;
+      runAutomationTaskNow: (
+        payload: string | { taskId: string; sessionId?: string },
+      ) => Promise<{ ok: boolean; error?: string }>;
+      loadSkillInstallPolicy: () => Promise<{ ok: boolean; config?: SkillInstallPolicyConfig; error?: string }>;
+      saveSkillInstallPolicy: (payload: SkillInstallPolicyConfig) => Promise<{ ok: boolean; error?: string }>;
+      loadEmailConfig: () => Promise<{ ok: boolean; config: EmailConfig; error?: string }>;
+      loadMcpStatus: (sessionId: string) => Promise<McpStatusResult>;
+      importMcpConfig: (payload: { sessionId: string; sourcePath: string }) => Promise<{
+        ok: boolean;
+        imported?: string[];
+        skipped?: string[];
+        total_imported?: number;
+        total_servers?: number;
+        error?: string;
+      }>;
+      getMcpSettings: () => Promise<{
+        ok: boolean;
+        extra_search_paths?: string[];
+        auto_connect?: string[];
+        disabled_tools?: Record<string, string[]>;
+        skip_default_names?: string[];
+        default_entry_names?: string[];
+        error?: string;
+      }>;
+      putMcpSettings: (payload: {
+        extraSearchPaths: string[];
+        disabledTools?: Record<string, string[]>;
+        skipDefaultNames?: string[];
+      }) => Promise<{
+        ok: boolean;
+        extra_search_paths?: string[];
+        skip_default_names?: string[];
+        default_entry_names?: string[];
+        error?: string;
+      }>;
+      mcpDiscover: () => Promise<{
+        ok: boolean;
+        count?: number;
+        hits?: Array<Record<string, unknown>>;
+        error?: string;
+      }>;
+      mcpGetRaw: (payload?: { path?: string }) => Promise<{
+        ok: boolean;
+        path?: string;
+        format?: string;
+        text?: string;
+        parse_ok?: boolean;
+        parse_error?: string;
+        line?: number | null;
+        column?: number | null;
+        error?: string;
+      }>;
+      mcpPutRaw: (payload: { path: string; text: string }) => Promise<{
+        ok: boolean;
+        path?: string;
+        format?: string;
+        error?: string;
+      }>;
+      mcpGatewayRegistry: (payload: { baseUrl: string; token: string }) => Promise<{
+        ok: boolean;
+        data?: unknown;
+        error?: string;
+      }>;
+      mcpMarketplaceList: (payload?: {
+        category?: string;
+        search?: string;
+        page?: number;
+        pageSize?: number;
+        isHosted?: boolean;
+        isVerified?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        page?: number;
+        page_size?: number;
+        total_count?: number;
+        items?: Array<Record<string, unknown>>;
+        error?: string;
+      }>;
+      mcpMarketplaceDetail: (payload: { serverId: string }) => Promise<{
+        ok: boolean;
+        item?: Record<string, unknown>;
+        error?: string;
+      }>;
+      mcpMarketplaceInstall: (payload: { serverId: string; env?: Record<string, string> }) => Promise<{
+        ok: boolean;
+        installed?: string[];
+        updated?: string[];
+        error?: string;
+      }>;
+      nativeConnectorStatus: (id: string) => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorCachedStatus: () => Promise<{
+        ok: boolean;
+        connectors: Record<string, { connected: boolean; updated_at?: string }>;
+      }>;
+      nativeConnectorTmeetLogin: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorTmeetCancel: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorTmeetLogout: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorGithubLogin: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorGithubLogout: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorGithubCancel: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorFeishuLogin: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorFeishuLogout: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorFeishuCancel: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorWecomLogin: (payload: {
+        botId: string;
+        botSecret: string;
+      }) => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorWecomLogout: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorWecomCancel: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorQqmailLogin: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorQqmailLogout: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+        account?: string;
+      }>;
+      nativeConnectorQqmailCancel: () => Promise<{
+        ok: boolean;
+        available: boolean;
+        connected: boolean;
+        label: string;
+        error?: string;
+      }>;
+      nativeConnectorTapdConfigure: (payload: {
+        sessionId: string;
+        accessToken: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      onNativeConnectorTmeetProgress: (
+        callback: (payload: {
+          phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+          authorizationUrl?: string;
+          browserOpenFailed?: boolean;
+        }) => void,
+      ) => () => void;
+      onNativeConnectorGithubProgress: (
+        callback: (payload: {
+          phase:
+            | "installing"
+            | "code_ready"
+            | "opening_browser"
+            | "waiting"
+            | "success"
+            | "disconnected"
+            | "error";
+          oneTimeCode?: string;
+        }) => void,
+      ) => () => void;
+      onNativeConnectorFeishuProgress: (
+        callback: (payload: {
+          phase:
+            | "installing"
+            | "config_setup"
+            | "config_done"
+            | "auth_setup"
+            | "waiting"
+            | "success"
+            | "disconnected"
+            | "error";
+          verificationUrl?: string;
+        }) => void,
+      ) => () => void;
+      onNativeConnectorWecomProgress: (
+        callback: (payload: {
+          phase: "installing" | "initializing" | "probing" | "success" | "disconnected" | "error";
+        }) => void,
+      ) => () => void;
+      onNativeConnectorQqmailProgress: (
+        callback: (payload: {
+          phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+          authUrl?: string;
+        }) => void,
+      ) => () => void;
+      resolveLocalPath: (path: string) => Promise<{
+        ok: boolean;
+        resolvedPath?: string;
+        isDirectory?: boolean;
+        isFile?: boolean;
+        error?: string;
+      }>;
+      shellOpenPath: (path: string) => Promise<{ ok: boolean; error?: string }>;
+      shellShowItemInFolder: (path: string) => Promise<{ ok: boolean; error?: string }>;
+      copyLocalFileAs: (payload: { sourcePath: string }) => Promise<{
+        ok: boolean;
+        canceled?: boolean;
+        path?: string;
+        error?: string;
+      }>;
+      connectMcp: (payload: { sessionId: string; name: string }) => Promise<{ ok: boolean; error?: string }>;
+      disconnectMcp: (payload: { sessionId: string; name: string }) => Promise<{ ok: boolean; error?: string }>;
+      saveOnboardingCompleted: (completed: boolean) => Promise<{ ok: boolean }>;
+      saveEmailConfig: (payload: EmailConfig) => Promise<{ ok: boolean; error?: string }>;
+      testEmailConfig: (payload: {
+        config: EmailConfig;
+        toEmail?: string;
+      }) => Promise<{ ok: boolean; error?: string; message?: string }>;
+      saveProvider: (payload: {
+        name: string;
+        apiKey?: string;
+        baseUrl?: string;
+        model?: string;
+        models?: string[];
+        enabled?: boolean;
+        dropParams?: boolean;
+        displayName?: string;
+        interface?: "openai" | "ollama";
+        managed?: boolean;
+      }) => Promise<{ ok: boolean }>;
+      setDefaultProvider: (name: string) => Promise<{ ok: boolean }>;
+      deleteProvider: (name: string) => Promise<{ ok: boolean }>;
+      validateKey: (payload: {
+        provider: string;
+        apiKey: string;
+        baseUrl?: string;
+      }) => Promise<ValidateKeyResult>;
+      fetchModels: (payload: {
+        provider: string;
+        apiKey: string;
+        baseUrl?: string;
+      }) => Promise<FetchModelsResult>;
+      /** Main-process favicon fetch (honors HTTPS_PROXY; renderer <img> does not). */
+      fetchFavicon: (payload: {
+        url?: string;
+        domain?: string;
+        size?: number;
+      }) => Promise<
+        | { ok: true; dataUrl: string; host: string }
+        | { ok: false; error: string }
+      >;
+      healthCheckModel: (payload: {
+        provider: string;
+        apiKey: string;
+        baseUrl?: string;
+        model: string;
+      }) => Promise<HealthCheckResult>;
+
+      saveConfig: (payload: {
+        provider?: string;
+        model?: string;
+        apiKey?: string;
+        activeProvider?: string;
+        activeModel?: string;
+      }) => Promise<{ ok: boolean; path: string; error?: string }>;
+      nativeSay: (text: string) => Promise<{ ok: boolean; reason?: string }>;
+
+      loadSkills: () => Promise<SkillListResult>;
+      loadSkillDetail: (args: { name: string }) => Promise<SkillDetailResult>;
+      refreshSkills: () => Promise<SkillRefreshResult>;
+      getSkillSettings: () => Promise<SkillSettingsResult>;
+      getGuardSettings: () => Promise<GuardSettingsResult>;
+      putGuardSettings: (payload: {
+        version?: number;
+        scan_mode?: string;
+        llm_verify?: boolean;
+        ignored?: string[];
+        add_ignore?: string;
+        remove_ignore?: string;
+      }) => Promise<GuardSettingsResult>;
+      guardScanSkill: (payload: {
+        skill_path?: string;
+        markdown?: string;
+        skill_name?: string;
+        mode?: string;
+      }) => Promise<GuardScanResult>;
+      guardScanAll: (payload?: { include_ignored?: boolean }) => Promise<GuardScanAllResult>;
+      skillSnapshot: (payload: {
+        base_dir: string;
+        trigger?: string;
+        skill_name?: string;
+      }) => Promise<SkillSnapshotCreateResult>;
+      skillSnapshotsList: (payload: { base_dir: string }) => Promise<SkillSnapshotsListResult>;
+      skillSnapshotRestore: (payload: {
+        base_dir: string;
+        snapshot_id: string;
+      }) => Promise<SkillSnapshotRestoreResult>;
+      putSkillSettings: (payload: {
+        presetPaths: Array<{ id: string; enabled: boolean }>;
+        customPaths: Array<{ path: string; enabled: boolean } | string>;
+        preferredSources?: Record<string, string>;
+        disabledSkills?: string[];
+      }) => Promise<SkillSettingsResult>;
+
+      loadBundles: () => Promise<BundleListResult>;
+      installBundle: (args: {
+        sourcePath: string;
+        acknowledgeHighRisk?: boolean;
+        confirmNonHighRisk?: boolean;
+      }) => Promise<BundleInstallResult>;
+      installBundlePreview: (args: { sourcePath: string }) => Promise<BundleInstallPreviewResult>;
+      uninstallBundle: (args: { name: string }) => Promise<BundleUninstallResult>;
+
+      searchRegistry: (args: { q: string }) => Promise<RegistrySearchResult>;
+      searchSkillHub: (args: { q: string }) => Promise<SkillHubSearchResult>;
+      loadLocalImageDataUrl: (path: string) => Promise<{ ok: boolean; dataUrl?: string; error?: string }>;
+      writeLocalTextFile: (payload: {
+        path: string;
+        content: string;
+        expectedMtimeMs?: number;
+        eol?: "lf" | "crlf";
+      }) => Promise<{ ok: boolean; size?: number; mtimeMs?: number; error?: string; code?: string }>;
+      readLocalTextFile: (path: string) => Promise<{ ok: boolean; content?: string; size?: number; error?: string }>;
+      /** Stat a local path for size/mtime without reading file contents. */
+      statLocalPath: (path: string) => Promise<{
+        ok: boolean;
+        size?: number;
+        isDirectory?: boolean;
+        mtimeMs?: number;
+        error?: string;
+      }>;
+      /** Mount external paths into the session default workspace (reference/copy/link). */
+      linkIntoSessionWorkspace: (payload: {
+        sessionId: string;
+        sources: string[];
+        mode?: TaskspaceMountMode;
+        /** When true, skip covering-reference guard for mode=link (user-initiated). */
+        explicit?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        defaultDir?: string;
+        homeDir?: string;
+        linked?: number;
+        created?: string[];
+        failed?: string[];
+        mode?: TaskspaceMountMode;
+        error?: string;
+      }>;
+      copyIntoSessionWorkspace: (payload: {
+        sessionId: string;
+        sources: string[];
+      }) => Promise<{
+        ok: boolean;
+        defaultDir?: string;
+        linked?: number;
+        created?: string[];
+        failed?: string[];
+        error?: string;
+      }>;
+      diffSessionWorkspaceCopy: (payload: {
+        sessionId: string;
+        name: string;
+      }) => Promise<{
+        ok: boolean;
+        name?: string;
+        source_path?: string;
+        added?: string[];
+        modified?: string[];
+        deleted?: string[];
+        source_drifted?: boolean;
+        error?: string;
+      }>;
+      applySessionWorkspaceCopy: (payload: {
+        sessionId: string;
+        name: string;
+        force?: boolean;
+      }) => Promise<{
+        ok: boolean;
+        applied?: string[];
+        source_drifted?: boolean;
+        error?: string;
+      }>;
+      /** Write chat attachments as real files under <default>/attachments/. */
+      materializeSessionAttachments: (payload: {
+        sessionId: string;
+        files: Array<{
+          name?: string;
+          path?: string;
+          dataBase64?: string;
+          dataUrl?: string;
+        }>;
+      }) => Promise<{
+        ok: boolean;
+        defaultDir?: string;
+        attachDir?: string;
+        files?: Array<{ name: string; path: string }>;
+        error?: string;
+      }>;
+      /** Legacy: symlink artifact paths into the session default workspace. */
+      stageSessionArtifacts: (payload: {
+        sessionId: string;
+        paths: string[];
+      }) => Promise<{
+        ok: boolean;
+        stagingDir?: string;
+        homeDir?: string;
+        linked?: number;
+        error?: string;
+      }>;
+      loadLocalFileDataUrl: (path: string) => Promise<{
+        ok: boolean;
+        dataUrl?: string;
+        mime?: string;
+        size?: number;
+        error?: string;
+      }>;
+      installFromRegistry: (args: {
+        source: string;
+        name: string;
+        namespace?: string;
+        originSource?: string;
+        previewToken?: string;
+        acknowledgeHighRisk?: boolean;
+        confirmNonHighRisk?: boolean;
+        provenanceSource?: "registry" | "skillhub";
+      }) => Promise<RegistryInstallResult>;
+      uninstallMarketSkill: (args: { name: string }) => Promise<RegistryUninstallResult>;
+      installFromRegistryPreview: (args: {
+        source: string;
+        name: string;
+        namespace?: string;
+        originSource?: string;
+      }) => Promise<RegistryInstallPreviewResult>;
+      discardRegistryInstallPreview: (args: {
+        source: string;
+        name: string;
+        namespace?: string;
+        previewToken?: string;
+      }) => Promise<{ ok: boolean; discarded?: boolean; error?: string }>;
+
+      terminalSpawn: (payload: {
+        id: string;
+        cwd: string;
+        cols?: number;
+        rows?: number;
+      }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+      terminalBridgeAttach: (payload: {
+        id: string;
+        sessionId: string;
+        baseUrl: string;
+        token: string;
+        cols?: number;
+        rows?: number;
+      }) => Promise<{ ok: boolean; id?: string; error?: string }>;
+      terminalWrite: (payload: { id: string; data: string }) => Promise<{ ok: boolean }>;
+      terminalWriteByTab: (payload: { tabId: string; data: string }) => Promise<{ ok: boolean; id?: string }>;
+      terminalResize: (payload: { id: string; cols: number; rows: number }) => Promise<{ ok: boolean }>;
+      terminalKill: (id: string) => Promise<{ ok: boolean }>;
+      onTerminalData: (cb: (payload: { id: string; data: string }) => void) => () => void;
+      onTerminalExit: (cb: (payload: { id: string }) => void) => () => void;
+
+      systemSearch: (payload: {
+        query: string;
+        category?: "all" | "documents" | "applications" | "images" | "folders" | "videos";
+      }) => Promise<{
+        ok: boolean;
+        items: Array<{
+          path: string;
+          name: string;
+          ext: string;
+          kind: "folder" | "document" | "application" | "image" | "video" | "other";
+          size: number;
+          mtime: number;
+        }>;
+        error?: string;
+        warning?: string;
+        timedOut?: boolean;
+        engine?: string;
+      }>;
+      systemSearchPreview: (filePath: string) => Promise<{
+        ok: boolean;
+        kind: "text" | "image" | "metadata";
+        content?: string;
+        fileUrl?: string;
+        truncated?: boolean;
+        mtimeMs?: number;
+        error?: string;
+      }>;
+      systemSearchOpen: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+      systemSearchReveal: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+      systemSearchGetInfo: (filePath: string) => Promise<{ ok: boolean; error?: string }>;
+      systemSearchOpenWith: (filePath: string) => Promise<{
+        ok: boolean;
+        hint?: string;
+        error?: string;
+      }>;
+      openExternal: (url: string) => Promise<{ ok: boolean; error?: string }>;
+      /** Local HTML preview: open file/url in a window + detached Chromium DevTools. */
+      openHtmlPreviewDevTools: (payload: {
+        path?: string;
+        url?: string;
+      }) => Promise<{ ok: boolean; error?: string }>;
+      /** Popup / top-level http(s) from iframe → navigate WorkPanel browser in-app. */
+      onInAppBrowserOpen: (cb: (url: string) => void) => () => void;
+      copyPngToClipboard: (buffer: ArrayBuffer) => Promise<{ ok: boolean; error?: string }>;
+      downloadPngToDownloads: (payload: {
+        buffer: ArrayBuffer;
+        defaultFileName?: string;
+      }) => Promise<{ ok: boolean; path?: string; error?: string }>;
+    };
+  }
+}

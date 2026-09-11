@@ -1,0 +1,272 @@
+import { app, BrowserWindow, ipcMain, screen } from "electron";
+import fs from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
+export type SplashStage =
+  | "initializing"
+  | "backend-starting"
+  | "backend-waiting"
+  | "pinging-remote"
+  | "loading-ui"
+  | "preloading-core"
+  | "restoring-session"
+  | "ready";
+
+const SPLASH_FADE_MS = 180;
+/** After backend is ready: allow preload + session restore before force-showing main window. */
+const SPLASH_FORCE_SHOW_MS = 25_000;
+
+let splashWindow: BrowserWindow | null = null;
+let splashShownOnce = false;
+let rendererReadyReceived = false;
+let splashForceShowTimer: NodeJS.Timeout | null = null;
+let splashAlwaysOnTopTimer: NodeJS.Timeout | null = null;
+
+type LayoutThemeReader = () => "light" | "dark";
+
+let readLayoutTheme: LayoutThemeReader = () => "dark";
+
+export function configureSplashLayoutThemeReader(reader: LayoutThemeReader): void {
+  readLayoutTheme = reader;
+}
+
+export function hasSplashBeenShown(): boolean {
+  return splashShownOnce;
+}
+
+function resolveSplashHtmlPath(): string {
+  const dev = path.join(process.cwd(), "electron", "splash.html");
+  if (!app.isPackaged && fs.existsSync(dev)) return dev;
+  const packaged = path.join(__dirname, "splash.html");
+  if (fs.existsSync(packaged)) return packaged;
+  return dev;
+}
+
+function resolveSplashPreloadPath(): string {
+  const packaged = path.join(__dirname, "splash-preload.js");
+  if (fs.existsSync(packaged)) return packaged;
+  const dev = path.join(process.cwd(), "dist-electron", "splash-preload.js");
+  if (fs.existsSync(dev)) return dev;
+  return packaged;
+}
+
+function resolveSplashIconPath(): string {
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, "assets", "icon.png")
+    : path.resolve(process.cwd(), "assets", "icon.png");
+  return iconPath;
+}
+
+function resolveSplashHeroPath(): string {
+  const assetRoot = app.isPackaged
+    ? path.join(process.resourcesPath, "assets")
+    : path.resolve(process.cwd(), "assets");
+  for (const fileName of ["agenticx-ontology-logo.svg", "icon.png"]) {
+    const heroPath = path.join(assetRoot, fileName);
+    if (fs.existsSync(heroPath)) return heroPath;
+  }
+  return resolveSplashIconPath();
+}
+
+function resolveSplashTheme(): "light" | "dark" {
+  const theme = readLayoutTheme();
+  return theme === "light" ? "light" : "dark";
+}
+
+function splashBackgroundColor(theme: "light" | "dark"): string {
+  return theme === "light" ? "#f3f8fb" : "#05080d";
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value));
+}
+
+export interface SplashWorkArea {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export function calculateSplashBounds(workArea: SplashWorkArea): {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+} {
+  const workWidth = Math.max(1, Math.floor(workArea.width));
+  const workHeight = Math.max(1, Math.floor(workArea.height));
+  const horizontalMargin = Math.min(24, Math.max(8, Math.floor(workWidth * 0.04)));
+  const verticalMargin = Math.min(24, Math.max(8, Math.floor(workHeight * 0.04)));
+  const availableWidth = Math.max(1, workWidth - horizontalMargin * 2);
+  const availableHeight = Math.max(1, workHeight - verticalMargin * 2);
+
+  // Keep the composition comfortable on a normal display while allowing the
+  // HTML layout to shrink below that target on compact work areas. A fixed
+  // minimum here makes a narrow or scaled display crop the right column.
+  const targetWidth = clamp(Math.round(workWidth * 0.54), 560, 860);
+  const width = Math.min(targetWidth, availableWidth);
+  const targetHeight = clamp(Math.round(width * 0.56), 300, 480);
+  const height = Math.min(targetHeight, availableHeight);
+
+  return {
+    width: Math.max(1, width),
+    height: Math.max(1, height),
+    x: Math.round(workArea.x + Math.max(0, (workWidth - width) / 2)),
+    y: Math.round(workArea.y + Math.max(0, (workHeight - height) / 2)),
+  };
+}
+
+function centerSplashBounds(): { x: number; y: number; width: number; height: number } {
+  return calculateSplashBounds(screen.getPrimaryDisplay().workArea);
+}
+
+function clearSplashTimers(): void {
+  if (splashForceShowTimer) {
+    clearTimeout(splashForceShowTimer);
+    splashForceShowTimer = null;
+  }
+  if (splashAlwaysOnTopTimer) {
+    clearTimeout(splashAlwaysOnTopTimer);
+    splashAlwaysOnTopTimer = null;
+  }
+}
+
+function destroySplashWindow(): void {
+  clearSplashTimers();
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashWindow = null;
+    return;
+  }
+  splashWindow.destroy();
+  splashWindow = null;
+}
+
+export function updateSplashStage(stage: SplashStage): void {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+  splashWindow.webContents.send("splash:stage", stage);
+}
+
+export async function closeSplash(options?: { fade?: boolean }): Promise<void> {
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashWindow = null;
+    return;
+  }
+  const win = splashWindow;
+  if (options?.fade !== false) {
+    try {
+      win.webContents.send("splash:stage", "ready");
+    } catch {
+      // ignore
+    }
+    await new Promise((resolve) => setTimeout(resolve, SPLASH_FADE_MS));
+  }
+  destroySplashWindow();
+}
+
+export function registerSplashIpcHandlers(deps: {
+  showMainWindow: () => void;
+  quitApp: () => void;
+}): void {
+  ipcMain.handle("startup:renderer-ready", async () => {
+    if (rendererReadyReceived) return { ok: true, duplicate: true };
+    rendererReadyReceived = true;
+    updateSplashStage("ready");
+    await closeSplash({ fade: true });
+    deps.showMainWindow();
+    return { ok: true };
+  });
+
+  ipcMain.handle("splash-request-quit", async () => {
+    deps.quitApp();
+    return { ok: true };
+  });
+
+  ipcMain.handle("update-splash-stage", async (_event, stage: SplashStage) => {
+    updateSplashStage(stage);
+    return { ok: true };
+  });
+
+  ipcMain.handle("get-splash-preload-enabled", async () => ({
+    enabled: process.env.AGX_SPLASH_PRELOAD !== "0",
+  }));
+}
+
+export function scheduleSplashForceShowFallback(showMainWindow: () => void): void {
+  if (splashForceShowTimer) clearTimeout(splashForceShowTimer);
+  splashForceShowTimer = setTimeout(() => {
+    splashForceShowTimer = null;
+    if (rendererReadyReceived) return;
+    void (async () => {
+      await closeSplash({ fade: false });
+      showMainWindow();
+    })();
+  }, SPLASH_FORCE_SHOW_MS);
+}
+
+export function createSplashWindow(): BrowserWindow | null {
+  if (splashShownOnce) return null;
+  splashShownOnce = true;
+  rendererReadyReceived = false;
+
+  const theme = resolveSplashTheme();
+  const heroPath = resolveSplashHeroPath();
+  const heroUrl = fs.existsSync(heroPath) ? pathToFileURL(heroPath).href : "";
+
+  splashWindow = new BrowserWindow({
+    ...centerSplashBounds(),
+    frame: false,
+    resizable: false,
+    movable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    show: false,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: false,
+    backgroundColor: splashBackgroundColor(theme),
+    autoHideMenuBar: true,
+    webPreferences: {
+      preload: resolveSplashPreloadPath(),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+    },
+  });
+
+  splashWindow.once("ready-to-show", () => {
+    splashWindow?.show();
+    updateSplashStage("initializing");
+  });
+
+  splashAlwaysOnTopTimer = setTimeout(() => {
+    splashAlwaysOnTopTimer = null;
+    if (splashWindow && !splashWindow.isDestroyed()) {
+      splashWindow.setAlwaysOnTop(false);
+    }
+  }, 5000);
+
+  const htmlPath = resolveSplashHtmlPath();
+  const query: Record<string, string> = {
+    theme,
+  };
+  if (heroUrl) query.hero = heroUrl;
+
+  if (fs.existsSync(htmlPath)) {
+    void splashWindow.loadFile(htmlPath, { query }).catch((err) => {
+      console.warn("[splash] loadFile failed:", err);
+      destroySplashWindow();
+    });
+  } else {
+    console.warn("[splash] splash.html not found at", htmlPath);
+    destroySplashWindow();
+  }
+
+  return splashWindow;
+}
+
+export function onMainWindowDidFinishLoad(): void {
+  updateSplashStage("restoring-session");
+}

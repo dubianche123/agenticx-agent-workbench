@@ -1,0 +1,310 @@
+/*
+ * Workflow Studio owns a bounded, readable editing surface.  The rest of the
+ * desktop intentionally uses acrylic layers, but a graph editor and its
+ * inspector need a solid paint underneath every label and control.  Keep the
+ * overrides under this root so chat, settings and the other desktop surfaces
+ * retain their existing material treatment.
+ */
+.agx-workflow-studio {
+  --workflow-color-scheme: dark;
+  --workflow-surface-base: #17181b;
+  --workflow-surface-panel: #232428;
+  --workflow-surface-popover: #2b2d32;
+  --workflow-surface-card: #2d2f34;
+  --workflow-surface-card-strong: #383a40;
+  --workflow-surface-hover: #393b42;
+  --workflow-surface-sidebar: #202126;
+  --workflow-border-subtle: #4a4d56;
+  --workflow-border-muted: #3d4048;
+  --workflow-border-strong: #656a77;
+  --workflow-text-primary: #e6e9ef;
+  --workflow-text-strong: #ffffff;
+  --workflow-text-muted: #c2c8d2;
+  --workflow-text-subtle: #aab2c0;
+  --workflow-text-faint: #8f98a8;
+  --workflow-status-success: #64e1ad;
+  --workflow-status-warning: #ffc36d;
+  --workflow-status-error: #ff9797;
+  --workflow-alert-success-bg: #18382f;
+  --workflow-alert-success-border: #3b8e70;
+  --workflow-alert-warning-bg: #41321d;
+  --workflow-alert-warning-border: #a97835;
+  --workflow-alert-error-bg: #452528;
+  --workflow-alert-error-border: #a35a5f;
+  --workflow-minimap-mask: #17181b;
+  --workflow-minimap-node: #9bc1ff;
+  --workflow-minimap-node-border: #eff6ff;
+  --workflow-minimap-viewport: #d4d9e2;
+  --workflow-edge: #aab3c2;
+  --workflow-overlay: rgba(0, 0, 0, 0.48);
+
+  /* Components use the desktop semantic names.  Rebinding them here avoids
+     changing dozens of unrelated surfaces while making every Workflow
+     background an opaque color in every theme. */
+  --surface-base: var(--workflow-surface-base);
+  --surface-base-fallback: var(--workflow-surface-base);
+  --surface-panel: var(--workflow-surface-panel);
+  --surface-popover: var(--workflow-surface-popover);
+  --surface-sidebar: var(--workflow-surface-sidebar);
+  --surface-topbar: var(--workflow-surface-panel);
+  --surface-messages: var(--workflow-surface-base);
+  --surface-composer: var(--workflow-surface-panel);
+  --surface-card: var(--workflow-surface-card);
+  --surface-card-strong: var(--workflow-surface-card-strong);
+  --surface-hover: var(--workflow-surface-hover);
+  --surface-bubble: var(--workflow-surface-card);
+  --border-subtle: var(--workflow-border-subtle);
+  --border-muted: var(--workflow-border-muted);
+  --border-strong: var(--workflow-border-strong);
+  --text-primary: var(--workflow-text-primary);
+  --text-strong: var(--workflow-text-strong);
+  --text-muted: var(--workflow-text-muted);
+  --text-subtle: var(--workflow-text-subtle);
+  --text-faint: var(--workflow-text-faint);
+  --status-success: var(--workflow-status-success);
+  --status-warning: var(--workflow-status-warning);
+  --status-error: var(--workflow-status-error);
+  --ui-accent-surface: var(--workflow-surface-card-strong);
+  --ui-accent-surface-hover: var(--workflow-surface-hover);
+  --ui-accent-text: var(--workflow-text-strong);
+  --ui-accent-divider: var(--workflow-border-muted);
+  --ui-accent-divider-hover: var(--workflow-border-strong);
+  color: var(--text-primary);
+  color-scheme: var(--workflow-color-scheme);
+}
+
+:root[data-theme="light"] .agx-workflow-studio {
+  --workflow-color-scheme: light;
+  --workflow-surface-base: #f6f7f9;
+  --workflow-surface-panel: #ffffff;
+  --workflow-surface-popover: #ffffff;
+  --workflow-surface-card: #eef0f3;
+  --workflow-surface-card-strong: #e1e5ea;
+  --workflow-surface-hover: #e7ebf0;
+  --workflow-surface-sidebar: #f0f2f5;
+  --workflow-border-subtle: #cbd2db;
+  --workflow-border-muted: #dbe0e6;
+  --workflow-border-strong: #9ca7b5;
+  --workflow-text-primary: #1f2937;
+  --workflow-text-strong: #111827;
+  --workflow-text-muted: #475467;
+  --workflow-text-subtle: #596579;
+  --workflow-text-faint: #667085;
+  --workflow-status-success: #087f5b;
+  --workflow-status-warning: #9a6700;
+  --workflow-status-error: #b42318;
+  --workflow-alert-success-bg: #e6f6ef;
+  --workflow-alert-success-border: #74c69d;
+  --workflow-alert-warning-bg: #fff4d6;
+  --workflow-alert-warning-border: #e7b55f;
+  --workflow-alert-error-bg: #fdeceb;
+  --workflow-alert-error-border: #e59891;
+  --workflow-minimap-mask: #d9dee5;
+  --workflow-minimap-node: #475569;
+  --workflow-minimap-node-border: #1f2937;
+  --workflow-minimap-viewport: #465264;
+  --workflow-edge: #667085;
+  --workflow-overlay: rgba(15, 23, 42, 0.38);
+}
+
+:root[data-theme="dim"] .agx-workflow-studio {
+  --workflow-color-scheme: dark;
+  --workflow-surface-base: #292a2f;
+  --workflow-surface-panel: #323339;
+  --workflow-surface-popover: #3b3c43;
+  --workflow-surface-card: #393a41;
+  --workflow-surface-card-strong: #45464e;
+  --workflow-surface-hover: #4b4c54;
+  --workflow-surface-sidebar: #2e2f35;
+  --workflow-border-subtle: #555761;
+  --workflow-border-muted: #494b55;
+  --workflow-border-strong: #737783;
+  --workflow-text-primary: #e2e5eb;
+  --workflow-text-strong: #fafbfc;
+  --workflow-text-muted: #cbd0d9;
+  --workflow-text-subtle: #b2b8c4;
+  --workflow-text-faint: #9da5b3;
+  --workflow-status-success: #78dfb2;
+  --workflow-status-warning: #ffd18a;
+  --workflow-status-error: #ff9f9f;
+  --workflow-alert-success-bg: #244238;
+  --workflow-alert-success-border: #5fa486;
+  --workflow-alert-warning-bg: #4a3a23;
+  --workflow-alert-warning-border: #b88d4c;
+  --workflow-alert-error-bg: #4b2b2e;
+  --workflow-alert-error-border: #b9757a;
+  --workflow-minimap-mask: #292a2f;
+  --workflow-minimap-node: #b8d0ff;
+  --workflow-minimap-node-border: #f1f5f9;
+  --workflow-minimap-viewport: #e0e3e9;
+  --workflow-edge: #c2c9d5;
+  --workflow-overlay: rgba(8, 10, 16, 0.52);
+}
+
+.agx-workflow-studio .agx-workflow-alert {
+  border-style: solid;
+  border-width: 1px;
+}
+
+.agx-workflow-studio .agx-workflow-alert--success {
+  border-color: var(--workflow-alert-success-border);
+  background: var(--workflow-alert-success-bg);
+  color: var(--status-success);
+}
+
+.agx-workflow-studio .agx-workflow-alert--warning {
+  border-color: var(--workflow-alert-warning-border);
+  background: var(--workflow-alert-warning-bg);
+  color: var(--status-warning);
+}
+
+.agx-workflow-studio .agx-workflow-alert--error {
+  border-color: var(--workflow-alert-error-border);
+  background: var(--workflow-alert-error-bg);
+  color: var(--status-error);
+}
+
+.agx-workflow-studio .agx-workflow-button--danger:hover {
+  background: var(--workflow-alert-error-bg);
+}
+
+.agx-workflow-studio input,
+.agx-workflow-studio textarea,
+.agx-workflow-studio select {
+  background-color: var(--surface-base);
+  color: var(--text-strong);
+  caret-color: var(--ui-btn-primary-bg);
+}
+
+.agx-workflow-studio input::placeholder,
+.agx-workflow-studio textarea::placeholder {
+  color: var(--text-faint);
+  opacity: 1;
+}
+
+.agx-workflow-studio select option {
+  background: var(--surface-popover);
+  color: var(--text-primary);
+}
+
+.agx-workflow-studio input[type="checkbox"] {
+  accent-color: var(--ui-btn-primary-bg);
+}
+
+.agx-workflow-studio .agx-workflow-node {
+  background: var(--surface-card);
+  border-color: var(--border-strong);
+}
+
+.agx-workflow-studio .agx-workflow-node:hover {
+  border-color: var(--ui-btn-primary-bg);
+}
+
+.agx-workflow-studio .agx-workflow-node--selected {
+  box-shadow: 0 0 0 2px var(--ui-btn-primary-bg), 0 12px 24px rgba(0, 0, 0, 0.2);
+}
+
+.agx-workflow-studio .agx-workflow-node-icon {
+  background: var(--ui-accent-surface);
+}
+
+.agx-workflow-studio .agx-workflow-contract-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  background: var(--ui-accent-surface);
+  color: var(--ui-accent-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* ReactFlow ships its own white controls/minimap defaults.  These selectors
+   are intentionally scoped and use !important because the component applies
+   inline utility classes to the same elements. */
+.agx-workflow-studio .react-flow__controls {
+  overflow: hidden;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 9px;
+  background: var(--surface-popover) !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.24) !important;
+}
+
+.agx-workflow-studio .react-flow__controls-button {
+  width: 29px;
+  height: 29px;
+  border-bottom: 1px solid var(--border-muted) !important;
+  background: var(--surface-popover) !important;
+  color: var(--text-primary) !important;
+  fill: currentColor !important;
+}
+
+.agx-workflow-studio .react-flow__controls-button:last-child {
+  border-bottom: 0 !important;
+}
+
+.agx-workflow-studio .react-flow__controls-button:hover {
+  background: var(--surface-hover) !important;
+  color: var(--text-strong) !important;
+}
+
+.agx-workflow-studio .react-flow__minimap {
+  overflow: hidden;
+  border: 1px solid var(--border-strong) !important;
+  border-radius: 9px;
+  background: var(--surface-popover) !important;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2) !important;
+}
+
+.agx-workflow-studio .react-flow__minimap-svg {
+  background: var(--surface-popover) !important;
+}
+
+.agx-workflow-studio .react-flow__minimap-mask {
+  fill: var(--workflow-minimap-mask) !important;
+  stroke: var(--workflow-minimap-viewport) !important;
+  stroke-width: 1.5 !important;
+}
+
+.agx-workflow-studio .react-flow__minimap-node {
+  fill: var(--workflow-minimap-node) !important;
+  stroke: var(--workflow-minimap-node-border) !important;
+  stroke-width: 1.5 !important;
+}
+
+.agx-workflow-studio .react-flow__edge-path {
+  stroke: var(--workflow-edge) !important;
+  stroke-width: 2 !important;
+}
+
+.agx-workflow-studio .react-flow__edge-text,
+.agx-workflow-studio .react-flow__edge-textbg {
+  fill: var(--text-primary) !important;
+}
+
+.agx-workflow-studio .react-flow__edge-textbg {
+  fill: var(--surface-popover) !important;
+  stroke: var(--border-muted) !important;
+}
+
+.agx-workflow-studio .react-flow__handle {
+  border-color: var(--surface-base) !important;
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+@media (max-width: 640px) {
+  .agx-workflow-studio .react-flow__minimap {
+    right: 8px;
+    bottom: 8px;
+    transform: scale(0.88);
+    transform-origin: bottom right;
+  }
+
+  .agx-workflow-studio .react-flow__controls {
+    left: 8px;
+    bottom: 8px;
+  }
+}

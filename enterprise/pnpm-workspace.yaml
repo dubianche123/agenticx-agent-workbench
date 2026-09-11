@@ -1,0 +1,10 @@
+packages:
+  # 通用产品本身
+  - "apps/*"
+  - "features/*"
+  - "packages/*"
+  - "plugins/*"
+
+  # 不纳入的：
+  # - apps/gateway（Go 项目，go.mod 管理）
+  # - packages/sdk-py（Python 项目，pyproject.toml 管理）

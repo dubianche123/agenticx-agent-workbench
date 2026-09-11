@@ -1,0 +1,95 @@
+import { describe, expect, it } from "vitest";
+import {
+  normalizeEnterpriseModelCatalog,
+  resolveEnterpriseModelSelection,
+} from "../electron/enterprise-model-catalog";
+
+describe("enterprise model catalog", () => {
+  it("keeps provider metadata returned by bootstrap", () => {
+    expect(
+      normalizeEnterpriseModelCatalog([
+        {
+          id: "privatecloud/kimi/kimi-k3",
+          provider: "privatecloud",
+          providerLabel: "私有云",
+          model: "kimi/kimi-k3",
+          label: "Kimi K3",
+          route: "private-cloud",
+          isDefault: true,
+          capabilities: ["chat", "reasoning"],
+        },
+      ]),
+    ).toEqual([
+      {
+        id: "privatecloud/kimi/kimi-k3",
+        provider: "privatecloud",
+        providerLabel: "私有云",
+        model: "kimi/kimi-k3",
+        label: "Kimi K3",
+        route: "private-cloud",
+        isDefault: true,
+        capabilities: ["chat", "reasoning"],
+      },
+    ]);
+  });
+
+  it("upgrades legacy string ids into provider groups without re-login", () => {
+    expect(
+      normalizeEnterpriseModelCatalog([
+        "privatecloud/kimi/kimi-k3",
+        "moma/Qwen/Qwen3.6-Plus",
+        "Kimi/Kimi-K2.6",
+      ]),
+    ).toMatchObject([
+      { provider: "privatecloud", providerLabel: "私有云", model: "kimi/kimi-k3" },
+      { provider: "moma", providerLabel: "MOMA", model: "Qwen/Qwen3.6-Plus" },
+      { provider: "Kimi", providerLabel: "月之暗面", model: "Kimi-K2.6" },
+    ]);
+  });
+
+  it("drops malformed and duplicate catalog entries", () => {
+    expect(
+      normalizeEnterpriseModelCatalog([
+        null,
+        {},
+        { id: "moma/model-a", provider: "moma" },
+        { id: "moma/model-a", providerLabel: "duplicate" },
+      ]),
+    ).toHaveLength(1);
+  });
+});
+
+describe("enterprise model catalog context window", () => {
+  it("keeps the admin-declared window and accepts the snake_case wire name", () => {
+    const [camel, snake] = normalizeEnterpriseModelCatalog([
+      { id: "zhipu/glm-5.2", contextWindow: 128_000 },
+      { id: "zhipu/glm-5.1", context_window: 200_000 },
+    ]);
+    expect(camel?.contextWindow).toBe(128_000);
+    expect(snake?.contextWindow).toBe(200_000);
+  });
+
+  it("omits the field when unset or unusable, so the backend heuristic stays in charge", () => {
+    const [none, zero, text] = normalizeEnterpriseModelCatalog([
+      { id: "a/b" },
+      { id: "c/d", contextWindow: 0 },
+      { id: "e/f", contextWindow: "128000" },
+    ]);
+    expect(none).not.toHaveProperty("contextWindow");
+    expect(zero).not.toHaveProperty("contextWindow");
+    expect(text).not.toHaveProperty("contextWindow");
+  });
+});
+
+describe("enterprise managed-model selection", () => {
+  it("keeps a still-valid local choice across catalog refreshes", () => {
+    expect(resolveEnterpriseModelSelection(["model-a", "model-b"], "model-b"))
+      .toBe("model-b");
+  });
+
+  it("falls back to the first available model when the old choice is revoked", () => {
+    expect(resolveEnterpriseModelSelection(["model-a", "model-b"], "removed"))
+      .toBe("model-a");
+    expect(resolveEnterpriseModelSelection([], "removed")).toBe("");
+  });
+});

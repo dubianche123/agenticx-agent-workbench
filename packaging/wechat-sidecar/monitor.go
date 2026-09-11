@@ -1,0 +1,381 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	ilink "github.com/openilink/openilink-sdk-go"
+)
+
+const keepaliveCheckInterval = 30 * time.Minute
+const keepaliveThreshold = 22 * time.Hour
+
+type SSEEvent struct {
+	Type         string        `json:"type"`
+	Sender       string        `json:"sender,omitempty"`
+	Text         string        `json:"text,omitempty"`
+	ContextToken string        `json:"context_token,omitempty"`
+	Items        []MessageItem `json:"items,omitempty"`
+	SessionID    string        `json:"session_id,omitempty"`
+	GroupID      string        `json:"group_id,omitempty"`
+	MessageID    string        `json:"message_id,omitempty"`
+	Status       string        `json:"status,omitempty"`
+}
+
+type MessageItem struct {
+	Type   int    `json:"type"`
+	Text   string `json:"text,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Size   int64  `json:"size,omitempty"`
+	EQP    string `json:"eqp,omitempty"`
+	AESKey string `json:"aes_key,omitempty"`
+}
+
+type monitorLoopFunc func(ctx context.Context, creds *Credentials) error
+
+var (
+	monitorLifeMu            sync.Mutex
+	monitorMu                sync.Mutex
+	monitorCancel            context.CancelFunc
+	monitorDone              chan struct{}
+	monitorEpoch             uint64
+	monitorRunning           bool
+	monitorClient            *ilink.Client
+	lastMessageTime          time.Time
+	keepaliveCancel          context.CancelFunc
+	consecutiveMonitorErrors int
+
+	sseMu      sync.Mutex
+	sseClients []chan SSEEvent
+
+	runMonitorLoop monitorLoopFunc = runIlinkMonitorLoop
+)
+
+const stopMonitorWaitTimeout = 8 * time.Second
+
+func isMonitorRunning() bool {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	return monitorRunning
+}
+
+func startMonitor(creds *Credentials) {
+	monitorLifeMu.Lock()
+	stopMonitorWait()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	monitorMu.Lock()
+	monitorCancel = cancel
+	monitorDone = done
+	monitorEpoch++
+	epoch := monitorEpoch
+	monitorRunning = true
+	lastMessageTime = time.Now()
+	consecutiveMonitorErrors = 0
+	monitorMu.Unlock()
+	monitorLifeMu.Unlock()
+
+	slog.Info("starting monitor", "bot_id", creds.BotID, "epoch", epoch)
+
+	defer func() {
+		close(done)
+		finishMonitorGeneration(epoch, done)
+		slog.Info("monitor stopped", "epoch", epoch)
+	}()
+
+	err := runMonitorLoop(ctx, creds)
+	if err != nil && ctx.Err() == nil {
+		slog.Error("monitor exited with error", "error", err, "epoch", epoch)
+		broadcastSSE(SSEEvent{Type: "error", Status: fmt.Sprintf("monitor stopped: %v", err)})
+	}
+}
+
+func finishMonitorGeneration(epoch uint64, done chan struct{}) {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	if epoch != monitorEpoch {
+		return
+	}
+	monitorRunning = false
+	monitorClient = nil
+	consecutiveMonitorErrors = 0
+	if monitorCancel != nil {
+		monitorCancel = nil
+	}
+	if done != nil && monitorDone == done {
+		monitorDone = nil
+	}
+}
+
+func runIlinkMonitorLoop(ctx context.Context, creds *Credentials) error {
+	client := ilink.NewClient(creds.BotToken, ilink.WithBaseURL(creds.BaseURL))
+
+	monitorMu.Lock()
+	monitorClient = client
+	monitorMu.Unlock()
+
+	kaCtx, kaCancel := context.WithCancel(ctx)
+	monitorMu.Lock()
+	keepaliveCancel = kaCancel
+	monitorMu.Unlock()
+	go keepaliveLoop(kaCtx, creds)
+
+	handler := func(msg ilink.WeixinMessage) {
+		monitorMu.Lock()
+		lastMessageTime = time.Now()
+		consecutiveMonitorErrors = 0
+		monitorMu.Unlock()
+		evt := convertMessage(msg)
+		broadcastSSE(evt)
+	}
+
+	monitorMu.Lock()
+	epoch := monitorEpoch
+	monitorMu.Unlock()
+
+	opts := &ilink.MonitorOptions{
+		OnError: func(err error) {
+			slog.Error("monitor error", "error", err)
+			broadcastSSE(SSEEvent{Type: "error", Status: err.Error()})
+			monitorMu.Lock()
+			if epoch != monitorEpoch {
+				monitorMu.Unlock()
+				return
+			}
+			consecutiveMonitorErrors++
+			if consecutiveMonitorErrors >= 3 {
+				monitorRunning = false
+				monitorClient = nil
+				slog.Warn("monitor degraded to stale after consecutive errors", "count", consecutiveMonitorErrors)
+				broadcastSSE(SSEEvent{Type: "status", Status: "stale"})
+			}
+			monitorMu.Unlock()
+		},
+		OnSessionExpired: func() {
+			slog.Warn("iLink session expired")
+			broadcastSSE(SSEEvent{Type: "status", Status: "session_expired"})
+			monitorMu.Lock()
+			if epoch != monitorEpoch {
+				monitorMu.Unlock()
+				return
+			}
+			monitorRunning = false
+			consecutiveMonitorErrors = 0
+			monitorMu.Unlock()
+		},
+	}
+
+	return client.Monitor(ctx, handler, opts)
+}
+
+func stopMonitorWait() {
+	monitorMu.Lock()
+	if keepaliveCancel != nil {
+		keepaliveCancel()
+		keepaliveCancel = nil
+	}
+	cancel := monitorCancel
+	done := monitorDone
+	monitorCancel = nil
+	monitorMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+	if done == nil {
+		return
+	}
+	select {
+	case <-done:
+	case <-time.After(stopMonitorWaitTimeout):
+		slog.Warn("stopMonitor wait timed out")
+	}
+}
+
+func stopMonitor() {
+	monitorLifeMu.Lock()
+	defer monitorLifeMu.Unlock()
+	stopMonitorWait()
+	monitorMu.Lock()
+	if monitorCancel == nil {
+		monitorRunning = false
+		monitorClient = nil
+		consecutiveMonitorErrors = 0
+	}
+	monitorMu.Unlock()
+}
+
+func keepaliveLoop(ctx context.Context, creds *Credentials) {
+	ticker := time.NewTicker(keepaliveCheckInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			monitorMu.Lock()
+			elapsed := time.Since(lastMessageTime)
+			client := monitorClient
+			monitorMu.Unlock()
+
+			if client == nil || elapsed < keepaliveThreshold {
+				continue
+			}
+			slog.Info("session keepalive: sending nudge", "idle_hours", int(elapsed.Hours()))
+			broadcastSSE(SSEEvent{Type: "status", Status: "keepalive_sent"})
+		}
+	}
+}
+
+func getMonitorClient() *ilink.Client {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	return monitorClient
+}
+
+func convertMessage(msg ilink.WeixinMessage) SSEEvent {
+	evt := SSEEvent{
+		Type:         "message",
+		Sender:       msg.FromUserID,
+		ContextToken: msg.ContextToken,
+		SessionID:    msg.SessionID,
+		GroupID:      msg.GroupID,
+		MessageID:    fmt.Sprintf("%d", msg.MessageID),
+	}
+
+	items := make([]MessageItem, 0, len(msg.ItemList))
+	for _, item := range msg.ItemList {
+		mi := MessageItem{Type: int(item.Type)}
+		switch item.Type {
+		case ilink.ItemText:
+			if item.TextItem != nil {
+				mi.Text = item.TextItem.Text
+				if evt.Text == "" {
+					evt.Text = item.TextItem.Text
+				}
+			}
+		case ilink.ItemImage:
+			if item.ImageItem != nil {
+				mi.URL = item.ImageItem.URL
+				if item.ImageItem.Media != nil {
+					mi.EQP = item.ImageItem.Media.EncryptQueryParam
+					mi.AESKey = item.ImageItem.Media.AESKey
+				}
+			}
+		case ilink.ItemVoice:
+			if item.VoiceItem != nil {
+				mi.Text = item.VoiceItem.Text
+				if item.VoiceItem.Media != nil {
+					mi.EQP = item.VoiceItem.Media.EncryptQueryParam
+					mi.AESKey = item.VoiceItem.Media.AESKey
+				}
+			}
+		case ilink.ItemFile:
+			if item.FileItem != nil {
+				mi.Name = item.FileItem.FileName
+				if item.FileItem.Media != nil {
+					mi.EQP = item.FileItem.Media.EncryptQueryParam
+					mi.AESKey = item.FileItem.Media.AESKey
+				}
+			}
+		case ilink.ItemVideo:
+			if item.VideoItem != nil && item.VideoItem.Media != nil {
+				mi.EQP = item.VideoItem.Media.EncryptQueryParam
+				mi.AESKey = item.VideoItem.Media.AESKey
+			}
+		}
+		items = append(items, mi)
+	}
+	evt.Items = items
+
+	return evt
+}
+
+func broadcastSSE(evt SSEEvent) {
+	sseMu.Lock()
+	defer sseMu.Unlock()
+	for _, ch := range sseClients {
+		select {
+		case ch <- evt:
+		default:
+			// slow client, drop event
+		}
+	}
+}
+
+func registerSSEClient() chan SSEEvent {
+	ch := make(chan SSEEvent, 64)
+	sseMu.Lock()
+	sseClients = append(sseClients, ch)
+	sseMu.Unlock()
+	return ch
+}
+
+func unregisterSSEClient(ch chan SSEEvent) {
+	sseMu.Lock()
+	defer sseMu.Unlock()
+	for i, c := range sseClients {
+		if c == ch {
+			sseClients = append(sseClients[:i], sseClients[i+1:]...)
+			break
+		}
+	}
+	close(ch)
+}
+
+func handleEvents(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	ch := registerSSEClient()
+	defer unregisterSSEClient(ch)
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case evt := <-ch:
+			data, err := json.Marshal(evt)
+			if err != nil {
+				slog.Error("marshal SSE event", "error", err)
+				continue
+			}
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+		}
+	}
+}
+
+// getLastSuccessAt returns the RFC3339 UTC time of last successful message or start.
+func getLastSuccessAt() string {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	if lastMessageTime.IsZero() {
+		return ""
+	}
+	return lastMessageTime.UTC().Format(time.RFC3339)
+}
+
+// getConsecutiveErrors returns current error streak count (for health).
+func getConsecutiveErrors() int {
+	monitorMu.Lock()
+	defer monitorMu.Unlock()
+	return consecutiveMonitorErrors
+}

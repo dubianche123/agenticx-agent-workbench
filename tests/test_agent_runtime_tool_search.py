@@ -1,0 +1,554 @@
+"""SP2: AgentRuntime ToolSearch projection and tool_search dispatch."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Dict, List
+
+from agenticx.cli.studio import StudioSession
+from agenticx.runtime import AgentRuntime, ConfirmGate, EventType, RuntimeEvent
+from agenticx.runtime.tool_search import (
+    BUILTIN_DEFER_ALLOWLIST,
+    CORE_ALWAYS_LOAD_TOOLS,
+    TOOL_AUTO_LOADED_TEMPLATE,
+    TOOL_SEARCH_STATE_KEY,
+    TOOL_SEARCH_TOOL_NAME,
+    ToolSearchConfig,
+    dump_state_to_scratchpad,
+    project_tools_for_round,
+)
+from agenticx.runtime.tool_search_runtime import build_runtime_context
+
+
+class _FakeResponse:
+    def __init__(self, content: str, tool_calls):
+        self.content = content
+        self.tool_calls = tool_calls
+
+
+class _ApproveGate(ConfirmGate):
+    async def request_confirm(self, question: str, context: Dict[str, Any] | None = None) -> bool:
+        return True
+
+
+def _tool_names(tools: list) -> set[str]:
+    out: set[str] = set()
+    for t in tools:
+        if not isinstance(t, dict):
+            continue
+        fn = t.get("function")
+        if isinstance(fn, dict):
+            n = str(fn.get("name") or "").strip()
+            if n:
+                out.add(n)
+    return out
+
+
+def _make_pool() -> list[dict]:
+    names = sorted(CORE_ALWAYS_LOAD_TOOLS | BUILTIN_DEFER_ALLOWLIST | {TOOL_SEARCH_TOOL_NAME})
+    # Ensure deferred target exists
+    assert "web_fetch" in BUILTIN_DEFER_ALLOWLIST
+    pool = []
+    for name in names:
+        pool.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": f"tool {name}",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+    return pool
+
+
+class _CaptureToolsLLM:
+    """Capture tools= kwargs each invoke; scripted tool_calls per round."""
+
+    def __init__(self, script: list) -> None:
+        self.script = list(script)
+        self.calls = 0
+        self.tools_seen: list[set[str]] = []
+
+    def invoke(self, *_args, **kwargs):
+        tools = kwargs.get("tools") or []
+        self.tools_seen.append(_tool_names(list(tools)))
+        self.calls += 1
+        if self.script:
+            item = self.script.pop(0)
+            return _FakeResponse(item.get("content", ""), item.get("tool_calls", []))
+        return _FakeResponse("done", [])
+
+    def stream(self, *_args, **_kwargs):
+        yield ""
+
+
+class _StreamCaptureToolsLLM(_CaptureToolsLLM):
+    """Prefer stream_with_tools path; still capture tools."""
+
+    def stream_with_tools(self, *_args, **kwargs):
+        tools = kwargs.get("tools") or []
+        self.tools_seen.append(_tool_names(list(tools)))
+        self.calls += 1
+        if self.script:
+            item = self.script.pop(0)
+            content = item.get("content", "")
+            tool_calls = item.get("tool_calls", [])
+            if content:
+                yield {"type": "content", "text": content}
+            for tc in tool_calls:
+                yield {"type": "tool_call", "tool_call": tc}
+            return
+        yield {"type": "content", "text": "done"}
+
+    def invoke(self, *_args, **kwargs):
+        # Fallback if stream path fails
+        return super().invoke(*_args, **kwargs)
+
+
+async def _collect(runtime: AgentRuntime, session: StudioSession, text: str, **kwargs):
+    items = []
+    async for event in runtime.run_turn(text, session, **kwargs):
+        items.append({"type": event.type, "data": event.data})
+    return items
+
+
+def test_studio_tools_registers_tool_search():
+    from agenticx.cli.agent_tools import STUDIO_TOOLS
+    from agenticx.runtime.meta_tools import META_AGENT_TOOLS
+
+    assert TOOL_SEARCH_TOOL_NAME in _tool_names(STUDIO_TOOLS)
+    assert TOOL_SEARCH_TOOL_NAME in _tool_names(META_AGENT_TOOLS)
+
+
+def test_mode_off_parity(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="off"),
+    )
+    pool = _make_pool()
+    session = StudioSession()
+    ctx = build_runtime_context(session=session, full_openai_tools=pool)
+    out = project_tools_for_round(ctx, full_openai_tools=pool)
+    assert _tool_names(out) == _tool_names(pool)
+
+
+def test_first_round_projected(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    llm = _CaptureToolsLLM([{"content": "ok", "tool_calls": []}])
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    asyncio.run(_collect(runtime, session, "hi", tools=pool))
+    assert llm.tools_seen
+    names0 = llm.tools_seen[0]
+    assert TOOL_SEARCH_TOOL_NAME in names0
+    assert "bash_exec" in names0
+    assert "web_fetch" not in names0
+
+
+def test_load_builtin_next_round(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    script = [
+        {
+            "content": "search",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "tool_search",
+                        "arguments": {"query": "select:web_fetch"},
+                    },
+                }
+            ],
+        },
+        {"content": "done", "tool_calls": []},
+    ]
+    llm = _CaptureToolsLLM(script)
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    events = asyncio.run(_collect(runtime, session, "fetch docs", tools=pool))
+    assert len(llm.tools_seen) >= 2
+    assert "web_fetch" not in llm.tools_seen[0]
+    assert "web_fetch" in llm.tools_seen[1]
+    tool_results = [e for e in events if e["type"] == EventType.TOOL_RESULT.value]
+    assert tool_results
+    payload = tool_results[0]["data"].get("result", "")
+    assert "web_fetch" in str(payload)
+    assert "input_schema" not in str(payload)
+    assert TOOL_SEARCH_STATE_KEY in (session.scratchpad or {})
+
+
+def test_same_batch_auto_loads_deferred_tool(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    script = [
+        {
+            "content": "both",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "tool_search",
+                        "arguments": {"query": "select:web_fetch"},
+                    },
+                },
+                {
+                    "id": "c2",
+                    "type": "function",
+                    "function": {
+                        "name": "web_fetch",
+                        "arguments": {"url": "https://example.com"},
+                    },
+                },
+            ],
+        },
+        {"content": "done", "tool_calls": []},
+    ]
+    llm = _CaptureToolsLLM(script)
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    events = asyncio.run(_collect(runtime, session, "both", tools=pool))
+    results = [
+        str(e["data"].get("result", ""))
+        for e in events
+        if e["type"] == EventType.TOOL_RESULT.value
+        and e["data"].get("name") == "web_fetch"
+    ]
+    assert results
+    assert results[0] == TOOL_AUTO_LOADED_TEMPLATE.format(name="web_fetch")
+    assert "web_fetch" in llm.tools_seen[1]
+    err_events = [
+        e
+        for e in events
+        if e["type"] == EventType.ERROR.value
+        and "web_fetch" in str(e["data"].get("text", ""))
+    ]
+    assert err_events
+    assert err_events[0]["data"].get("is_error") is True
+    assert err_events[0]["data"].get("severity") == "warning"
+    assert err_events[0]["data"].get("detector") == "tool_schema_autoload"
+
+
+def test_scratchpad_restore(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    session = StudioSession()
+    ctx = build_runtime_context(session=session, full_openai_tools=pool)
+    # Preload web_fetch
+    from agenticx.runtime.tool_search import apply_search
+
+    ctx2, _ = apply_search(ctx, "select:web_fetch")
+    dump_state_to_scratchpad(session.scratchpad, ctx2.state)
+
+    llm = _CaptureToolsLLM([{"content": "ok", "tool_calls": []}])
+    runtime = AgentRuntime(llm, _ApproveGate())
+    asyncio.run(_collect(runtime, session, "hi", tools=pool))
+    assert "web_fetch" in llm.tools_seen[0]
+
+
+def test_streaming_path_projects(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    llm = _StreamCaptureToolsLLM([{"content": "ok", "tool_calls": []}])
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    asyncio.run(_collect(runtime, session, "hi", tools=pool))
+    assert llm.tools_seen
+    assert "web_fetch" not in llm.tools_seen[0]
+    assert TOOL_SEARCH_TOOL_NAME in llm.tools_seen[0]
+
+
+def test_dispatch_tool_search_compact_result():
+    from agenticx.cli.agent_tools import dispatch_tool_async
+
+    pool = _make_pool()
+    session = StudioSession()
+    ctx = build_runtime_context(
+        session=session,
+        full_openai_tools=pool,
+        config=ToolSearchConfig(mode="always"),
+    )
+
+    async def _run():
+        return await dispatch_tool_async(
+            "tool_search",
+            {"query": "select:web_fetch"},
+            session,
+            runtime_tool_context=ctx,
+        )
+
+    raw = asyncio.run(_run())
+    data = json.loads(raw)
+    assert data["matches"][0]["name"] == "web_fetch"
+    blob = json.dumps(data)
+    assert "properties" not in blob
+    assert "builtin:web_fetch" in ctx.state.loaded_ids
+
+
+def test_meta_prompt_mentions_tool_search():
+    from agenticx.runtime.prompts.meta_agent import build_meta_agent_system_prompt
+
+    session = StudioSession()
+    prompt = build_meta_agent_system_prompt(session)
+    assert "tool_search" in prompt
+
+
+def test_show_widget_deferred_but_announced_by_name(monkeypatch):
+    """show_widget 的 schema 延迟发送，但名字必须出现在延迟工具清单里。
+
+    这条用例原来叫 ``test_show_widget_always_projected_when_in_pool``，断言
+    show_widget 永远常驻。它当年是对的：那时没有延迟工具清单，模型只能从
+    tools[] 里知道有哪些工具，一旦把 show_widget 摘掉，模型就再也不会出图了。
+
+    现在闸门反过来了——只有 CORE_ALWAYS_LOAD_TOOLS 里的工具常驻，其余一律可延迟
+    ——补位的是 ``known_unloaded_names`` 渲染出的按名清单：模型照样知道
+    show_widget 存在，直接调用即可（``auto_load_deferred_tool`` 会加载并让它下一轮
+    重试），而它 486 token 的 schema 和搬进 description 的渲染细则只在真的要出图
+    时才进入请求。
+    """
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    pool.append(
+        {
+            "type": "function",
+            "function": {
+                "name": "show_widget",
+                "description": "inline widget",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+    session = StudioSession()
+    ctx = build_runtime_context(session=session, full_openai_tools=pool)
+    out = project_tools_for_round(ctx, full_openai_tools=pool)
+    names = _tool_names(out)
+    # schema 不在这一轮的 tools[] 里……
+    assert "show_widget" not in names
+    assert "web_fetch" not in names
+    # ……但模型看得见它的名字，也能直接调用触发自动加载。
+    from agenticx.runtime.prompts.session_context import build_deferred_tools_manifest
+    from agenticx.runtime.tool_search import (
+        auto_load_deferred_tool,
+        is_tool_pending_next_round,
+        known_unloaded_names,
+    )
+
+    unloaded = known_unloaded_names(ctx)
+    assert "show_widget" in unloaded
+    assert "show_widget" in build_deferred_tools_manifest(unloaded)
+    assert is_tool_pending_next_round(
+        ctx, "show_widget", allowed_tool_names=names, full_openai_tools=pool
+    )
+    auto_load_deferred_tool(session, ctx, "show_widget")
+    assert "show_widget" in _tool_names(project_tools_for_round(ctx, full_openai_tools=pool))
+
+
+def test_direct_deferred_call_auto_loads_for_next_round(monkeypatch):
+    """AC-2: direct call of unloaded deferred tool self-heals via auto-load."""
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    script = [
+        {
+            "content": "fetch",
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {
+                        "name": "web_fetch",
+                        "arguments": {"url": "https://example.com"},
+                    },
+                }
+            ],
+        },
+        {"content": "done", "tool_calls": []},
+    ]
+    llm = _CaptureToolsLLM(script)
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    events = asyncio.run(_collect(runtime, session, "fetch page", tools=pool))
+    results = [
+        str(e["data"].get("result", ""))
+        for e in events
+        if e["type"] == EventType.TOOL_RESULT.value
+        and e["data"].get("name") == "web_fetch"
+    ]
+    assert results
+    assert results[0] == TOOL_AUTO_LOADED_TEMPLATE.format(name="web_fetch")
+    assert TOOL_SEARCH_STATE_KEY in (session.scratchpad or {})
+    loaded = (session.scratchpad or {}).get(TOOL_SEARCH_STATE_KEY, {}).get("loaded_ids") or []
+    assert "builtin:web_fetch" in loaded
+    assert len(llm.tools_seen) >= 2
+    assert "web_fetch" not in llm.tools_seen[0]
+    assert "web_fetch" in llm.tools_seen[1]
+    tool_result_event = next(
+        e
+        for e in events
+        if e["type"] == EventType.TOOL_RESULT.value
+        and e["data"].get("name") == "web_fetch"
+    )
+    assert tool_result_event["data"].get("is_error") is False
+    assert tool_result_event["data"].get("tool_executed") is False
+    assert tool_result_event["data"].get("severity") == "warning"
+    assert tool_result_event["data"].get("detector") == "tool_schema_autoload"
+    persisted = next(
+        row
+        for row in session.chat_history
+        if row.get("tool_call_id") == "c1"
+    )
+    assert persisted["tool_status"] == "pending"
+    assert persisted["metadata"] == {
+        "severity": "warning",
+        "detector": "tool_schema_autoload",
+        "action": "retry_next_round",
+        "tool_executed": False,
+    }
+
+
+def test_deferred_autoload_then_retry_is_successful_and_final_is_not_fatal(monkeypatch):
+    """Auto-loading a withheld schema is a warning; the retried call can finish normally."""
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    deferred_name = "schema_probe"
+    pool = _make_pool()
+    pool.append(
+        {
+            "type": "function",
+            "function": {
+                "name": deferred_name,
+                "description": "test deferred tool",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    )
+
+    async def _dispatch(name, _arguments, _session, **_kwargs):
+        assert name == deferred_name
+        return "OK: schema probe ran"
+
+    monkeypatch.setattr("agenticx.runtime.agent_runtime.dispatch_tool_async", _dispatch)
+    script = [
+        {
+            "content": "call",
+            "tool_calls": [
+                {
+                    "id": "autoload-1",
+                    "type": "function",
+                    "function": {"name": deferred_name, "arguments": {}},
+                }
+            ],
+        },
+        {
+            "content": "retry",
+            "tool_calls": [
+                {
+                    "id": "retry-1",
+                    "type": "function",
+                    "function": {"name": deferred_name, "arguments": {}},
+                }
+            ],
+        },
+        {"content": "done", "tool_calls": []},
+    ]
+    llm = _CaptureToolsLLM(script)
+    runtime = AgentRuntime(llm, _ApproveGate())
+    session = StudioSession()
+    events = asyncio.run(_collect(runtime, session, "probe", tools=pool))
+
+    autoload = next(
+        e
+        for e in events
+        if e["type"] == EventType.TOOL_RESULT.value
+        and e["data"].get("tool_call_id") == "autoload-1"
+    )
+    assert autoload["data"].get("is_error") is False
+    assert autoload["data"].get("severity") == "warning"
+    assert autoload["data"].get("detector") == "tool_schema_autoload"
+    executed = next(
+        e
+        for e in events
+        if e["type"] == EventType.TOOL_RESULT.value
+        and e["data"].get("tool_call_id") == "retry-1"
+    )
+    assert executed["data"].get("result") == "OK: schema probe ran"
+    assert executed["data"].get("is_error") is not True
+    assert any(e["type"] == EventType.FINAL.value for e in events)
+
+    from agenticx.studio.server import _runtime_error_counts_as_failure
+
+    fatal_errors = [
+        e
+        for e in events
+        if e["type"] == EventType.ERROR.value
+        and _runtime_error_counts_as_failure(
+            RuntimeEvent(type=e["type"], data=e["data"])
+        )
+    ]
+    assert fatal_errors == []
+
+
+def test_unknown_tool_still_counts_as_failure(monkeypatch):
+    monkeypatch.setattr(
+        "agenticx.runtime.tool_search_runtime.read_tool_search_config",
+        lambda: ToolSearchConfig(mode="always"),
+    )
+    pool = _make_pool()
+    unknown_name = "unknown_tool_for_runtime_test"
+    llm = _CaptureToolsLLM(
+        [
+            {
+                "content": "call",
+                "tool_calls": [
+                    {
+                        "id": "unknown-1",
+                        "type": "function",
+                        "function": {"name": unknown_name, "arguments": {}},
+                    }
+                ],
+            },
+            {"content": "done", "tool_calls": []},
+        ]
+    )
+    runtime = AgentRuntime(llm, _ApproveGate())
+    events = asyncio.run(_collect(runtime, StudioSession(), "unknown", tools=pool))
+    error = next(
+        e
+        for e in events
+        if e["type"] == EventType.ERROR.value
+        and unknown_name in str(e["data"].get("text", ""))
+    )
+    assert error["data"].get("severity") is None
+    from agenticx.studio.server import _runtime_error_counts_as_failure
+
+    assert _runtime_error_counts_as_failure(
+        RuntimeEvent(type=error["type"], data=error["data"])
+    )

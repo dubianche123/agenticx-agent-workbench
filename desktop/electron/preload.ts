@@ -1,0 +1,1418 @@
+import { contextBridge, ipcRenderer, webUtils } from "electron";
+import type { EnterpriseCapabilitySyncStatus } from "./enterprise-capability-sync-state";
+
+function parseArgvFlag(prefix: string, fallback: string): string {
+  for (const arg of process.argv) {
+    if (arg.startsWith(prefix)) {
+      try {
+        return decodeURIComponent(arg.slice(prefix.length));
+      } catch {
+        return arg.slice(prefix.length);
+      }
+    }
+  }
+  return fallback;
+}
+
+const injectedBackendScope = parseArgvFlag("--agx-backend-scope=", "local");
+const injectedConnectionMode =
+  parseArgvFlag("--agx-connection-mode=", "local") === "remote" ? "remote" : "local";
+const injectedDesktopVersion = parseArgvFlag("--agx-desktop-version=", "unknown");
+
+/** Live query from main process (argv injection can be stale if window opened early). */
+function queryBackendScopeSync(): string {
+  try {
+    const v = ipcRenderer.sendSync("agx-query-backend-scope") as unknown;
+    if (typeof v === "string" && v.trim()) return v.trim();
+  } catch {
+    // fall through
+  }
+  return injectedBackendScope;
+}
+
+function queryConnectionModeSync(): "local" | "remote" {
+  try {
+    const v = ipcRenderer.sendSync("agx-query-connection-mode") as unknown;
+    if (v === "remote" || v === "local") return v;
+  } catch {
+    // fall through
+  }
+  return injectedConnectionMode;
+}
+
+async function desktopApiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    const base = (await ipcRenderer.invoke("get-api-base")) as string;
+    const token = (await ipcRenderer.invoke("get-api-auth-token")) as string;
+    const resp = await fetch(`${base}${path}`, {
+      ...init,
+      headers: {
+        "x-agx-desktop-token": token,
+        ...(init?.headers ?? {}),
+      },
+    });
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "");
+      return { ok: false, error: `HTTP ${resp.status}: ${body.slice(0, 300)}` } as T;
+    }
+    return (await resp.json()) as T;
+  } catch (error) {
+    return { ok: false, error: String(error) } as T;
+  }
+}
+
+contextBridge.exposeInMainWorld("agenticxDesktop", {
+  version: injectedDesktopVersion,
+  getApiBase: async (): Promise<string> => ipcRenderer.invoke("get-api-base"),
+  waitForStudio: async (timeoutMs?: number): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke("wait-for-studio", timeoutMs),
+  getApiAuthToken: async (): Promise<string> => ipcRenderer.invoke("get-api-auth-token"),
+  getEnvironmentAssistantScope: async (): Promise<string> =>
+    ipcRenderer.invoke("get-environment-assistant-scope"),
+  /** Read the current Portal authorization version for an already enterprise-enriched session. */
+  enterpriseAssistantPreflight: async (payload: {
+    sessionId: string;
+    permissionMode: "plan" | "ask" | "auto";
+  }) => ipcRenderer.invoke("enterprise-assistant-preflight", payload) as Promise<{
+    ok: boolean;
+    authorizationVersion?: string | number | null;
+    authGeneration?: number;
+    code?: string;
+    message?: string;
+    error?: string;
+    stale?: boolean;
+  }>,
+  /** Confirm an enterprise operation through the main-process broker. */
+  enterpriseAssistantConfirmOperation: async (payload: {
+    operationId: string;
+    sessionId: string;
+    permissionMode: "plan" | "ask" | "auto";
+    authGeneration: number;
+  }) => ipcRenderer.invoke("enterprise-assistant-confirm-operation", payload) as Promise<{
+    ok: boolean;
+    status?: "succeeded" | "awaiting_confirmation" | "pending" | "failed";
+    operationId?: string;
+    result?: unknown;
+    proposal?: { title: string; changes: unknown; expiresAt?: string | number | null };
+    authorizationVersion?: string | number | null;
+    authGeneration?: number;
+    code?: string;
+    message?: string;
+    error?: string;
+    stale?: boolean;
+  }>,
+  enterpriseAssistantGetOperation: async (payload: {
+    operationId: string;
+    sessionId: string;
+    permissionMode: "plan" | "ask" | "auto";
+    authGeneration: number;
+  }) => ipcRenderer.invoke("enterprise-assistant-get-operation", payload) as Promise<{
+    ok: boolean;
+    status?: "succeeded" | "awaiting_confirmation" | "pending" | "failed";
+    operationId?: string;
+    result?: unknown;
+    proposal?: { title: string; changes: unknown; expiresAt?: string | number | null };
+    authorizationVersion?: string | number | null;
+    authGeneration?: number;
+    code?: string;
+    message?: string;
+    error?: string;
+    stale?: boolean;
+  }>,
+  platform: async (): Promise<string> => ipcRenderer.invoke("get-platform"),
+  syncTitleBarOverlay: async (theme: "dark" | "light" | "dim") =>
+    ipcRenderer.invoke("sync-title-bar-overlay", theme) as Promise<{ ok: boolean; skipped?: boolean; error?: string }>,
+  getConnectionMode: async (): Promise<"local" | "remote"> => ipcRenderer.invoke("get-connection-mode"),
+  getBackendScopeSync: (): string => queryBackendScopeSync(),
+  getConnectionModeSync: (): "local" | "remote" => queryConnectionModeSync(),
+  onConnectionModeChanged: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("agx-connection-mode-changed", handler);
+    return () => ipcRenderer.removeListener("agx-connection-mode-changed", handler);
+  },
+  onStudioReady: (callback: () => void): (() => void) => {
+    const handler = () => callback();
+    ipcRenderer.on("agx-studio-ready", handler);
+    return () => ipcRenderer.removeListener("agx-studio-ready", handler);
+  },
+  appRelaunch: async (): Promise<{ ok: boolean }> => ipcRenderer.invoke("app-relaunch"),
+  focusModeEnter: async (): Promise<{ ok: boolean; alreadyActive?: boolean; error?: string }> =>
+    ipcRenderer.invoke("focus-mode-enter"),
+  focusModeExit: async (): Promise<{ ok: boolean; alreadyInactive?: boolean; error?: string }> =>
+    ipcRenderer.invoke("focus-mode-exit"),
+  loadRemoteServer: async () =>
+    ipcRenderer.invoke("load-remote-server") as Promise<{ enabled: boolean; url: string; token: string }>,
+  saveRemoteServer: async (payload: { enabled: boolean; url: string; token: string }) =>
+    ipcRenderer.invoke("save-remote-server", payload),
+  testRemoteServer: async (payload: { url: string; token: string }) =>
+    ipcRenderer.invoke("test-remote-server", payload),
+  loadGatewayIm: async () =>
+    ipcRenderer.invoke("load-gateway-im") as Promise<{
+      enabled: boolean;
+      url: string;
+      deviceId: string;
+      token: string;
+      studioBaseUrl: string;
+    }>,
+  saveGatewayIm: async (payload: {
+    enabled: boolean;
+    url: string;
+    deviceId: string;
+    token: string;
+    studioBaseUrl: string;
+  }) => ipcRenderer.invoke("save-gateway-im", payload),
+  loadFeishuConfig: async () =>
+    ipcRenderer.invoke("load-feishu-config") as Promise<{
+      enabled: boolean;
+      appId: string;
+      appSecret: string;
+    }>,
+  saveFeishuConfig: async (payload: {
+    enabled: boolean;
+    appId: string;
+    appSecret: string;
+  }) => ipcRenderer.invoke("save-feishu-config", payload),
+  loadFeishuBinding: async () =>
+    ipcRenderer.invoke("load-feishu-binding") as Promise<{ ok: boolean; bindings: Record<string, unknown> }>,
+  saveFeishuDesktopBinding: async (payload: {
+    sessionId: string | null;
+    avatarId?: string | null;
+    avatarName?: string | null;
+    provider?: string | null;
+    model?: string | null;
+  }) => ipcRenderer.invoke("save-feishu-desktop-binding", payload),
+
+  loadWechatBinding: async () =>
+    ipcRenderer.invoke("load-wechat-binding") as Promise<{ ok: boolean; bindings: Record<string, unknown> }>,
+  saveWechatDesktopBinding: async (payload: {
+    sessionId: string | null;
+    avatarId?: string | null;
+    avatarName?: string | null;
+    provider?: string | null;
+    model?: string | null;
+  }) => ipcRenderer.invoke("save-wechat-desktop-binding", payload),
+
+  wechatSidecarStart: async () =>
+    ipcRenderer.invoke("wechat-sidecar-start") as Promise<{ ok: boolean; port: number }>,
+  wechatSidecarStop: async () =>
+    ipcRenderer.invoke("wechat-sidecar-stop") as Promise<{ ok: boolean }>,
+  wechatSidecarPort: async () =>
+    ipcRenderer.invoke("wechat-sidecar-port") as Promise<{ port: number; running: boolean }>,
+  wechatClearCredentials: async () =>
+    ipcRenderer.invoke("wechat-clear-credentials") as Promise<{ ok: boolean }>,
+
+  onOpenSettings: (cb: () => void): void => {
+    ipcRenderer.on("open-settings", () => cb());
+  },
+  onSkillsChanged: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on("skills-changed", handler);
+    return () => ipcRenderer.removeListener("skills-changed", handler);
+  },
+  onAutomationTaskProgress: (
+    cb: (payload: {
+      taskId: string;
+      taskName: string;
+      trigger: "schedule" | "manual";
+      phase: "queued" | "running" | "success" | "error";
+      sessionId?: string;
+      message?: string;
+      ts: number;
+    }) => void
+  ): (() => void) => {
+    const handler = (
+      _event: unknown,
+      payload: {
+        taskId: string;
+        taskName: string;
+        trigger: "schedule" | "manual";
+        phase: "queued" | "running" | "success" | "error";
+        sessionId?: string;
+        message?: string;
+        ts: number;
+      }
+    ) => cb(payload);
+    ipcRenderer.on("automation-task-progress", handler);
+    return () => ipcRenderer.removeListener("automation-task-progress", handler);
+  },
+
+  diagnoseBackendDeps: async () => ipcRenderer.invoke("diagnose-backend-deps"),
+  repairBackendDeps: async () => ipcRenderer.invoke("repair-backend-deps"),
+  onBackendDepsProgress: (
+    cb: (payload: { phase: string; line?: string; pct?: number }) => void,
+  ) => {
+    const handler = (
+      _e: unknown,
+      payload: { phase: string; line?: string; pct?: number },
+    ) => cb(payload);
+    ipcRenderer.on("backend-deps-progress", handler);
+    return () => ipcRenderer.removeListener("backend-deps-progress", handler);
+  },
+
+  listAvatars: async () => ipcRenderer.invoke("list-avatars"),
+  createAvatar: async (payload: {
+    name: string;
+    role?: string;
+    avatar_url?: string;
+    system_prompt?: string;
+    description?: string;
+    tags?: string[];
+    created_by?: string;
+    tools_enabled?: Record<string, boolean>;
+    skills_enabled?: Record<string, boolean> | null;
+    default_provider?: string;
+    default_model?: string;
+    default_permission_mode?: "plan" | "ask" | "auto";
+    workspace_dir?: string;
+  }) =>
+    ipcRenderer.invoke("create-avatar", payload),
+  updateAvatar: async (payload: {
+    id: string;
+    name?: string;
+    role?: string;
+    avatar_url?: string;
+    pinned?: boolean;
+    system_prompt?: string;
+    description?: string;
+    tags?: string[];
+    tools_enabled?: Record<string, boolean>;
+    skills_enabled?: Record<string, boolean> | null;
+    brains_enabled?: "*" | string[] | null;
+    default_provider?: string;
+    default_model?: string;
+    default_permission_mode?: "plan" | "ask" | "auto";
+    workspace_dir?: string;
+    color?: string;
+  }) =>
+    ipcRenderer.invoke("update-avatar", payload),
+  deleteAvatar: async (id: string) => ipcRenderer.invoke("delete-avatar", id),
+  reorderAvatars: async (orders: Record<string, number>) =>
+    ipcRenderer.invoke("reorder-avatars", orders) as Promise<{ ok: boolean; updated?: number; error?: string }>,
+  getToolsStatus: async () => ipcRenderer.invoke("get-tools-status"),
+  getToolsRegistry: async () => ipcRenderer.invoke("get-tools-registry"),
+  getToolsPolicy: async () => ipcRenderer.invoke("get-tools-policy"),
+  saveToolsPolicy: async (payload: {
+    tools_enabled: Record<string, boolean>;
+    tools_options?: Record<string, unknown>;
+  }) => ipcRenderer.invoke("save-tools-policy", payload),
+  installTool: async (payload: { requestId: string; toolId: string }) =>
+    ipcRenderer.invoke("install-tool", payload),
+  onToolInstallProgress: (cb: (payload: {
+    requestId: string;
+    tool_id: string;
+    phase: string;
+    percent: number;
+    message: string;
+    installed?: boolean;
+    version?: string;
+    install_command?: string;
+  }) => void): (() => void) => {
+    const handler = (_event: unknown, payload: {
+      requestId: string;
+      tool_id: string;
+      phase: string;
+      percent: number;
+      message: string;
+      installed?: boolean;
+      version?: string;
+      install_command?: string;
+    }) => cb(payload);
+    ipcRenderer.on("tool-install-progress", handler);
+    return () => ipcRenderer.removeListener("tool-install-progress", handler);
+  },
+
+  listSessions: async (avatarId?: string) => ipcRenderer.invoke("list-sessions", avatarId),
+  getSessionLoopReview: async (sessionId: string, refresh?: boolean) =>
+    ipcRenderer.invoke("get-session-loop-review", sessionId, refresh),
+  interruptSession: async (sessionId: string, purpose?: string, scope?: string) =>
+    ipcRenderer.invoke("interrupt-session", { sessionId, purpose, scope }),
+  loadRuntimeConfig: async () => ipcRenderer.invoke("load-runtime-config"),
+  saveRuntimeConfig: async (payload: {
+    max_tool_rounds?: number;
+    max_taskspaces?: number;
+    auto_resume_on_exhaustion?: boolean;
+    max_auto_resumes?: number;
+    tool_search_mode?: "off" | "auto" | "always";
+    tool_search_auto_schema_token_threshold?: number;
+    tool_search_threshold_strategy?: "adaptive" | "manual";
+    tool_search_context_budget_ratio?: number;
+    warning_tokens_per_session?: number;
+    max_tokens_per_session?: number;
+    max_tokens_per_turn?: number;
+  }) =>
+    ipcRenderer.invoke("save-runtime-config", payload),
+  searchSessions: async (payload: { q: string; avatarId?: string }) => {
+    const params = new URLSearchParams();
+    params.set("q", (payload.q || "").trim());
+    if (payload.avatarId) params.set("avatar_id", payload.avatarId);
+    return desktopApiFetch<{ ok: boolean; hits?: Array<{ session_id: string; snippet: string }>; error?: string }>(
+      `/api/sessions/search?${params.toString()}`
+    );
+  },
+  createSession: async (payload: {
+    avatar_id?: string;
+    name?: string;
+    inherit_from_session_id?: string;
+    session_mode?: "code_dev" | "daily_office";
+    permission_mode?: "plan" | "ask" | "auto";
+    provider?: string;
+    model?: string;
+  }) =>
+    ipcRenderer.invoke("create-session", payload),
+  renameSession: async (payload: { sessionId: string; name: string }) =>
+    ipcRenderer.invoke("rename-session", payload),
+  deleteSession: async (sessionId: string) =>
+    ipcRenderer.invoke("delete-session", sessionId),
+  deleteSessionsBatch: async (sessionIds: string[]) =>
+    ipcRenderer.invoke("delete-sessions-batch", sessionIds),
+  pinSession: async (payload: { sessionId: string; pinned: boolean }) =>
+    ipcRenderer.invoke("pin-session", payload),
+  setSessionModel: async (payload: { sessionId: string; provider: string; model: string }) =>
+    ipcRenderer.invoke("set-session-model", payload),
+  loadLayout: async () => ipcRenderer.invoke("layout-get"),
+  saveUiPrefs: async (payload: { theme: "dark" | "light" | "dim" }) =>
+    ipcRenderer.invoke("ui-prefs-set", payload) as Promise<{ ok: boolean; error?: string }>,
+  saveLayout: async (payload: {
+    panes?: Array<{
+      id: string;
+      avatarId: string | null;
+      sessionId: string;
+      modelProvider: string;
+      modelName: string;
+    }>;
+    activePaneId?: string;
+  }) => ipcRenderer.invoke("layout-set", payload),
+  forkSession: async (payload: { sessionId: string }) =>
+    ipcRenderer.invoke("fork-session", payload),
+  archiveSessions: async (payload: { sessionId: string; avatarId?: string | null }) =>
+    ipcRenderer.invoke("archive-sessions", payload),
+  listTaskspaces: async (sessionId: string) =>
+    desktopApiFetch(`/api/taskspace/workspaces?session_id=${encodeURIComponent(sessionId)}`),
+  registerTaskspace: async (payload: { path: string; label?: string }) =>
+    desktopApiFetch("/api/taskspace/workspaces/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        path: payload.path,
+        label: payload.label,
+      }),
+    }),
+  addTaskspace: async (payload: { sessionId: string; path?: string; label?: string }) =>
+    desktopApiFetch("/api/taskspace/workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: payload.sessionId,
+        path: payload.path,
+        label: payload.label,
+      }),
+    }),
+  removeTaskspace: async (payload: { sessionId: string; taskspaceId: string }) =>
+    desktopApiFetch("/api/taskspace/workspaces", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: payload.sessionId,
+        taskspace_id: payload.taskspaceId,
+      }),
+    }),
+  chooseDirectory: async () => ipcRenderer.invoke("choose-directory"),
+  chooseFiles: async () => ipcRenderer.invoke("choose-files"),
+  scanWorkspaceSensitiveFiles: async (payload: {
+    path: string;
+    extensions: string[];
+    maxFiles?: number;
+    maxMatches?: number;
+  }) =>
+    ipcRenderer.invoke("scan-workspace-sensitive-files", payload) as Promise<{
+      ok: boolean;
+      matches: string[];
+      scanned: number;
+      truncated: boolean;
+      error?: string;
+    }>,
+  getPathForFile: (file: File): string => {
+    try {
+      return webUtils.getPathForFile(file) || "";
+    } catch {
+      return "";
+    }
+  },
+  listTaskspaceFiles: async (payload: { sessionId: string; taskspaceId: string; path?: string }) =>
+    desktopApiFetch(
+      `/api/taskspace/files?session_id=${encodeURIComponent(payload.sessionId)}&taskspace_id=${encodeURIComponent(payload.taskspaceId)}&path=${encodeURIComponent(payload.path || ".")}`
+    ),
+  readTaskspaceFile: async (payload: { sessionId: string; taskspaceId: string; path: string }) =>
+    desktopApiFetch(
+      `/api/taskspace/file?session_id=${encodeURIComponent(payload.sessionId)}&taskspace_id=${encodeURIComponent(payload.taskspaceId)}&path=${encodeURIComponent(payload.path)}`
+    ),
+  loadSessionMessages: async (sessionId: string) =>
+    ipcRenderer.invoke("load-session-messages", sessionId),
+  loadSessionMessagesPage: async (
+    sessionId: string,
+    options: { tailRounds?: number; tailLimit?: number; beforeIndex?: number; limit?: number } = {}
+  ) => ipcRenderer.invoke("load-session-messages-page", sessionId, options),
+  forkAvatar: async (payload: { sessionId: string; name: string; role?: string }) =>
+    ipcRenderer.invoke("fork-avatar", payload),
+  // The backend returns a fully populated AvatarItem (description/tags,
+  // default_permission_mode and an isolated workspace) after generation.
+  generateAvatar: async (payload: { description: string }) =>
+    ipcRenderer.invoke("generate-avatar", payload),
+
+  exportPortablePackage: async (payload: {
+    kind: "expert" | "group";
+    id: string;
+    name?: string;
+  }) => ipcRenderer.invoke("export-portable-package", payload),
+  createPortablePackageShareLink: async (payload: {
+    kind: "expert" | "group";
+    id: string;
+  }) => ipcRenderer.invoke("create-portable-package-share-link", payload),
+  publishPortablePackageToMarket: async (payload: {
+    kind: "expert" | "group";
+    id: string;
+    release_version?: string;
+    recommended_permission_mode?: "plan" | "ask" | "auto";
+    dependencies?: {
+      skills: Array<{ capability_id: string; version: string; digest: string; required: boolean }>;
+      mcps: Array<{ capability_id: string; version: string; required: boolean }>;
+    };
+    resource_files?: Array<"IDENTITY.md" | "SOUL.md" | "MEMORY.md">;
+    workspace_slots?: Array<{ name: string; access: "read-only" | "read-write"; required: boolean }>;
+    security_action?: "none" | "redact";
+    security_findings?: Array<{
+      code: string;
+      field: string;
+      category: "secret" | "pii";
+      line?: number;
+      column?: number;
+      severity?: string;
+    }>;
+    release_notes?: string;
+    visibility: {
+      type: "company" | "departments" | "users" | "personal" | "admins_only";
+      departmentIds: string[];
+      userIds: string[];
+    };
+  }) => ipcRenderer.invoke("publish-portable-package-to-market", payload) as Promise<{
+    ok: boolean;
+    item?: unknown;
+    marketUrl?: string;
+    notice?: string;
+    warning?: string;
+    securityFindings?: Array<{
+      code: string;
+      field: string;
+      category: "secret" | "pii";
+      line?: number;
+      column?: number;
+      severity?: string;
+    }>;
+    error?: string;
+  }>,
+  publishSkillToMarket: async (payload: {
+    name: string;
+    release_version?: string;
+    skill_id?: string;
+    content_hash?: string;
+    release_notes?: string;
+    security_action?: "none" | "redact";
+    security_findings?: Array<{
+      code: string;
+      field: string;
+      category: "secret" | "pii";
+      line?: number;
+      column?: number;
+      severity?: string;
+    }>;
+    visibility: {
+      type: "company" | "departments" | "users" | "personal" | "admins_only";
+      departmentIds: string[];
+      userIds: string[];
+    };
+  }) => ipcRenderer.invoke("publish-skill-to-market", payload) as Promise<{
+    ok: boolean;
+    item?: unknown;
+    marketUrl?: string;
+    notice?: string;
+    warning?: string;
+    securityFindings?: Array<{
+      code: string;
+      field: string;
+      category: "secret" | "pii";
+      line?: number;
+      column?: number;
+      severity?: string;
+    }>;
+    error?: string;
+  }>,
+  installPortableMarketSkill: async (payload: { id: string }) =>
+    ipcRenderer.invoke("install-portable-market-skill", payload) as Promise<{
+      ok: boolean;
+      name?: string;
+      version?: string;
+      digest?: string;
+      error?: string;
+    }>,
+  listPortableMarketInstalledSkills: async () =>
+    ipcRenderer.invoke("list-portable-market-installed-skills") as Promise<{
+      ok: boolean;
+      installed: Array<{
+        itemId: string;
+        version: string;
+        digest: string;
+        name: string;
+      }>;
+      error?: string;
+    }>,
+  listPortableMarketAudience: async (payload: { query?: string } = {}) =>
+    ipcRenderer.invoke("list-portable-market-audience", payload),
+  listPortablePackageMarket: async (payload: {
+    kind: "expert" | "group" | "skill";
+    query?: string;
+    limit?: number;
+    cursor?: string;
+  }) => ipcRenderer.invoke("list-portable-package-market", payload),
+  inspectPortablePackageMarketItem: async (payload: {
+    id: string;
+    kind: "expert" | "group" | "skill";
+  }) => ipcRenderer.invoke("inspect-portable-package-market-item", payload),
+  inspectPortablePackageFile: async (payload: { kind?: "expert" | "group" } = {}) =>
+    ipcRenderer.invoke("inspect-portable-package-file", payload),
+  importPortablePackage: async (payload: {
+    raw: string;
+    confirmationToken: string;
+  }) => ipcRenderer.invoke("import-portable-package", payload),
+
+  listGroups: async () => ipcRenderer.invoke("list-groups"),
+  createGroup: async (payload: { name: string; avatar_ids: string[]; description?: string; avatar_url?: string; workspace_dir?: string; routing?: string; host_avatar_id: string }) =>
+    ipcRenderer.invoke("create-group", payload),
+  updateGroup: async (payload: { id: string; name?: string; avatar_ids?: string[]; description?: string; avatar_url?: string; workspace_dir?: string; routing?: string; host_avatar_id?: string }) =>
+    ipcRenderer.invoke("update-group", payload),
+  deleteGroup: async (id: string) => ipcRenderer.invoke("delete-group", id),
+
+  loadConfig: async () => ipcRenderer.invoke("load-config"),
+  loadWorkspaceConfig: async () => ipcRenderer.invoke("load-workspace-config"),
+  saveWorkspaceConfig: async (payload: { workspaceDir: string }) =>
+    ipcRenderer.invoke("save-workspace-config", payload),
+  loadMetaSoul: async () => ipcRenderer.invoke("load-meta-soul"),
+  saveMetaSoul: async (payload: { content: string }) => ipcRenderer.invoke("save-meta-soul", payload),
+  loadMetaIdentity: async () => ipcRenderer.invoke("load-meta-identity"),
+  saveMetaIdentity: async (payload: { content: string }) => ipcRenderer.invoke("save-meta-identity", payload),
+  aiAssistComplete: async (payload: {
+    systemPrompt: string;
+    userPrompt: string;
+    provider?: string;
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+  }) => ipcRenderer.invoke("ai-assist-complete", payload),
+  listMetaWorkspaceHistory: async (payload: { kind: "identity" | "soul" }) =>
+    ipcRenderer.invoke("list-meta-workspace-history", payload),
+  restoreMetaWorkspaceHistory: async (payload: { kind: "identity" | "soul"; id: string }) =>
+    ipcRenderer.invoke("restore-meta-workspace-history", payload),
+  openMetaWorkspaceFile: async (payload: { kind: "identity" | "soul" }) =>
+    ipcRenderer.invoke("open-meta-workspace-file", payload),
+  loadUserMd: async () => ipcRenderer.invoke("load-user-md"),
+  saveUserMd: async (payload: { content: string }) => ipcRenderer.invoke("save-user-md", payload),
+  loadAvatarSoul: async (payload: { avatarId: string }) => ipcRenderer.invoke("load-avatar-soul", payload),
+  saveAvatarSoul: async (payload: { avatarId: string; content: string }) =>
+    ipcRenderer.invoke("save-avatar-soul", payload),
+  loadAvatarCoreMemory: async (payload: { avatarId: string }) =>
+    ipcRenderer.invoke("load-avatar-core-memory", payload),
+  saveAvatarCoreMemory: async (payload: {
+    avatarId: string;
+    documents: { "IDENTITY.md": string; "SOUL.md": string; "MEMORY.md": string };
+  }) => ipcRenderer.invoke("save-avatar-core-memory", payload),
+  loadTrinityConfig: async () => ipcRenderer.invoke("load-trinity-config"),
+  saveTrinityConfig: async (payload: {
+    skill_protocol: boolean;
+    session_summary: boolean;
+    learning_enabled: boolean;
+    skill_manage_enabled: boolean;
+    learning_nudge_interval: number;
+    learning_min_tool_calls: number;
+  }) => ipcRenderer.invoke("save-trinity-config", payload),
+  loadTurnArchiveConfig: async () => ipcRenderer.invoke("load-turn-archive-config"),
+  saveTurnArchiveConfig: async (payload: {
+    enabled: boolean;
+    min_chunk_chars: number;
+    max_chunks_per_turn: number;
+    recall_turns_limit: number;
+    halflife_days: number;
+  }) => ipcRenderer.invoke("save-turn-archive-config", payload),
+  loadAutomationConfig: async () => ipcRenderer.invoke("load-automation-config"),
+  saveAutomationConfig: async (payload: { prevent_sleep: boolean }) =>
+    ipcRenderer.invoke("save-automation-config", payload),
+  confirmDialog: async (payload: {
+    title?: string;
+    message: string;
+    detail?: string;
+    confirmText?: string;
+    cancelText?: string;
+    destructive?: boolean;
+  }) =>
+    ipcRenderer.invoke("confirm-dialog", payload) as Promise<{
+      ok: boolean;
+      confirmed: boolean;
+      error?: string;
+    }>,
+  exportMessagesPdf: async (payload: { html: string; defaultFileName?: string }) =>
+    ipcRenderer.invoke("export-messages-pdf", payload) as Promise<{
+      ok: boolean;
+      canceled?: boolean;
+      path?: string;
+      error?: string;
+    }>,
+  loadAutomationTasks: async () =>
+    ipcRenderer.invoke("load-automation-tasks") as Promise<{
+      ok: boolean;
+      tasks: Array<Record<string, unknown>>;
+      error?: string;
+    }>,
+  saveAutomationTask: async (task: Record<string, unknown>) =>
+    ipcRenderer.invoke("save-automation-task", task) as Promise<{ ok: boolean; error?: string }>,
+  deleteAutomationTask: async (
+    taskIdOrOpts: string | { taskId: string; removeCrontaskDir?: boolean },
+  ) =>
+    ipcRenderer.invoke("delete-automation-task", taskIdOrOpts) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  automationCrontaskDirInfo: async (taskId: string) =>
+    ipcRenderer.invoke("automation-crontask-dir-info", taskId) as Promise<{
+      ok: boolean;
+      path: string;
+      exists: boolean;
+    }>,
+  cancelAutomationTaskRun: async (taskId: string) =>
+    ipcRenderer.invoke("cancel-automation-task-run", taskId) as Promise<{ ok: boolean; error?: string }>,
+  readAutomationTaskLog: async (payload: string | { taskId: string; tail?: number }) =>
+    ipcRenderer.invoke("read-automation-task-log", payload) as Promise<{
+      ok: boolean;
+      error?: string;
+      path: string;
+      lines: string[];
+      truncated?: boolean;
+      empty?: boolean;
+    }>,
+  runAutomationTaskNow: async (payload: string | { taskId: string; sessionId?: string }) =>
+    ipcRenderer.invoke("run-automation-task-now", payload) as Promise<{ ok: boolean; error?: string }>,
+  loadSkillInstallPolicy: async () => ipcRenderer.invoke("load-skill-install-policy"),
+  saveSkillInstallPolicy: async (payload: { non_high_risk_auto_install: boolean }) =>
+    ipcRenderer.invoke("save-skill-install-policy", payload),
+  loadEmailConfig: async () => ipcRenderer.invoke("load-email-config"),
+  loadMcpStatus: async (sessionId: string) => ipcRenderer.invoke("load-mcp-status", sessionId),
+  importMcpConfig: async (payload: { sessionId: string; sourcePath: string }) =>
+    ipcRenderer.invoke("import-mcp-config", payload),
+  getMcpSettings: async () => ipcRenderer.invoke("get-mcp-settings"),
+  putMcpSettings: async (payload: {
+    extraSearchPaths: string[];
+    disabledTools?: Record<string, string[]>;
+    skipDefaultNames?: string[];
+  }) =>
+    ipcRenderer.invoke("put-mcp-settings", payload),
+  mcpDiscover: async () => ipcRenderer.invoke("mcp-discover"),
+  mcpGetRaw: async (payload?: { path?: string }) => ipcRenderer.invoke("mcp-get-raw", payload),
+  mcpPutRaw: async (payload: { path: string; text: string }) => ipcRenderer.invoke("mcp-put-raw", payload),
+  mcpGatewayRegistry: async (payload: { baseUrl: string; token: string }) =>
+    ipcRenderer.invoke("mcp-gateway-registry", payload),
+  mcpMarketplaceList: async (payload?: {
+    category?: string;
+    search?: string;
+    page?: number;
+    pageSize?: number;
+    isHosted?: boolean;
+    isVerified?: boolean;
+  }) => ipcRenderer.invoke("mcp-marketplace-list", payload),
+  mcpMarketplaceDetail: async (payload: { serverId: string }) =>
+    ipcRenderer.invoke("mcp-marketplace-detail", payload),
+  mcpMarketplaceInstall: async (payload: { serverId: string; env?: Record<string, string> }) =>
+    ipcRenderer.invoke("mcp-marketplace-install", payload),
+  nativeConnectorStatus: async (id: string) =>
+    ipcRenderer.invoke("native-connector-status", { id }),
+  nativeConnectorCachedStatus: async () =>
+    ipcRenderer.invoke("native-connector-cached-status") as Promise<{
+      ok: boolean;
+      connectors: Record<string, { connected: boolean; updated_at?: string }>;
+    }>,
+  nativeConnectorTmeetLogin: async () =>
+    ipcRenderer.invoke("native-connector-tmeet-login"),
+  nativeConnectorTmeetCancel: async () =>
+    ipcRenderer.invoke("native-connector-tmeet-cancel"),
+  nativeConnectorTmeetLogout: async () =>
+    ipcRenderer.invoke("native-connector-tmeet-logout"),
+  nativeConnectorGithubLogin: async () =>
+    ipcRenderer.invoke("native-connector-github-login"),
+  nativeConnectorGithubLogout: async () =>
+    ipcRenderer.invoke("native-connector-github-logout"),
+  nativeConnectorGithubCancel: async () =>
+    ipcRenderer.invoke("native-connector-github-cancel"),
+  nativeConnectorFeishuLogin: async () =>
+    ipcRenderer.invoke("native-connector-feishu-login"),
+  nativeConnectorFeishuLogout: async () =>
+    ipcRenderer.invoke("native-connector-feishu-logout"),
+  nativeConnectorFeishuCancel: async () =>
+    ipcRenderer.invoke("native-connector-feishu-cancel"),
+  nativeConnectorWecomLogin: async (payload: { botId: string; botSecret: string }) =>
+    ipcRenderer.invoke("native-connector-wecom-login", payload),
+  nativeConnectorWecomLogout: async () =>
+    ipcRenderer.invoke("native-connector-wecom-logout"),
+  nativeConnectorWecomCancel: async () =>
+    ipcRenderer.invoke("native-connector-wecom-cancel"),
+  nativeConnectorQqmailLogin: async () =>
+    ipcRenderer.invoke("native-connector-qqmail-login"),
+  nativeConnectorQqmailLogout: async () =>
+    ipcRenderer.invoke("native-connector-qqmail-logout"),
+  nativeConnectorQqmailCancel: async () =>
+    ipcRenderer.invoke("native-connector-qqmail-cancel"),
+  nativeConnectorTapdConfigure: async (payload: { sessionId: string; accessToken: string }) =>
+    ipcRenderer.invoke("native-connector-tapd-configure", payload),
+  onNativeConnectorTmeetProgress: (
+    callback: (payload: {
+      phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+      authorizationUrl?: string;
+      browserOpenFailed?: boolean;
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: {
+        phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+        authorizationUrl?: string;
+        browserOpenFailed?: boolean;
+      },
+    ) => callback(payload);
+    ipcRenderer.on("native-connector-tmeet-progress", handler);
+    return () => ipcRenderer.removeListener("native-connector-tmeet-progress", handler);
+  },
+  onNativeConnectorGithubProgress: (
+    callback: (payload: {
+      phase:
+        | "installing"
+        | "code_ready"
+        | "opening_browser"
+        | "waiting"
+        | "success"
+        | "disconnected"
+        | "error";
+      oneTimeCode?: string;
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: {
+        phase:
+          | "installing"
+          | "code_ready"
+          | "opening_browser"
+          | "waiting"
+          | "success"
+          | "disconnected"
+          | "error";
+        oneTimeCode?: string;
+      },
+    ) => callback(payload);
+    ipcRenderer.on("native-connector-github-progress", handler);
+    return () => ipcRenderer.removeListener("native-connector-github-progress", handler);
+  },
+  onNativeConnectorFeishuProgress: (
+    callback: (payload: {
+      phase:
+        | "installing"
+        | "config_setup"
+        | "config_done"
+        | "auth_setup"
+        | "waiting"
+        | "success"
+        | "disconnected"
+        | "error";
+      verificationUrl?: string;
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: {
+        phase:
+          | "installing"
+          | "config_setup"
+          | "config_done"
+          | "auth_setup"
+          | "waiting"
+          | "success"
+          | "disconnected"
+          | "error";
+        verificationUrl?: string;
+      },
+    ) => callback(payload);
+    ipcRenderer.on("native-connector-feishu-progress", handler);
+    return () => ipcRenderer.removeListener("native-connector-feishu-progress", handler);
+  },
+  onNativeConnectorWecomProgress: (
+    callback: (payload: {
+      phase: "installing" | "initializing" | "probing" | "success" | "disconnected" | "error";
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: {
+        phase: "installing" | "initializing" | "probing" | "success" | "disconnected" | "error";
+      },
+    ) => callback(payload);
+    ipcRenderer.on("native-connector-wecom-progress", handler);
+    return () => ipcRenderer.removeListener("native-connector-wecom-progress", handler);
+  },
+  onNativeConnectorQqmailProgress: (
+    callback: (payload: {
+      phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+      authUrl?: string;
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      payload: {
+        phase: "installing" | "opening_browser" | "waiting" | "success" | "disconnected" | "error";
+        authUrl?: string;
+      },
+    ) => callback(payload);
+    ipcRenderer.on("native-connector-qqmail-progress", handler);
+    return () => ipcRenderer.removeListener("native-connector-qqmail-progress", handler);
+  },
+  resolveLocalPath: async (path: string) => ipcRenderer.invoke("resolve-local-path", path),
+  shellOpenPath: async (path: string) => ipcRenderer.invoke("shell-open-path", path),
+  shellShowItemInFolder: async (path: string) => ipcRenderer.invoke("shell-show-item-in-folder", path),
+  copyLocalFileAs: async (payload: { sourcePath: string }) =>
+    ipcRenderer.invoke("copy-local-file-as", payload),
+  connectMcp: async (payload: { sessionId: string; name: string }) =>
+    ipcRenderer.invoke("connect-mcp", payload),
+  disconnectMcp: async (payload: { sessionId: string; name: string }) =>
+    ipcRenderer.invoke("disconnect-mcp", payload),
+  saveOnboardingCompleted: async (completed: boolean) =>
+    ipcRenderer.invoke("save-onboarding-completed", completed),
+  saveEmailConfig: async (payload: {
+    enabled: boolean;
+    smtp_host: string;
+    smtp_port: number;
+    smtp_username: string;
+    smtp_password: string;
+    smtp_use_tls: boolean;
+    from_email: string;
+    default_to_email: string;
+  }) => ipcRenderer.invoke("save-email-config", payload),
+  testEmailConfig: async (payload: {
+    config: {
+      enabled: boolean;
+      smtp_host: string;
+      smtp_port: number;
+      smtp_username: string;
+      smtp_password: string;
+      smtp_use_tls: boolean;
+      from_email: string;
+      default_to_email: string;
+    };
+    toEmail?: string;
+  }) => ipcRenderer.invoke("test-email-config", payload),
+  saveProvider: async (payload: {
+    name: string;
+    apiKey?: string;
+    baseUrl?: string;
+    model?: string;
+    models?: string[];
+    enabled?: boolean;
+    dropParams?: boolean;
+    displayName?: string;
+    interface?: "openai" | "ollama";
+    managed?: boolean;
+  }) => ipcRenderer.invoke("save-provider", payload),
+  setDefaultProvider: async (name: string) => ipcRenderer.invoke("set-default-provider", name),
+  deleteProvider: async (name: string) => ipcRenderer.invoke("delete-provider", name),
+  validateKey: async (payload: { provider: string; apiKey: string; baseUrl?: string }) =>
+    ipcRenderer.invoke("validate-key", payload),
+  fetchModels: async (payload: { provider: string; apiKey: string; baseUrl?: string }) =>
+    ipcRenderer.invoke("fetch-models", payload),
+  fetchFavicon: async (payload: { url?: string; domain?: string; size?: number }) =>
+    ipcRenderer.invoke("fetch-favicon", payload),
+  healthCheckModel: async (payload: {
+    provider: string;
+    apiKey: string;
+    baseUrl?: string;
+    model: string;
+  }) => ipcRenderer.invoke("health-check-model", payload),
+
+  // Legacy
+  saveConfig: async (payload: { provider?: string; model?: string; apiKey?: string; activeProvider?: string; activeModel?: string }) =>
+    ipcRenderer.invoke("save-config", payload),
+  nativeSay: async (text: string) => ipcRenderer.invoke("native-say", text),
+
+  // Skills
+  loadSkills: async () => ipcRenderer.invoke("load-skills"),
+  loadSkillDetail: async (args: { name: string }) => ipcRenderer.invoke("load-skill-detail", args),
+  refreshSkills: async () => ipcRenderer.invoke("refresh-skills"),
+  getSkillSettings: async () => ipcRenderer.invoke("get-skill-settings"),
+  getGuardSettings: async () => ipcRenderer.invoke("get-guard-settings"),
+  putGuardSettings: async (payload: {
+    version?: number;
+    scan_mode?: string;
+    llm_verify?: boolean;
+    ignored?: string[];
+    add_ignore?: string;
+    remove_ignore?: string;
+  }) => ipcRenderer.invoke("put-guard-settings", payload),
+  guardScanSkill: async (payload: {
+    skill_path?: string;
+    markdown?: string;
+    skill_name?: string;
+    mode?: string;
+  }) => ipcRenderer.invoke("guard-scan-skill", payload),
+  guardScanAll: async (payload?: { include_ignored?: boolean }) =>
+    ipcRenderer.invoke("guard-scan-all", payload ?? {}),
+  skillSnapshot: async (payload: {
+    base_dir: string;
+    trigger?: string;
+    skill_name?: string;
+  }) => ipcRenderer.invoke("skill-snapshot", payload),
+  skillSnapshotsList: async (payload: { base_dir: string }) =>
+    ipcRenderer.invoke("skill-snapshots-list", payload),
+  skillSnapshotRestore: async (payload: { base_dir: string; snapshot_id: string }) =>
+    ipcRenderer.invoke("skill-snapshot-restore", payload),
+  putSkillSettings: async (payload: {
+    presetPaths: Array<{ id: string; enabled: boolean }>;
+    customPaths: Array<{ path: string; enabled: boolean } | string>;
+    preferredSources?: Record<string, string>;
+    disabledSkills?: string[];
+  }) => ipcRenderer.invoke("put-skill-settings", payload),
+
+  // Bundles
+  loadBundles: async () => ipcRenderer.invoke("load-bundles"),
+  installBundle: async (args: {
+    sourcePath: string;
+    acknowledgeHighRisk?: boolean;
+    confirmNonHighRisk?: boolean;
+  }) => ipcRenderer.invoke("install-bundle", args),
+  installBundlePreview: async (args: { sourcePath: string }) =>
+    ipcRenderer.invoke("install-bundle-preview", args),
+  uninstallBundle: async (args: { name: string }) => ipcRenderer.invoke("uninstall-bundle", args),
+
+  // Registry marketplace
+  searchRegistry: async (args: { q: string }) => ipcRenderer.invoke("search-registry", args),
+  searchSkillHub: async (args: { q: string }) => ipcRenderer.invoke("search-skillhub", args),
+  loadLocalImageDataUrl: async (path: string) => ipcRenderer.invoke("load-local-image-data-url", path),
+  writeLocalTextFile: async (payload: {
+    path: string;
+    content: string;
+    expectedMtimeMs?: number;
+    eol?: "lf" | "crlf";
+  }) =>
+    ipcRenderer.invoke("write-local-text-file", payload) as Promise<{
+      ok: boolean;
+      size?: number;
+      mtimeMs?: number;
+      error?: string;
+      code?: string;
+    }>,
+  readLocalTextFile: async (path: string) => ipcRenderer.invoke("read-local-text-file", path),
+  statLocalPath: async (path: string) =>
+    ipcRenderer.invoke("stat-local-path", path) as Promise<{
+      ok: boolean;
+      size?: number;
+      isDirectory?: boolean;
+      mtimeMs?: number;
+      error?: string;
+    }>,
+  linkIntoSessionWorkspace: async (payload: {
+    sessionId: string;
+    sources: string[];
+    mode?: "reference" | "copy" | "link";
+    explicit?: boolean;
+  }) =>
+    ipcRenderer.invoke("link-into-session-workspace", payload) as Promise<{
+      ok: boolean;
+      defaultDir?: string;
+      homeDir?: string;
+      linked?: number;
+      created?: string[];
+      failed?: string[];
+      mode?: "reference" | "copy" | "link";
+      error?: string;
+    }>,
+  copyIntoSessionWorkspace: async (payload: { sessionId: string; sources: string[] }) =>
+    ipcRenderer.invoke("copy-into-session-workspace", payload) as Promise<{
+      ok: boolean;
+      defaultDir?: string;
+      linked?: number;
+      created?: string[];
+      failed?: string[];
+      error?: string;
+    }>,
+  diffSessionWorkspaceCopy: async (payload: { sessionId: string; name: string }) =>
+    ipcRenderer.invoke("diff-session-workspace-copy", payload) as Promise<{
+      ok: boolean;
+      name?: string;
+      source_path?: string;
+      added?: string[];
+      modified?: string[];
+      deleted?: string[];
+      source_drifted?: boolean;
+      error?: string;
+    }>,
+  applySessionWorkspaceCopy: async (payload: {
+    sessionId: string;
+    name: string;
+    force?: boolean;
+  }) =>
+    ipcRenderer.invoke("apply-session-workspace-copy", payload) as Promise<{
+      ok: boolean;
+      applied?: string[];
+      source_drifted?: boolean;
+      error?: string;
+    }>,
+  materializeSessionAttachments: async (payload: {
+    sessionId: string;
+    files: Array<{ name?: string; path?: string; dataBase64?: string; dataUrl?: string }>;
+  }) =>
+    ipcRenderer.invoke("materialize-session-attachments", payload) as Promise<{
+      ok: boolean;
+      defaultDir?: string;
+      attachDir?: string;
+      files?: Array<{ name: string; path: string }>;
+      error?: string;
+    }>,
+  stageSessionArtifacts: async (payload: { sessionId: string; paths: string[] }) =>
+    ipcRenderer.invoke("stage-session-artifacts", payload) as Promise<{
+      ok: boolean;
+      stagingDir?: string;
+      homeDir?: string;
+      linked?: number;
+      error?: string;
+    }>,
+  loadLocalFileDataUrl: async (path: string) => ipcRenderer.invoke("load-local-file-data-url", path),
+  installFromRegistry: async (args: {
+    source: string;
+    name: string;
+    namespace?: string;
+    originSource?: string;
+    previewToken?: string;
+    acknowledgeHighRisk?: boolean;
+    confirmNonHighRisk?: boolean;
+    provenanceSource?: "registry" | "skillhub";
+  }) => ipcRenderer.invoke("install-from-registry", args),
+  uninstallMarketSkill: async (args: { name: string }) =>
+    ipcRenderer.invoke("uninstall-registry-skill", args),
+  installFromRegistryPreview: async (args: {
+    source: string;
+    name: string;
+    namespace?: string;
+    originSource?: string;
+  }) =>
+    ipcRenderer.invoke("install-from-registry-preview", args),
+  discardRegistryInstallPreview: async (args: {
+    source: string;
+    name: string;
+    namespace?: string;
+    previewToken?: string;
+  }) => ipcRenderer.invoke("discard-registry-install-preview", args),
+
+  terminalSpawn: async (payload: { id: string; cwd: string; cols?: number; rows?: number }) =>
+    ipcRenderer.invoke("terminal-spawn", payload) as Promise<{ ok: boolean; id?: string; error?: string }>,
+  terminalBridgeAttach: async (payload: {
+    id: string;
+    sessionId: string;
+    baseUrl: string;
+    token: string;
+    cols?: number;
+    rows?: number;
+  }) =>
+    ipcRenderer.invoke("terminal-bridge-attach", payload) as Promise<{
+      ok: boolean;
+      id?: string;
+      error?: string;
+    }>,
+  terminalWrite: async (payload: { id: string; data: string }) =>
+    ipcRenderer.invoke("terminal-write", payload) as Promise<{ ok: boolean }>,
+  terminalWriteByTab: async (payload: { tabId: string; data: string }) =>
+    ipcRenderer.invoke("terminal-write-by-tab", payload) as Promise<{ ok: boolean; id?: string }>,
+  terminalResize: async (payload: { id: string; cols: number; rows: number }) =>
+    ipcRenderer.invoke("terminal-resize", payload) as Promise<{ ok: boolean }>,
+  terminalKill: async (id: string) => ipcRenderer.invoke("terminal-kill", id) as Promise<{ ok: boolean }>,
+  onTerminalData: (cb: (payload: { id: string; data: string }) => void): (() => void) => {
+    const handler = (_e: unknown, payload: { id: string; data: string }) => cb(payload);
+    ipcRenderer.on("terminal-data", handler);
+    return () => ipcRenderer.removeListener("terminal-data", handler);
+  },
+  onTerminalExit: (cb: (payload: { id: string }) => void): (() => void) => {
+    const handler = (_e: unknown, payload: { id: string }) => cb(payload);
+    ipcRenderer.on("terminal-exit", handler);
+    return () => ipcRenderer.removeListener("terminal-exit", handler);
+  },
+
+  userAccountLoginStart: async (payload: { baseUrl?: string }) =>
+    ipcRenderer.invoke("user-account-login-start", payload) as Promise<{
+      ok: boolean;
+      deviceId?: string;
+      openUrl?: string;
+      error?: string;
+    }>,
+  userAccountLoginCancel: async () =>
+    ipcRenderer.invoke("user-account-login-cancel") as Promise<{ ok: boolean }>,
+  userAccountLogout: async () =>
+    ipcRenderer.invoke("user-account-logout") as Promise<{ ok: boolean }>,
+  loadUserAccount: async () =>
+    ipcRenderer.invoke("load-user-account") as Promise<{
+      ok: boolean;
+      loggedIn?: boolean;
+      email?: string;
+      displayName?: string;
+      baseUrl?: string;
+      defaultBaseUrl?: string;
+      /** Trusted complete account stamp used to fence feedback hydration. */
+      scope_id?: string | null;
+      auth_generation?: number;
+      inferenceBaseUrl?: string;
+      transport?: string;
+      reauthRequiredForDirect?: boolean;
+      strict?: boolean;
+      capabilityPolicy?: unknown;
+      attachmentRouting?: unknown;
+      models?: string[];
+      modelCatalog?: Array<{
+        id: string;
+        provider: string;
+        providerLabel: string;
+        model: string;
+        label: string;
+      }>;
+      syncedAt?: string;
+      managedPortablePackageCount?: number;
+      capabilitySyncStatuses?: EnterpriseCapabilitySyncStatus[];
+      capabilities?: Array<{
+        id: string;
+        kind: "mcp" | "skill";
+        name: string;
+        displayName: string;
+        requires: string[];
+        version?: string;
+        bundleUri?: string;
+        bundleDigest?: string;
+        endpointUrl?: string;
+      }>;
+      unmetCapabilityDependencies?: string[];
+    }>,
+  loadEnterprise: async () =>
+    ipcRenderer.invoke("load-enterprise") as Promise<{
+      ok: boolean;
+      enabled?: boolean;
+      baseUrl?: string;
+      email?: string;
+      displayName?: string;
+      strict?: boolean;
+      models?: string[];
+      modelCatalog?: Array<{
+        id: string;
+        provider: string;
+        providerLabel: string;
+        model: string;
+        label: string;
+      }>;
+      syncedAt?: string;
+      managedPortablePackageCount?: number;
+      inferenceBaseUrl?: string;
+      transport?: string;
+      reauthRequiredForDirect?: boolean;
+      capabilities?: Array<{
+        id: string;
+        kind: "mcp" | "skill";
+        name: string;
+        displayName: string;
+        requires: string[];
+        version?: string;
+        bundleUri?: string;
+        bundleDigest?: string;
+        endpointUrl?: string;
+      }>;
+      capabilitySyncStatuses?: EnterpriseCapabilitySyncStatus[];
+      unmetCapabilityDependencies?: string[];
+    }>,
+  loadEnterpriseCapabilitySyncStatuses: async () =>
+    ipcRenderer.invoke("load-enterprise-capability-sync-statuses") as Promise<{
+      ok: boolean;
+      capabilitySyncStatuses: EnterpriseCapabilitySyncStatus[];
+    }>,
+  enterpriseLogin: async (payload: { baseUrl: string; email: string; password: string }) =>
+    ipcRenderer.invoke("enterprise-login", payload) as Promise<{
+      ok: boolean;
+      error?: string;
+      user?: { email: string; displayName: string };
+      models?: string[];
+    }>,
+  enterpriseLogout: async () =>
+    ipcRenderer.invoke("enterprise-logout") as Promise<{ ok: boolean }>,
+  enterpriseRefresh: async () =>
+    ipcRenderer.invoke("enterprise-refresh") as Promise<{
+      ok: boolean;
+      error?: string;
+      unauthorized?: boolean;
+      models?: string[];
+    }>,
+  recordAttachmentRoutingPublicOverride: async (payload: {
+    sessionId: string;
+    currentModel: string;
+    privateTarget: string;
+    attachmentNames: string[];
+  }) =>
+    ipcRenderer.invoke("record-attachment-routing-public-override", payload) as Promise<{
+      ok: boolean;
+      error?: string;
+      unauthorized?: boolean;
+    }>,
+  /** Narrow desktop feedback bridge; the Enterprise PAT stays in main. */
+  feedback: {
+    scope: async (guard: {
+      expectedScopeId: string;
+      expectedAuthGeneration: number;
+    }) =>
+      ipcRenderer.invoke("enterprise-feedback-scope", guard) as Promise<{
+        ok: boolean;
+        scope_id?: string;
+        auth_generation?: number;
+        error?: string;
+        unauthorized?: boolean;
+      }>,
+    list: async (sessionId: string, expectedScopeId?: string) =>
+      ipcRenderer.invoke(
+        "enterprise-feedback-list",
+        expectedScopeId ? { sessionId, expectedScopeId } : sessionId,
+      ) as Promise<{
+        ok: boolean;
+        scope_id?: string;
+        auth_generation?: number;
+        items?: unknown[];
+        error?: string;
+        unauthorized?: boolean;
+      }>,
+    set: async (payload: {
+      sessionId: string;
+      messageId: string;
+      value: "like" | "dislike";
+      expectedScopeId: string;
+    }) =>
+      ipcRenderer.invoke("enterprise-feedback-set", payload) as Promise<{
+        ok: boolean;
+        error?: string;
+        unauthorized?: boolean;
+      }>,
+    clear: async (payload: {
+      sessionId: string;
+      messageId: string;
+      expectedScopeId: string;
+    }) =>
+      ipcRenderer.invoke("enterprise-feedback-clear", payload) as Promise<{
+        ok: boolean;
+        error?: string;
+        unauthorized?: boolean;
+      }>,
+  },
+  onEnterpriseCapabilitiesChanged: (cb: () => void): (() => void) => {
+    const handler = () => cb();
+    ipcRenderer.on("enterprise-capabilities-changed", handler);
+    return () => ipcRenderer.removeListener("enterprise-capabilities-changed", handler);
+  },
+  onUserAccountChanged: (
+    cb: (payload: {
+      email: string;
+      displayName: string;
+      loggedIn: boolean;
+      baseUrl?: string;
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _e: unknown,
+      payload: { email: string; displayName: string; loggedIn: boolean; baseUrl?: string },
+    ) => cb(payload);
+    ipcRenderer.on("user-account-changed", handler);
+    return () => ipcRenderer.removeListener("user-account-changed", handler);
+  },
+  onUserAccountChanging: (
+    cb: (payload: { generation: number }) => void,
+  ): (() => void) => {
+    const handler = (_e: unknown, payload: { generation: number }) => cb(payload);
+    ipcRenderer.on("user-account-changing", handler);
+    return () => ipcRenderer.removeListener("user-account-changing", handler);
+  },
+  onUserAccountLoginTimeout: (cb: (payload?: { error?: string }) => void): (() => void) => {
+    const handler = (_e: unknown, payload?: { error?: string }) => cb(payload);
+    ipcRenderer.on("user-account-login-timeout", handler);
+    return () => ipcRenderer.removeListener("user-account-login-timeout", handler);
+  },
+  updateSplashStage: async (stage: string) =>
+    ipcRenderer.invoke("update-splash-stage", stage) as Promise<{ ok: boolean }>,
+  getSplashPreloadEnabled: async () =>
+    ipcRenderer.invoke("get-splash-preload-enabled") as Promise<{ enabled: boolean }>,
+  preloadCoreData: async (payload: { avatarId?: string; sessionId?: string }) =>
+    ipcRenderer.invoke("preload-core-data", payload),
+  startupRendererReady: async (): Promise<{ ok: boolean; duplicate?: boolean }> =>
+    ipcRenderer.invoke("startup:renderer-ready") as Promise<{ ok: boolean; duplicate?: boolean }>,
+
+  systemSearch: async (payload: {
+    query: string;
+    category?: "all" | "documents" | "applications" | "images" | "folders" | "videos";
+  }) =>
+    ipcRenderer.invoke("system-search", payload) as Promise<{
+      ok: boolean;
+      items: Array<{
+        path: string;
+        name: string;
+        ext: string;
+        kind: "folder" | "document" | "application" | "image" | "video" | "other";
+        size: number;
+        mtime: number;
+      }>;
+      error?: string;
+      warning?: string;
+      timedOut?: boolean;
+      engine?: string;
+    }>,
+  systemSearchPreview: async (filePath: string) =>
+    ipcRenderer.invoke("system-search:preview", filePath) as Promise<{
+      ok: boolean;
+      kind: "text" | "image" | "metadata";
+      content?: string;
+      fileUrl?: string;
+      truncated?: boolean;
+      error?: string;
+    }>,
+  systemSearchOpen: async (filePath: string) =>
+    ipcRenderer.invoke("system-search:open", filePath) as Promise<{ ok: boolean; error?: string }>,
+  systemSearchReveal: async (filePath: string) =>
+    ipcRenderer.invoke("system-search:reveal", filePath) as Promise<{ ok: boolean; error?: string }>,
+  systemSearchGetInfo: async (filePath: string) =>
+    ipcRenderer.invoke("system-search:get-info", filePath) as Promise<{ ok: boolean; error?: string }>,
+  systemSearchOpenWith: async (filePath: string) =>
+    ipcRenderer.invoke("system-search:open-with", filePath) as Promise<{
+      ok: boolean;
+      hint?: string;
+      error?: string;
+    }>,
+  openExternal: async (url: string) =>
+    ipcRenderer.invoke("open-external", url) as Promise<{ ok: boolean; error?: string }>,
+  openHtmlPreviewDevTools: async (payload: { path?: string; url?: string }) =>
+    ipcRenderer.invoke("html-preview-open-devtools", payload) as Promise<{
+      ok: boolean;
+      error?: string;
+    }>,
+  /** WorkPanel in-app browser: main denied window.open / will-navigate → navigate here. */
+  onInAppBrowserOpen: (cb: (url: string) => void): (() => void) => {
+    const handler = (_event: unknown, url: string) => {
+      if (typeof url === "string" && url.trim()) cb(url);
+    };
+    ipcRenderer.on("in-app-browser-open", handler);
+    return () => ipcRenderer.removeListener("in-app-browser-open", handler);
+  },
+  copyPngToClipboard: async (buffer: ArrayBuffer) =>
+    ipcRenderer.invoke("clipboard-write-png", buffer) as Promise<{ ok: boolean; error?: string }>,
+  downloadPngToDownloads: async (payload: { buffer: ArrayBuffer; defaultFileName?: string }) =>
+    ipcRenderer.invoke("download-png-to-downloads", payload) as Promise<{
+      ok: boolean;
+      path?: string;
+      error?: string;
+    }>,
+});

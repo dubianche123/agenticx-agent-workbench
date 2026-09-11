@@ -1,0 +1,12446 @@
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import ReactMarkdown from "react-markdown";
+import {
+  readCapabilityLocks,
+  UNRESTRICTED_CAPABILITY_LOCKS,
+} from "../utils/enterprise-capability-policy";
+import { readAttachmentRoutingPolicy } from "../utils/attachment-routing";
+import {
+  chatUrlTransform,
+  normalizeChatMarkdownContent,
+  settingsMarkdownComponents,
+  settingsRemarkPlugins,
+} from "./messages/markdown-components";
+import {
+  Settings2,
+  Cpu,
+  Plug,
+  Link2,
+  Mail,
+  Bookmark,
+  Sparkles,
+  Globe,
+  Plus,
+  Trash2,
+  Wrench,
+  Loader2,
+  ChevronRight,
+  ChevronDown,
+  Anchor,
+  User,
+  Activity,
+  RefreshCw,
+  SquarePen,
+  Star,
+  CircleMinus,
+  CheckCircle2,
+  CircleCheck,
+  CircleQuestionMark,
+  Glasses,
+  Compass,
+  Eye,
+  EyeOff,
+  History,
+  ExternalLink,
+  FolderOpen,
+  Library,
+  Network,
+  Database,
+  X,
+  TriangleAlert,
+  ShieldCheck,
+} from "lucide-react";
+import { Panel } from "./ds/Panel";
+import { SettingsDropdown } from "./ds/SettingsDropdown";
+import { Modal } from "./ds/Modal";
+import { HoverTip } from "./ds/HoverTip";
+import { ClampToFitText } from "./ds/ClampToFitText";
+import type { Avatar, ChatPane, ChatStyle, GroupChat, McpServer } from "../store";
+import { useAppStore } from "../store";
+import { DEFAULT_META_AVATAR_URL } from "../constants/meta-avatar";
+import {
+  RECOMMENDED_SKILLS,
+  RECOMMENDED_TIER_LABEL,
+  type RecommendedSkill,
+  type RecommendedSkillTier,
+} from "../data/recommended-skills";
+import { buildArchscribeInstallPrompt } from "../utils/archscribe-install-prompt";
+import { buildOfficeCliInstallPrompt } from "../utils/officecli-install-prompt";
+import type { SkillHubMarketItem } from "../utils/skillhub-market";
+import { openExternalUrl } from "../utils/open-external";
+import {
+  buildSkillTryDraft,
+  findInstalledMarketplaceSkill,
+  hasAlternateSkillVariant,
+  skillMarkdownPath,
+} from "../utils/skill-market-actions";
+import { usePaneNavigation } from "../hooks/usePaneNavigation";
+import { decideSkillInstallRequest } from "../utils/skill-install-queue";
+import { filterAndRankSkills } from "../utils/skill-search";
+import { buildGuardFixPrompt, type GuardFixScanItem } from "../utils/guard-fix-prompt";
+import {
+  AGX_CONFIG_DISPLAY_PATH,
+  AGX_HOME_DISPLAY,
+  APP_DISPLAY_NAME,
+  APP_VERSION,
+  META_AGENT_DISPLAY_NAME,
+} from "../constants/branding";
+import { VOICE_UI_ENABLED } from "../constants/feature-flags";
+import { shouldDisableMcpToggle } from "../utils/mcp-toggle-state";
+import {
+  RUN_MODE_OPTIONS,
+  type RunMode,
+} from "../constants/confirm-strategy-options";
+import { ForwardPicker, type ForwardConfirmPayload } from "./ForwardPicker";
+import { QrConnectModal } from "./QrConnectModal";
+import { AutomationTab } from "./automation/AutomationTab";
+import { AutomationTaskIcon } from "./icons/AutomationTaskIcon";
+import { SkillPuzzleIcon } from "./icons/SkillPuzzleIcon";
+import { PendingProposalsList } from "./settings/skills/PendingProposalsList";
+import {
+  SkillHubMarketplace,
+  SkillMarketActions,
+  type SkillHubInstallState,
+} from "./settings/skills/SkillHubMarketplace";
+import {
+  RuntimeConfigSection,
+  RUNTIME_DEFAULT_TASKSPACES,
+  RUNTIME_MAX_TASKSPACES,
+  RUNTIME_MAX_TOOL_ROUNDS,
+  RUNTIME_MIN_TASKSPACES,
+  RUNTIME_MIN_TOOL_ROUNDS,
+} from "./automation/RuntimeConfigSection";
+import { ToolSearchConfigSection } from "./automation/ToolSearchConfigSection";
+import {
+  StallNudgeConfigSection,
+  type StallNudgeConfig,
+} from "./automation/StallNudgeConfigSection";
+import {
+  UnattendedConfigSection,
+  type UnattendedConfig,
+} from "./automation/UnattendedConfigSection";
+import {
+  TokenBudgetConfigSection,
+  normalizeTokenBudgetConfig,
+  type TokenBudgetConfig,
+} from "./automation/TokenBudgetConfigSection";
+import { AccountTab } from "./AccountTab";
+import {
+  formatContextWindowShort,
+  harnessWindowForCapability,
+  resolveHeuristicCapability,
+} from "../utils/model-context-window-heuristic";
+import { resolveManagedContextWindow } from "../utils/managed-context-window";
+import { DeveloperTokenBudgetPanel } from "./settings/DeveloperTokenBudgetPanel";
+import { DefaultModelSelect } from "./DefaultModelSelect";
+import { KnowledgeSettings, type KnowledgeSettingsHandle } from "./settings/knowledge/KnowledgeSettings";
+import { DataSourcesSettings } from "./settings/datasources/DataSourcesSettings";
+import { MemoryGraphExplorer } from "./memory/MemoryGraphExplorer";
+import { TurnArchiveSettingsPanel } from "./memory/TurnArchiveSettingsPanel";
+import { formatModelOptionLabel } from "../utils/model-display";
+import {
+  getProviderDisplayName,
+  getProviderBrandColor,
+  getProviderBrandTextColor,
+  getProviderInitials,
+  isOllamaLikeProvider,
+  isProviderDeletable,
+  isProviderDisplayNameEditable,
+  makeCustomOllamaProviderId,
+  makeCustomOpenAIProviderId,
+  normalizeProviderBaseUrlForSave,
+  previewProviderApiEndpoint,
+  type ProviderInterfaceKind,
+  type ProviderDisplayEntry,
+} from "../utils/provider-display";
+import { PROVIDER_ICON_MAP } from "../utils/provider-icons";
+import {
+  normalizeProviderEntry,
+  type ManagedModelCatalogEntry,
+} from "../utils/model-options";
+import { isEnterpriseModelManagementLocked } from "../utils/enterprise-model-management";
+import { applyGlobalDefaultModelChoice } from "../utils/default-model-setting";
+import {
+  LOCAL_KNOWLEDGE_ENABLED,
+  SHOW_DESKTOP_GENERAL_EXPERT_CONTROLS,
+  SHOW_DESKTOP_EXTERNAL_IM,
+} from "../constants/desktop-feature-visibility";
+import { classifyModelKind, isEmbeddingModelKind } from "../utils/model-kind";
+import {
+  canConfigureSelfManagedServices,
+  DELIVERY_DEVELOPER_SETTINGS_TAB_ID,
+  DELIVERY_VISIBLE_SETTINGS_TAB_IDS,
+  resolveDeliverySettingsTab,
+  type SettingsTab,
+} from "../settings-tab";
+import type { MCPDiscoveryHit } from "./settings/mcp/MCPDiscoveryPanel";
+import { MCPMarketplacePanel } from "./settings/mcp/MCPMarketplacePanel";
+import {
+  enterpriseMcpMarketplaceItems as buildEnterpriseMcpMarketplaceItems,
+  hasManagedSkillDelivery,
+  type EnterpriseCapabilityLike,
+} from "../../shared/enterprise-capability-market";
+import { normalizeEnterpriseCapabilitySyncStatuses } from "../../shared/enterprise-capability-sync";
+import {
+  enterpriseCapabilitySkillItem,
+  EnterpriseSkillMarketplace,
+  isEnterpriseManagedSkillInstalled,
+} from "./settings/enterprise/EnterpriseSkillMarketplace";
+import { MCPJsonEditorModal } from "./settings/mcp/MCPJsonEditorModal";
+import { McpRemoteServerModal } from "./settings/mcp/McpRemoteServerModal";
+import { McpRemoteServerDetail } from "./settings/mcp/McpRemoteServerDetail";
+import { McpGatewayImportPanel } from "./settings/mcp/McpGatewayImportPanel";
+import { ConnectorsTab } from "./settings/connectors/ConnectorsTab";
+import { mcpRemoteHostLabel, mcpTransportBadgeLabel } from "../utils/mcp-remote-config";
+import { WebSearchSettingsPanel, SuggestedQuestionsSettingsPanel } from "./settings/WebSearchSettingsPanel";
+import {
+  VoiceSettingsPanel,
+  type VoiceSettingsPanelHandle,
+} from "./settings/voice/VoiceSettingsPanel";
+import {
+  clampSettingsPanelSize,
+  loadSettingsPanelSize,
+  saveSettingsPanelSize,
+  type SettingsPanelSize,
+} from "../utils/settings-panel-size";
+import {
+  clampSettingsNavWidth,
+  loadSettingsNavWidth,
+  saveSettingsNavWidth,
+} from "../utils/settings-nav-width";
+import { useScrollbarOnScroll } from "../hooks/useScrollbarOnScroll";
+import {
+  formatBackendChipLabel,
+  getBackendScope,
+  getConnectionModeSync,
+  readScopedLocalStorage,
+  writeScopedLocalStorage,
+} from "../utils/backend-scope";
+import { decideExternalDraftReload } from "../utils/external-draft-reload";
+import { studioFetch } from "../utils/studio-fetch";
+export type { SettingsTab } from "../settings-tab";
+
+const MCP_MARKETPLACE_ID_MAP_KEY = "agenticx:mcp:marketplaceIdToNames";
+const DEFAULT_MCP_MARKETPLACE_PREVIEW_LIMIT = 6;
+const CURATED_DEFAULT_MCP_SERVER_IDS = ["TianYanCha/tyc-mcp"] as const;
+
+function RemoteBackendHintBanner({ kind = "local-only" }: { kind?: "synced" | "local-only" }) {
+  const mode = getConnectionModeSync();
+  if (mode !== "remote") return null;
+  const host = getBackendScope();
+  const hostLabel = formatBackendChipLabel(host, "remote");
+  if (kind === "synced") {
+    return (
+      <div className="rounded-md border border-border bg-surface-card px-3 py-2.5 text-xs leading-relaxed text-text-subtle">
+        <p>
+          当前为<strong className="text-text-muted">远程模式</strong>，本页配置直接同步到远端{" "}
+          <strong className="text-text-muted">{hostLabel}</strong> 的{" "}
+          <code className="text-[10px] text-text-muted">{AGX_CONFIG_DISPLAY_PATH}</code>，对模型调用立即生效。
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="rounded-md border border-border bg-surface-card px-3 py-2.5 text-xs leading-relaxed text-text-subtle">
+      <p>
+        当前为<strong className="text-text-muted">远程模式</strong>，本页修改写入本机{" "}
+        <code className="text-[10px] text-text-muted">{AGX_CONFIG_DISPLAY_PATH}</code>，但实际加载发生在远端{" "}
+        <strong className="text-text-muted">{hostLabel}</strong>。
+      </p>
+      <p className="mt-1.5 text-text-faint">
+        如需修改远端配置，请直接编辑远端 <code className="text-[10px]">{AGX_CONFIG_DISPLAY_PATH}</code>
+        （此 Tab 的远程同步能力规划中）。
+      </p>
+    </div>
+  );
+}
+
+export type FavoriteForwardContext = {
+  sourceSessionId: string;
+  content: string;
+  role?: string;
+};
+
+const ALL_PROVIDERS = [
+  "openai", "anthropic", "volcengine", "bailian",
+  "zhipu", "qianfan", "minimax", "kimi", "deepseek", "ollama",
+] as const;
+
+/** LiteLLM routes: show optional drop_params toggle for strict OpenAI-compatible gateways. */
+const DROP_PARAMS_CAPABLE_PROVIDERS = new Set<string>(["openai", "anthropic", "ollama"]);
+
+type ProviderEntry = {
+  apiKey: string;
+  baseUrl: string;
+  model: string;
+  models: string[];
+  enabled: boolean;
+  dropParams: boolean;
+  /** 自定义服务厂商展示名（写入 config display_name） */
+  displayName?: string;
+  /** 自定义厂商接口范式：OpenAI 兼容或 Ollama 原生 */
+  interface?: ProviderInterfaceKind;
+  /** 企业托管 provider，设置页只读 */
+  managed?: boolean;
+  /** 企业后台下发的内部 provider / model 目录。 */
+  modelCatalog?: ManagedModelCatalogEntry[];
+};
+
+export function shouldApplyProviderHealthCheck(
+  requestedProvider: string,
+  activeProvider: string,
+  requestedGeneration: number,
+  currentGeneration: number,
+): boolean {
+  return requestedProvider === activeProvider && requestedGeneration === currentGeneration;
+}
+
+/** 至少填写了密钥或自定义 API 地址之一，才视为已配置（与「留空使用默认」的隐式地址区分）。 */
+function providerCredentialed(e: Pick<ProviderEntry, "apiKey" | "baseUrl"> | undefined): boolean {
+  if (!e) return false;
+  return !!(e.apiKey ?? "").trim() || !!(e.baseUrl ?? "").trim();
+}
+
+function providerEffectiveOn(e: ProviderEntry | undefined): boolean {
+  if (!e) return false;
+  return e.enabled !== false && providerCredentialed(e);
+}
+
+function isLikelyLocalImagePath(raw: string): boolean {
+  const value = String(raw || "").trim();
+  if (!value) return false;
+  // Vite build assets look like "/assets/xxx.svg"; those should be used directly in <img src>.
+  if (value.startsWith("/assets/")) return false;
+  if (value.startsWith("file://")) return true;
+  if (value.startsWith("/")) return true;
+  return /^[a-zA-Z]:[\\/]/.test(value);
+}
+
+function providerEntryFromSaved(saved: Partial<ProviderEntry> | undefined): ProviderEntry {
+  if (saved != null && typeof saved !== "object") {
+    return {
+      apiKey: "",
+      baseUrl: "",
+      model: "",
+      models: [],
+      enabled: false,
+      dropParams: false,
+    };
+  }
+  const raw = (saved ?? {}) as Partial<ProviderEntry> & { display_name?: string };
+  const apiKey = String(saved?.apiKey ?? "");
+  const baseUrl = String(saved?.baseUrl ?? "");
+  const cred = providerCredentialed({ apiKey, baseUrl });
+  const models = saved?.models;
+  const dn = raw.displayName?.trim() || raw.display_name?.trim();
+  const iface =
+    saved?.interface === "openai" || saved?.interface === "ollama"
+      ? saved.interface
+      : undefined;
+  return {
+    apiKey,
+    baseUrl,
+    model: String(saved?.model ?? ""),
+    models: Array.isArray(models) ? models : [],
+    enabled: cred && saved?.enabled !== false,
+    dropParams: saved?.dropParams === true,
+    displayName: dn || undefined,
+    interface: iface,
+    managed: saved?.managed === true,
+    modelCatalog: Array.isArray(saved?.modelCatalog) ? saved.modelCatalog : undefined,
+  };
+}
+
+function cloneProviderDraftMap(draft: Record<string, ProviderEntry>): Record<string, ProviderEntry> {
+  const out: Record<string, ProviderEntry> = {};
+  for (const [name, entry] of Object.entries(draft)) {
+    out[name] = {
+      ...entry,
+      models: [...entry.models],
+      modelCatalog: entry.modelCatalog?.map((item) => ({
+        ...item,
+        capabilities: item.capabilities ? [...item.capabilities] : undefined,
+      })),
+    };
+  }
+  return out;
+}
+
+function normalizeProviderDraftForCompare(
+  draft: Record<string, ProviderEntry>,
+): Record<string, ProviderEntry> {
+  const normalized: Record<string, ProviderEntry> = {};
+  for (const [name, entry] of Object.entries(draft)) {
+    normalized[name] = normalizeProviderEntry({
+      ...entry,
+      baseUrl: normalizeProviderBaseUrlForSave(name, entry.baseUrl, entry),
+    });
+  }
+  return normalized;
+}
+
+function providerEntryConfigsEqual(a: ProviderEntry, b: ProviderEntry): boolean {
+  return (
+    a.apiKey === b.apiKey
+    && a.baseUrl === b.baseUrl
+    && a.model === b.model
+    && a.enabled === b.enabled
+    && a.dropParams === b.dropParams
+    && (a.displayName ?? "") === (b.displayName ?? "")
+    && (a.interface ?? "") === (b.interface ?? "")
+    && a.models.length === b.models.length
+    && a.models.every((model, index) => model === b.models[index])
+  );
+}
+
+function providerDraftMapsEqual(
+  a: Record<string, ProviderEntry>,
+  b: Record<string, ProviderEntry>,
+): boolean {
+  const keysA = Object.keys(a).sort();
+  const keysB = Object.keys(b).sort();
+  if (keysA.length !== keysB.length) return false;
+  return keysA.every((key, index) => {
+    if (key !== keysB[index]) return false;
+    return providerEntryConfigsEqual(a[key]!, b[key]!);
+  });
+}
+
+const MCP_PRIMARY_CONFIG_PATH = `${AGX_HOME_DISPLAY}/mcp.json`;
+const BUNDLED_DEFAULT_MCP_NAMES_FALLBACK = ["browser-use", "firecrawl"] as const;
+
+/** 与后端 `connection_state` 对齐；缺省时按 connected 推断（兼容旧 Studio） */
+function resolveMcpRowPresentation(server: McpServer): {
+  dotClass: string;
+  statusLine: string;
+  detail?: string;
+} {
+  const st =
+    server.connection_state || (server.connected ? "healthy" : "disconnected");
+  if (st === "error") {
+    return {
+      dotClass: "bg-rose-500",
+      statusLine: "错误 — 仍标记已连接但未注册到可用工具",
+      detail: server.error_detail?.trim(),
+    };
+  }
+  if (st === "healthy") {
+    const n = server.tool_count ?? 0;
+    return {
+      dotClass: "bg-emerald-400",
+      statusLine: n > 0 ? `已连接 · ${n} 个工具` : "已连接",
+    };
+  }
+  return {
+    dotClass: "bg-zinc-500",
+    statusLine: "未连接",
+  };
+}
+
+const RUN_MODE_DROPDOWN_OPTIONS = RUN_MODE_OPTIONS.map(({ value, label }) => ({
+  value,
+  label,
+}));
+
+/**
+ * 选中模式下「实际会发生什么」。
+ *
+ * 这里以前挂的是一条琥珀色告警:「所有工具将直接执行」。那句话不对——代我批准从来
+ * 不是「全放行」:沙箱边界照常在,删除数据 / 影响远端 / 操作系统这三类照常逐次问。
+ * 把一个 fail-closed 的档位描述成全放行,只会让人不敢用它,然后退回到每次点确认——
+ * 点到麻木,该拦的那次也点过去了。
+ */
+function RunModeNotice({ mode }: { mode: RunMode }) {
+  if (mode === "plan") {
+    return (
+      <div className="mt-3 flex items-start gap-2 rounded-lg border border-border bg-surface-card px-3 py-2 text-xs leading-5 text-text-subtle">
+        <Glasses className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-muted" />
+        <span>只查看和分析；所有文件写入都会被拒绝。</span>
+      </div>
+    );
+  }
+  if (mode === "auto") {
+    return (
+      <div className="mt-3 flex items-start gap-2 rounded-lg border border-border bg-surface-card px-3 py-2 text-xs leading-5 text-text-subtle">
+        <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--settings-accent-fg)]" />
+        <span>工作区内的低风险修改自动执行；删除、远端和系统操作仍会询问。</span>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3 flex items-start gap-2 rounded-lg border border-border bg-surface-card px-3 py-2 text-xs leading-5 text-text-subtle">
+      <CircleQuestionMark className="mt-0.5 h-3.5 w-3.5 shrink-0 text-text-muted" />
+      <span>超出沙箱保护范围的操作，每次都会问你。</span>
+    </div>
+  );
+}
+
+/** Compact settings dropdown using the shared popover behavior. */
+function RunModeDropdown({
+  value,
+  onChange,
+}: {
+  value: RunMode;
+  onChange: (mode: RunMode) => void;
+}) {
+  const displayLabel =
+    RUN_MODE_DROPDOWN_OPTIONS.find((option) => option.value === value)?.label ?? value;
+
+  return (
+    <SettingsDropdown
+      value={value}
+      displayLabel={displayLabel}
+      options={RUN_MODE_DROPDOWN_OPTIONS}
+      onChange={(next) => onChange(next as RunMode)}
+      className="w-44 shrink-0"
+      size="compact"
+      menuPortal
+    />
+  );
+}
+
+type EmailPresetId = "qq" | "163" | "gmail" | "outlook" | "custom";
+
+type EmailSettingsForm = {
+  enabled: boolean;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_username: string;
+  smtp_password: string;
+  smtp_use_tls: boolean;
+  from_email: string;
+  default_to_email: string;
+};
+
+type ToolStatusItem = {
+  id: string;
+  name: string;
+  description: string;
+  installed: boolean;
+  version?: string;
+  install_command?: string;
+  auto_installable?: boolean;
+};
+
+type ToolInstallState = {
+  requestId: string;
+  percent: number;
+  phase: string;
+  message: string;
+  error?: string;
+};
+
+type TrinityConfigForm = {
+  skill_protocol: boolean;
+  session_summary: boolean;
+  learning_enabled: boolean;
+  skill_manage_enabled: boolean;
+  learning_nudge_interval: number;
+  learning_min_tool_calls: number;
+};
+
+type SkillItem = {
+  skill_id?: string;
+  name: string;
+  description: string;
+  location: string;
+  base_dir?: string;
+  source?: string;
+  tag?: string;
+  icon?: string;
+  content_hash?: string;
+  conflict_count?: number;
+  variants?: Array<{
+    skill_id?: string;
+    source?: string;
+    base_dir?: string;
+    location?: string;
+    content_hash?: string;
+  }>;
+};
+
+type SkillScanPresetRow = {
+  id: string;
+  label: string;
+  path: string;
+  enabled: boolean;
+};
+
+function normalizedPath(path?: string): string {
+  return String(path ?? "").replace(/\\/g, "/").toLowerCase();
+}
+
+function inferSourceFromBaseDir(baseDir?: string): string | null {
+  const p = normalizedPath(baseDir);
+  if (!p) return null;
+  if (p.includes("/agenticx/skills/")) return "builtin";
+  if (p.includes("/.agenticx-ontology/skills/registry/") || p.includes("/.agenticx/skills/registry/")) return "registry";
+  if (p.includes("/.agenticx-ontology/skills/bundles/") || p.includes("/.agenticx/skills/bundles/")) return "bundle";
+  if (p.includes("/.cursor/skills/")) return "cursor";
+  if (p.includes("/.claude/skills/")) return "claude";
+  if (p.includes("/.agents/skills/")) return "agents";
+  if (p.includes("/.agent/skills/")) return "agent_global";
+  return null;
+}
+
+function effectiveSkillSource(skill: SkillItem): string {
+  const raw = String(skill.source ?? "").trim();
+  if (raw && raw !== "unknown" && raw !== "custom") return raw;
+  const inferred = inferSourceFromBaseDir(skill.base_dir);
+  if (inferred) return inferred;
+  return raw || "custom";
+}
+
+function effectiveSkillLocation(skill: SkillItem): "project" | "global" {
+  const src = effectiveSkillSource(skill);
+  if (["cursor", "claude", "agents", "agent_global", "skillhub", "registry", "bundle"].includes(src)) {
+    return "global";
+  }
+  return skill.location === "project" ? "project" : "global";
+}
+
+function skillSourceBadge(source: string | undefined): { label: string; className: string } {
+  const base = "shrink-0 rounded-full border px-1.5 text-[10px]";
+  switch (source) {
+    case "builtin":
+      return { label: "内置", className: `${base} border-zinc-500/30 bg-zinc-500/10 text-zinc-400` };
+    case "cursor":
+      return { label: "Cursor", className: `${base} border-sky-500/30 bg-sky-500/10 text-sky-400` };
+    case "claude":
+      return { label: "Claude", className: `${base} border-orange-500/30 bg-orange-500/10 text-orange-400` };
+    case "skillhub":
+      return { label: "SkillHub", className: `${base} border-cyan-500/30 bg-cyan-500/10 text-cyan-300` };
+    case "registry":
+      // ClawHub 安装技能：棕褐底 + 珊瑚色字（与品牌参考一致）
+      return {
+        label: "ClawHub",
+        className: `${base} border-[#5c4038]/80 bg-[#2f2019] text-[#eba899]`,
+      };
+    case "bundle":
+      return { label: "Bundle", className: `${base} border-indigo-500/30 bg-indigo-500/10 text-indigo-400` };
+    case "agents":
+      return {
+        label: "Agents 全局",
+        className: `${base} border-emerald-500/30 bg-emerald-500/10 text-emerald-400`,
+      };
+    case "agent_global":
+      return {
+        label: "全局 .agent",
+        className: `${base} border-teal-500/30 bg-teal-500/10 text-teal-400`,
+      };
+    case "project_agents":
+      return {
+        label: "项目 .agents",
+        className: `${base} border-cyan-500/30 bg-cyan-500/10 text-cyan-400`,
+      };
+    case "project_agent":
+      return {
+        label: "项目 .agent",
+        className: `${base} border-cyan-500/30 bg-cyan-500/5 text-cyan-300`,
+      };
+    case "agenticx":
+      return { label: "自建", className: `${base} border-purple-500/30 bg-purple-500/10 text-purple-400` };
+    case "agent_created":
+      return { label: "自建", className: `${base} border-purple-500/30 bg-purple-500/10 text-purple-300` };
+    case "custom":
+      return { label: "自定义", className: `${base} border-border bg-surface-panel text-text-faint` };
+    default:
+      return { label: "其他", className: `${base} border-border bg-surface-panel text-text-faint` };
+  }
+}
+
+function getSkillCategory(skill: SkillItem): "third-party" | "custom" | "builtin" {
+  const src = effectiveSkillSource(skill);
+  if (["registry", "bundle", "cursor", "claude", "skillhub"].includes(src)) return "third-party";
+  if (["builtin"].includes(src)) return "builtin";
+  // All other sources including 'agenticx', 'agents', 'agent_created', 'custom', 'unknown' are treated as custom/user-created
+  return "custom";
+}
+
+const SKILLS_SECTION_PANEL_TITLE_CLASS =
+  "text-xs font-bold normal-case tracking-normal text-text-strong";
+
+const SKILLS_GROUP_TITLE_CLASS = "text-xs font-semibold text-text-strong";
+
+function SkillRowButton({
+  skill,
+  isActive,
+  isExpanded,
+  detailContent,
+  detailLoading,
+  recentMarketSkillName,
+  locationLabel,
+  preferredSource,
+  onChoosePreferredSource,
+  onActivate,
+  onExpandDetail,
+  onCollapseDetail,
+  globalSkillEnabled,
+  skillScanBusy,
+  onToggleGlobalSkill,
+}: {
+  skill: SkillItem;
+  isActive: boolean;
+  isExpanded: boolean;
+  detailContent: string | null;
+  detailLoading: boolean;
+  recentMarketSkillName: string | null;
+  locationLabel: "全局" | "项目";
+  preferredSource?: string;
+  onChoosePreferredSource: (name: string, source: string) => void;
+  onActivate: (name: string) => void;
+  onExpandDetail: (name: string) => void;
+  onCollapseDetail: () => void;
+  globalSkillEnabled: boolean;
+  skillScanBusy: boolean;
+  onToggleGlobalSkill: (name: string, enabled: boolean) => void;
+}) {
+  const src = skillSourceBadge(effectiveSkillSource(skill));
+  const conflictCount = Number(skill.conflict_count ?? 0);
+  const variants = Array.isArray(skill.variants) ? skill.variants : [];
+  const uniqueSources = Array.from(
+    new Set(
+      variants
+        .map((v) => String(v?.source ?? "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const selectedSource = preferredSource && uniqueSources.includes(preferredSource)
+    ? preferredSource
+    : effectiveSkillSource(skill);
+  const locClass =
+    locationLabel === "项目"
+      ? "shrink-0 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-400"
+      : "shrink-0 rounded-full border border-border bg-surface-panel px-1.5 text-[10px] text-text-faint";
+  return (
+    <div
+      className={`w-full px-4 py-3 transition ${
+        isExpanded || isActive
+          ? "bg-[var(--settings-accent-subtle-bg)]"
+          : skill.name === recentMarketSkillName
+            ? "bg-amber-500/5"
+            : "bg-surface-base hover:bg-surface-hover"
+      } ${!globalSkillEnabled ? "opacity-60" : ""}`}
+    >
+      <div className="flex items-start gap-3">
+        <button
+          type="button"
+          className="min-w-0 flex-1 text-left"
+          onClick={() => onActivate(skill.name)}
+          onDoubleClick={() => void onExpandDetail(skill.name)}
+          title="双击展开当前技能"
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="truncate text-sm font-medium text-text-primary">{skill.name}</span>
+            {skill.name === recentMarketSkillName && (
+              <span className="shrink-0 rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 text-[10px] text-amber-300">
+                刚安装
+              </span>
+            )}
+            <span className={src.className}>{src.label}</span>
+            <span className={locClass}>{locationLabel}</span>
+            {skill.tag ? (
+              <span className="shrink-0 rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 text-[10px] text-violet-300">
+                {skill.tag}
+              </span>
+            ) : null}
+            {skill.icon ? (
+              <span className="shrink-0 rounded-full border border-border bg-surface-panel px-1.5 text-[10px] text-text-faint">
+                icon:{skill.icon}
+              </span>
+            ) : null}
+            {conflictCount > 1 ? (
+              <span className="shrink-0 rounded-full border border-rose-500/30 bg-rose-500/10 px-1.5 text-[10px] text-rose-300">
+                同名冲突({conflictCount})
+              </span>
+            ) : null}
+          </div>
+          {skill.description ? (
+            <p className="mt-1.5 truncate text-xs text-text-muted">{skill.description}</p>
+          ) : null}
+        </button>
+        <div className="flex shrink-0 flex-col items-end gap-1 pt-0.5">
+          <SettingsSwitch
+            checked={globalSkillEnabled}
+            disabled={skillScanBusy}
+            aria-label={`启用技能 ${skill.name}`}
+            onChange={(next) => onToggleGlobalSkill(skill.name, next)}
+          />
+        </div>
+      </div>
+      {conflictCount > 1 ? (
+        <div
+          className="mt-2.5 flex items-center justify-between gap-2 text-[11px] text-text-faint"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <span className="shrink-0">默认来源</span>
+          <SettingsDropdown
+            value={selectedSource}
+            displayLabel={skillSourceBadge(selectedSource).label}
+            options={uniqueSources.map((source) => ({
+              value: source,
+              label: skillSourceBadge(source).label,
+            }))}
+            onChange={(source) => onChoosePreferredSource(skill.name, source)}
+            size="inline"
+            menuPortal
+            className="w-fit shrink-0"
+            title="同名技能冲突时优先使用的来源"
+          />
+        </div>
+      ) : null}
+      {isExpanded ? (
+        <div className="mt-3 rounded-md border border-[var(--settings-accent-border-muted)] bg-surface-card">
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-xs font-medium text-[var(--settings-accent-fg)]">SKILL.md</span>
+            <button
+              type="button"
+              className="text-xs text-text-faint transition hover:text-text-primary"
+              onClick={(e) => {
+                e.stopPropagation();
+                onCollapseDetail();
+              }}
+            >
+              关闭 ✕
+            </button>
+          </div>
+          {detailLoading ? (
+            <div className="px-3 py-3 text-xs text-text-faint">加载详情...</div>
+          ) : (
+            <pre className="max-h-[55vh] overflow-y-auto px-3 py-2 text-[11px] leading-relaxed text-text-muted whitespace-pre-wrap break-words">
+              {detailContent ?? ""}
+            </pre>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SkillList({
+  skills,
+  ...props
+}: {
+  skills: SkillItem[];
+  locationLabel: "全局" | "项目";
+  activeSkillName: string | null;
+  expandedSkillName: string | null;
+  detail: { name: string; content: string } | null;
+  loadingDetail: boolean;
+  recentMarketSkillName: string | null;
+  preferredSources: Record<string, string>;
+  onChoosePreferredSource: (name: string, source: string) => void;
+  onActivate: (name: string) => void;
+  onExpandDetail: (name: string) => void;
+  onCollapseDetail: () => void;
+  disabledSkillNames: string[];
+  skillScanBusy: boolean;
+  onToggleGlobalSkill: (name: string, enabled: boolean) => void;
+}) {
+  const PREVIEW_COUNT = 15;
+  const [showAll, setShowAll] = useState(false);
+  const shouldCollapse = skills.length > PREVIEW_COUNT;
+  const visibleSkills = showAll || !shouldCollapse ? skills : skills.slice(0, PREVIEW_COUNT);
+  const remaining = Math.max(0, skills.length - visibleSkills.length);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-border bg-surface-base">
+      <div className="divide-y divide-border">
+        {visibleSkills.map((skill) => (
+          <SkillRowButton
+            key={skill.name}
+            skill={skill}
+            isActive={props.activeSkillName === skill.name}
+            isExpanded={props.expandedSkillName === skill.name}
+            detailLoading={props.expandedSkillName === skill.name && props.loadingDetail && props.detail?.name !== skill.name}
+            detailContent={props.expandedSkillName === skill.name && props.detail?.name === skill.name ? props.detail.content : null}
+            globalSkillEnabled={!props.disabledSkillNames.includes(skill.name)}
+            {...props}
+          />
+        ))}
+      </div>
+      {remaining > 0 && (
+        <button
+          type="button"
+          className="w-full border-t border-border bg-surface-panel py-2.5 text-xs font-medium text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+          onClick={() => setShowAll(true)}
+        >
+          显示其余 {remaining} 项...
+        </button>
+      )}
+    </div>
+  );
+}
+
+function SkillGroup({
+  title,
+  skills,
+  ...props
+}: {
+  title: string;
+  skills: SkillItem[];
+  locationLabel: "全局" | "项目";
+  activeSkillName: string | null;
+  expandedSkillName: string | null;
+  detail: { name: string; content: string } | null;
+  loadingDetail: boolean;
+  recentMarketSkillName: string | null;
+  preferredSources: Record<string, string>;
+  onChoosePreferredSource: (name: string, source: string) => void;
+  onActivate: (name: string) => void;
+  onExpandDetail: (name: string) => void;
+  onCollapseDetail: () => void;
+  disabledSkillNames: string[];
+  skillScanBusy: boolean;
+  onToggleGlobalSkill: (name: string, enabled: boolean) => void;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (skills.length === 0) return null;
+
+  return (
+    <div className="mb-4 last:mb-0">
+      <button
+        type="button"
+        className="mb-2 flex w-full items-center justify-between gap-2 text-left transition hover:text-text-primary"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className={`min-w-0 truncate ${SKILLS_GROUP_TITLE_CLASS}`}>
+          {title} ({skills.length})
+        </span>
+        <ChevronDown
+          className={`h-4 w-4 shrink-0 text-text-faint transition-transform ${expanded ? "" : "-rotate-90"}`}
+        />
+      </button>
+      {expanded && <SkillList skills={skills} {...props} />}
+    </div>
+  );
+}
+
+function SkillsLocationSection({
+  skills,
+  title,
+  locationLabel,
+  search,
+  onSearchChange,
+  onRefresh,
+  listLoading,
+  showWhenEmpty,
+  ...props
+}: {
+  skills: SkillItem[];
+  title: string;
+  locationLabel: "全局" | "项目";
+  search?: string;
+  onSearchChange?: (value: string) => void;
+  onRefresh?: () => void;
+  listLoading?: boolean;
+  showWhenEmpty?: boolean;
+  activeSkillName: string | null;
+  expandedSkillName: string | null;
+  detail: { name: string; content: string } | null;
+  loadingDetail: boolean;
+  recentMarketSkillName: string | null;
+  preferredSources: Record<string, string>;
+  onChoosePreferredSource: (name: string, source: string) => void;
+  onActivate: (name: string) => void;
+  onExpandDetail: (name: string) => void;
+  onCollapseDetail: () => void;
+  disabledSkillNames: string[];
+  skillScanBusy: boolean;
+  onToggleGlobalSkill: (name: string, enabled: boolean) => void;
+}) {
+  const isGlobal = locationLabel === "全局";
+  if (skills.length === 0 && !showWhenEmpty) return null;
+
+  return (
+    <Panel
+      title={title}
+      collapsible
+      defaultCollapsed={false}
+      className="mb-4"
+      titleClassName={SKILLS_SECTION_PANEL_TITLE_CLASS}
+    >
+      <div className="pt-1">
+        {isGlobal && onSearchChange && onRefresh ? (
+          <div className="mb-3 flex gap-2">
+            <input
+              className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-primary placeholder:text-text-faint"
+              placeholder="搜索技能名称或描述..."
+              value={search ?? ""}
+              onChange={(e) => onSearchChange(e.target.value)}
+            />
+            <button
+              type="button"
+              className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+              onClick={() => onRefresh()}
+              disabled={listLoading}
+            >
+              刷新
+            </button>
+          </div>
+        ) : null}
+        {skills.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-text-faint">
+            未找到匹配的全局技能
+          </div>
+        ) : isGlobal ? (
+          <>
+            <SkillGroup title="第三方技能" skills={skills.filter(s => getSkillCategory(s) === "third-party")} locationLabel={locationLabel} {...props} />
+            <SkillGroup title="自建技能" skills={skills.filter(s => getSkillCategory(s) === "custom")} locationLabel={locationLabel} {...props} />
+            <SkillGroup title="内置技能" skills={skills.filter(s => getSkillCategory(s) === "builtin")} locationLabel={locationLabel} {...props} />
+          </>
+        ) : (
+          <SkillList skills={skills} locationLabel={locationLabel} {...props} />
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+type RegistrySearchItem = {
+  name: string;
+  description: string;
+  version: string;
+  author: string;
+  source: string;
+  source_type: string;
+  namespace?: string;
+  canonical_name?: string;
+  origin_source?: string;
+  requires_api_key?: boolean;
+  detail_url?: string;
+  provenance_source?: "registry" | "skillhub";
+  display_name?: string;
+  recommended_id?: string;
+};
+
+type Props = {
+  open: boolean;
+  defaultProvider: string;
+  providers: Record<string, ProviderEntry>;
+  sessionId: string;
+  /** Studio API base URL (for 收藏列表等需要直连后端的 Tab). */
+  apiBase: string;
+  apiToken: string;
+  mcpServers: McpServer[];
+  onRefreshMcp: (sessionId?: string) => Promise<void>;
+  runMode: RunMode;
+  theme: "dark" | "light" | "dim";
+  chatStyle: ChatStyle;
+  onThemeChange: (theme: "dark" | "light" | "dim") => void;
+  onChatStyleChange: (style: ChatStyle) => void;
+  onRunModeChange: (mode: RunMode) => Promise<{ ok: boolean; error?: string }>;
+  onClose: () => void;
+  onSave: (result: {
+    defaultProvider: string;
+    providers: Record<string, ProviderEntry>;
+  }) => Promise<void>;
+  panes: ChatPane[];
+  avatars: Avatar[];
+  groups: GroupChat[];
+  onForwardFavorite: (
+    ctx: FavoriteForwardContext,
+    payload: ForwardConfirmPayload,
+    note: string
+  ) => Promise<void>;
+};
+
+/** 模型行健康检测：无记录视为 idle */
+type ModelHealthEntry =
+  | { phase: "checking" }
+  | { phase: "ok"; ms: number }
+  | { phase: "error" }
+  | { phase: "unauthorized"; error?: string };
+
+function healthEntryFromCheckResult(res: HealthCheckResult): ModelHealthEntry {
+  if (res.ok) {
+    const ms = typeof res.latencyMs === "number" ? res.latencyMs : 0;
+    return { phase: "ok", ms };
+  }
+  if (res.reason === "unauthorized") {
+    return { phase: "unauthorized", error: res.error };
+  }
+  return { phase: "error" };
+}
+
+function unauthorizedHoverLabel(error?: string): string {
+  const trimmed = String(error || "").trim();
+  if (!trimmed) return "当前密钥无权调用此模型";
+  return trimmed.length > 120 ? `${trimmed.slice(0, 120)}…` : trimmed;
+}
+
+/** 品牌 Avatar：优先用内联 SVG 图标，自定义厂商降级为品牌色首字母 */
+function ProviderAvatar({
+  providerId,
+  size = 28,
+  entry,
+}: {
+  providerId: string;
+  size?: number;
+  entry?: ProviderDisplayEntry | null;
+}) {
+  const IconComp = PROVIDER_ICON_MAP[providerId];
+  const bg = getProviderBrandColor(providerId);
+  const color = getProviderBrandTextColor(providerId);
+  const r = size <= 28 ? "rounded-full" : "rounded-xl";
+  return (
+    <span
+      className={`inline-flex shrink-0 items-center justify-center overflow-hidden shadow-sm ${r}`}
+      style={{ width: size, height: size, backgroundColor: bg, color }}
+    >
+      {IconComp ? (
+        <IconComp size={Math.round(size * 0.64)} className="shrink-0" />
+      ) : (
+        <span style={{ fontSize: Math.round(size * 0.4), fontWeight: 700, lineHeight: 1 }}>
+          {getProviderInitials(providerId, entry)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+function formatHealthLatencyMs(ms: number): string {
+  if (ms >= 1000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${ms}ms`;
+}
+
+function ModelCapabilityBadges({
+  className = "",
+  provider = "",
+  model = "",
+}: {
+  className?: string;
+  provider?: string;
+  model?: string;
+}) {
+  const kind = classifyModelKind(provider, model);
+  if (isEmbeddingModelKind(kind)) {
+    const label = kind === "multimodal_embedding" ? "多模态嵌入" : "嵌入";
+    return (
+      <div className={`flex items-center gap-1.5 ${className}`.trim()}>
+        <HoverTip label={label}>
+          <span
+            role="img"
+            aria-label={`${label}能力`}
+            className="inline-flex h-5 items-center justify-center rounded-full border border-teal-500/35 bg-teal-500/12 px-1.5 text-[11px] font-medium text-teal-400"
+          >
+            {label}
+          </span>
+        </HoverTip>
+      </div>
+    );
+  }
+  return (
+    <div className={`flex items-center gap-1.5 ${className}`.trim()}>
+      <HoverTip label="推理">
+        <span
+          role="img"
+          aria-label="推理能力"
+          className="inline-flex h-5 min-w-8 items-center justify-center rounded-full border border-indigo-500/35 bg-indigo-500/12 px-1.5 text-indigo-400"
+        >
+          <Sparkles className="h-3 w-3" aria-hidden />
+        </span>
+      </HoverTip>
+      <HoverTip label="工具">
+        <span
+          role="img"
+          aria-label="工具能力"
+          className="inline-flex h-5 min-w-8 items-center justify-center rounded-full border border-amber-500/35 bg-amber-500/12 px-1.5 text-amber-400"
+        >
+          <Wrench className="h-3 w-3" aria-hidden />
+        </span>
+      </HoverTip>
+    </div>
+  );
+}
+
+const ALL_TABS: { id: SettingsTab; label: string; icon: typeof Settings2 }[] = [
+  { id: "account", label: "用户账号", icon: User },
+  { id: "general", label: "通用偏好", icon: Settings2 },
+  { id: "permissions", label: "权限", icon: ShieldCheck },
+  { id: "provider", label: "模型服务", icon: Cpu },
+  { id: "mcp", label: "MCP 工具", icon: Plug },
+  { id: "connectors", label: "连接器", icon: Link2 },
+  { id: "tools", label: "内置工具", icon: Wrench },
+  { id: "skills", label: "技能", icon: SkillPuzzleIcon },
+  ...(LOCAL_KNOWLEDGE_ENABLED
+    ? [{ id: "knowledge" as const, label: "知识库", icon: Library }]
+    : []),
+  { id: "data_sources", label: "数据源", icon: Database },
+  { id: "memory", label: "记忆管理", icon: Network },
+  { id: "hooks", label: "钩子管理", icon: Anchor },
+  { id: "automation", label: "任务设置", icon: AutomationTaskIcon },
+  { id: "email", label: "邮件通知", icon: Mail },
+  { id: "favorites", label: "我的收藏", icon: Bookmark },
+  { id: "developer", label: "开发者设置", icon: Wrench },
+  { id: "server", label: "远程连接", icon: Globe },
+];
+
+const TABS = DELIVERY_VISIBLE_SETTINGS_TAB_IDS.map((id) => {
+  const tab = ALL_TABS.find((item) => item.id === id);
+  if (!tab) throw new Error(`Missing settings tab definition: ${id}`);
+  return tab;
+});
+
+const DEVELOPER_TAB = ALL_TABS.find(
+  (item) => item.id === DELIVERY_DEVELOPER_SETTINGS_TAB_ID,
+) ?? (() => {
+  throw new Error("Missing developer settings tab definition");
+})();
+
+const EMAIL_PRESETS: Array<{
+  id: EmailPresetId;
+  label: string;
+  smtp_host: string;
+  smtp_port: number;
+  smtp_use_tls: boolean;
+}> = [
+  { id: "qq", label: "QQ 邮箱", smtp_host: "smtp.qq.com", smtp_port: 587, smtp_use_tls: true },
+  { id: "163", label: "163 邮箱", smtp_host: "smtp.163.com", smtp_port: 465, smtp_use_tls: true },
+  { id: "gmail", label: "Gmail", smtp_host: "smtp.gmail.com", smtp_port: 587, smtp_use_tls: true },
+  { id: "outlook", label: "Outlook", smtp_host: "smtp.office365.com", smtp_port: 587, smtp_use_tls: true },
+  { id: "custom", label: "自定义", smtp_host: "", smtp_port: 587, smtp_use_tls: true },
+];
+
+const DEFAULT_EMAIL_SETTINGS: EmailSettingsForm = {
+  enabled: true,
+  smtp_host: "",
+  smtp_port: 587,
+  smtp_username: "",
+  smtp_password: "",
+  smtp_use_tls: true,
+  from_email: "",
+  default_to_email: "bingzhenli@hotmail.com",
+};
+
+function inferPresetFromConfig(config: EmailSettingsForm): EmailPresetId {
+  const host = config.smtp_host.trim().toLowerCase();
+  if (host === "smtp.qq.com") return "qq";
+  if (host === "smtp.163.com") return "163";
+  if (host === "smtp.gmail.com") return "gmail";
+  if (host === "smtp.office365.com") return "outlook";
+  return "custom";
+}
+
+function normalizeEmailSettings(input: unknown): EmailSettingsForm {
+  if (!input || typeof input !== "object") return { ...DEFAULT_EMAIL_SETTINGS };
+  const row = input as Partial<EmailSettingsForm>;
+  return {
+    enabled: Boolean(row.enabled ?? true),
+    smtp_host: String(row.smtp_host ?? ""),
+    smtp_port: Number(row.smtp_port ?? 587) || 587,
+    smtp_username: String(row.smtp_username ?? ""),
+    smtp_password: String(row.smtp_password ?? ""),
+    smtp_use_tls: Boolean(row.smtp_use_tls ?? true),
+    from_email: String(row.from_email ?? ""),
+    default_to_email: String(row.default_to_email ?? "bingzhenli@hotmail.com"),
+  };
+}
+
+type RegistryTool = { name: string; description: string; category: string; is_meta: boolean };
+
+const CATEGORY_LABELS: Record<string, string> = {
+  system: "系统",
+  filesystem: "文件系统",
+  code: "代码与 LSP",
+  mcp: "MCP",
+  skill: "技能",
+  agent: "Agent 辅助",
+  memory: "记忆与搜索",
+  document: "文档解析",
+  scheduling: "后台任务",
+  data_source: "数据源",
+  meta: "元智能体专用",
+  other: "其他",
+};
+
+const CATEGORY_ORDER = ["system", "filesystem", "code", "document", "agent", "memory", "data_source", "scheduling", "mcp", "skill", "meta", "other"];
+
+const TOOL_LABELS: Record<string, string> = {
+  bash_exec: "Bash",
+  file_read: "Read",
+  file_write: "Write",
+  file_edit: "Edit",
+  list_files: "Glob",
+  codegen: "CodeGen",
+  lsp_goto_definition: "LSP GoTo",
+  lsp_find_references: "LSP References",
+  lsp_hover: "LSP Hover",
+  lsp_diagnostics: "LSP Diagnostics",
+  mcp_connect: "MCP Connect",
+  mcp_call: "MCP Call",
+  mcp_import: "MCP Import",
+  skill_use: "Skill Use",
+  skill_list: "Skill List",
+  skill_market_install: "Skill Market Install",
+  skill_manage: "Skill Manage",
+  todo_write: "TodoWrite",
+  scratchpad_write: "Scratchpad Write",
+  scratchpad_read: "Scratchpad Read",
+  memory_append: "Memory Append",
+  memory_search: "Memory Search",
+  session_search: "Session Search",
+  liteparse: "LiteParse",
+  schedule_task: "Task",
+  list_scheduled_tasks: "List Tasks",
+  cancel_scheduled_task: "Cancel Task",
+  spawn_subagent: "Spawn SubAgent",
+  cancel_subagent: "Cancel SubAgent",
+  retry_subagent: "Retry SubAgent",
+  query_subagent_status: "Query SubAgent",
+  check_resources: "Check Resources",
+  recommend_subagent_model: "Recommend Model",
+  list_skills: "List Skills",
+  list_mcps: "List MCPs",
+  send_bug_report_email: "Bug Report Email",
+  update_email_config: "Update Email Config",
+  set_taskspace: "Set Taskspace",
+  delegate_to_avatar: "Delegate to Avatar",
+  read_avatar_workspace: "Read Avatar Workspace",
+  chat_with_avatar: "Chat with Avatar",
+};
+
+/** 设置页展示用中文说明（不改后端发给模型的英文 tool schema） */
+const TOOL_DESCRIPTIONS_ZH: Record<string, string> = {
+  bash_exec: "在当前工作区执行 Shell 命令。",
+  file_read: "读取文件内容，可指定行号范围。",
+  file_write: "写入完整文件内容；会先展示统一 diff，写入前需确认。",
+  file_edit: "在文件中替换指定文本；会先展示统一 diff，写入前需确认。",
+  list_files: "列出指定路径下的文件与目录，可选递归。",
+  codegen: "使用内置 CodeGen 引擎生成代码产物（agent / workflow / tool / skill 等）。",
+  mcp_connect: "按配置连接一个 MCP 服务。",
+  mcp_call: "调用已连接 MCP 上的工具，传入 JSON 参数。",
+  mcp_import: "从外部 mcp.json 导入 MCP 配置到 AgenticX 工作区。",
+  skill_use: "将某个技能激活到当前对话上下文。",
+  skill_list: "列出本地/远程可用技能的摘要。",
+  skill_market_install:
+    "从 SkillHub/ClawHub 获取已发布技能，自动完成来源解析、安全检查、安装与列表刷新。",
+  skill_manage:
+    `在 ${AGX_HOME_DISPLAY}/skills/ 下创建、修改或删除技能（SKILL.md）；支持 create / patch / delete（需显式开启环境开关）。`,
+  todo_write: "更新当前会话的结构化任务列表。",
+  scratchpad_write: "将会话中间结果写入草稿板（scratchpad）。",
+  scratchpad_read: "读取草稿板某键内容，或列出全部键。",
+  memory_append: "向工作区日记或长期 MEMORY.md 追加一条记忆（跨会话保留）。",
+  memory_search: "用全文 / 向量 / 混合模式检索已索引的工作区记忆。",
+  session_search: "按关键词检索历史会话消息，空查询则返回最近会话。",
+  liteparse: "通过 LiteParse 解析 PDF、Office、图片等文档并提取文本。",
+  lsp_goto_definition: "在指定文件位置跳转到符号定义（LSP）。",
+  lsp_find_references: "查找符号在工程内的所有引用（LSP）。",
+  lsp_hover: "获取光标处符号的类型信息与文档说明（LSP）。",
+  lsp_diagnostics: "读取文件或已打开文件的诊断/类型与 Lint 信息（LSP）。",
+  schedule_task: "安排后台异步任务，即使用户未在聊天也会执行。",
+  list_scheduled_tasks: "列出所有后台/计划任务及其状态。",
+  cancel_scheduled_task: "按 task_id 取消后台任务。",
+  spawn_subagent: "为委派任务启动一个子智能体工作进程。",
+  cancel_subagent: "按 ID 或专家名取消正在运行的子智能体。",
+  retry_subagent: "对已完成或失败的子智能体重试，可附带修正后的任务描述。",
+  query_subagent_status: "查询单个或全部子智能体状态（支持 agent_id、专家名或 avatar_id）。",
+  check_resources: "在调度前查看当前主机资源占用情况。",
+  recommend_subagent_model: "根据任务复杂度与已配置 Provider 为子智能体推荐模型。",
+  list_skills: "列出 AgenticX 中所有可用技能及简介。",
+  list_mcps: "列出已配置的 MCP 服务及其连接状态。",
+  send_bug_report_email: "使用用户配置的 SMTP 发送问题反馈邮件。",
+  update_email_config: "在严格校验下更新 notifications.email.* 邮件通知配置。",
+  set_taskspace: "为当前会话设置或追加工作区（taskspace）路径，本回合结束后注册生效。",
+  delegate_to_avatar: "将任务委派给指定专家，在其独立工作区中执行。",
+  read_avatar_workspace: "不启动子智能体的情况下读取专家工作区中的文件。",
+  chat_with_avatar: "向专家发送内部问题并返回其回复，供元智能体汇总给用户。",
+};
+
+function toolDisplayDescription(name: string, apiDescription: string): string {
+  return TOOL_DESCRIPTIONS_ZH[name] ?? apiDescription;
+}
+
+// ---------------------------------------------------------------------------
+// Hooks Tab
+// ---------------------------------------------------------------------------
+
+type CuratedHookItem = {
+  name: string;
+  description: string;
+  events: string[];
+  enabled: boolean;
+  source: string;
+};
+
+type ImportedHookItem = {
+  name: string;
+  source: string;
+  event: string;
+  type: string;
+  command?: string;
+  url?: string;
+  prompt?: string;
+  matcher?: string;
+  block_on_failure?: boolean;
+  timeout_seconds?: number;
+  enabled: boolean;
+  source_path?: string;
+  discovered_via?: string;
+  event_inferred?: boolean;
+  duplicate_count?: number;
+  duplicate_sources?: string[];
+  usability?: string;
+};
+
+type HookSettings = {
+  preset_paths: Record<string, { enabled: boolean }>;
+  custom_paths: string[];
+  declarative: unknown[];
+  disabled: string[];
+};
+
+type HookScanPathItem = {
+  source: string;
+  path: string;
+  exists: boolean;
+};
+
+type ScanSummary = {
+  raw_total: number;
+  deduped_total: number;
+  source_counts: Record<string, number>;
+};
+
+const HOOK_PRIMARY_CONFIG_PATH = `${AGX_HOME_DISPLAY}/hooks/`;
+
+const HOOK_PRESETS: { key: string; label: string; path: string }[] = [
+  { key: "cursor_plugins", label: "Cursor 插件目录", path: "~/.cursor/plugins/" },
+  { key: "claude_plugins", label: "Claude 插件目录", path: "~/.claude/plugins/" },
+];
+
+function hookSourceBadge(source: string): { label: string; className: string } {
+  const base = "shrink-0 rounded-full border px-1.5 text-[10px]";
+  switch (source) {
+    case "bundled":
+    case "agenticx":
+      return { label: "内置", className: `${base} border-zinc-500/30 bg-zinc-500/10 text-zinc-400` };
+    case "cursor":
+      return { label: "Cursor", className: `${base} border-sky-500/30 bg-sky-500/10 text-sky-400` };
+    case "claude":
+      return { label: "Claude", className: `${base} border-orange-500/30 bg-orange-500/10 text-orange-400` };
+    case "cursor_plugins":
+      return { label: "Cursor 插件", className: `${base} border-sky-500/30 bg-sky-500/10 text-sky-400` };
+    case "claude_plugins":
+      return { label: "Claude 插件", className: `${base} border-emerald-500/30 bg-emerald-500/10 text-emerald-400` };
+    case "managed":
+      return { label: "用户", className: `${base} border-purple-500/30 bg-purple-500/10 text-purple-400` };
+    case "workspace":
+      return { label: "工作区", className: `${base} border-cyan-500/30 bg-cyan-500/10 text-cyan-400` };
+    default:
+      return { label: "自定义", className: `${base} border-border bg-surface-panel text-text-faint` };
+  }
+}
+
+function hookTypeBadge(hookType: string): { label: string; className: string } {
+  const base = "shrink-0 rounded-full border px-1.5 text-[10px]";
+  switch (hookType) {
+    case "command":
+      return { label: "命令", className: `${base} border-amber-500/30 bg-amber-500/10 text-amber-400` };
+    case "http":
+      return { label: "HTTP", className: `${base} border-blue-500/30 bg-blue-500/10 text-blue-400` };
+    case "prompt":
+      return { label: "提示词", className: `${base} border-green-500/30 bg-green-500/10 text-green-400` };
+    case "agent":
+      return { label: "智能体", className: `${base} border-rose-500/30 bg-rose-500/10 text-rose-400` };
+    default:
+      return { label: hookType, className: `${base} border-border bg-surface-panel text-text-faint` };
+  }
+}
+
+const EVENT_LABELS: Record<string, string> = {
+  before_tool_call: "preToolUse",
+  after_tool_call: "postToolUse",
+  session_start: "sessionStart",
+  session_end: "sessionEnd",
+  preToolUse: "preToolUse",
+  postToolUse: "postToolUse",
+};
+
+function HooksTab() {
+  const [curatedHooks, setCuratedHooks] = useState<CuratedHookItem[]>([]);
+  const [importedHooks, setImportedHooks] = useState<ImportedHookItem[]>([]);
+  const [scanSummary, setScanSummary] = useState<ScanSummary>({ raw_total: 0, deduped_total: 0, source_counts: {} });
+  const [scanPaths, setScanPaths] = useState<HookScanPathItem[]>([]);
+  const [hookError, setHookError] = useState<string>("");
+  const [settingsError, setSettingsError] = useState<string>("");
+  const [settings, setSettings] = useState<HookSettings>({
+    preset_paths: {},
+    custom_paths: [],
+    declarative: [],
+    disabled: [],
+  });
+  const [customPaths, setCustomPaths] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const apiToken = useAppStore((s) => s.apiToken);
+  const apiBase = useAppStore((s) => s.apiBase);
+
+  const fetchAll = useCallback(async () => {
+    try {
+      const token = apiToken || (await window.agenticxDesktop.getApiAuthToken()) || "";
+      const headers: Record<string, string> = {};
+      if (token) headers["x-agx-desktop-token"] = token;
+
+      const [hooksRes, settingsRes] = await Promise.all([
+        studioFetch("/api/hooks", { headers, storeBase: apiBase }),
+        studioFetch("/api/hooks/settings", { headers, storeBase: apiBase }),
+      ]);
+      const hooksData = await hooksRes.json();
+      const settingsData = await settingsRes.json();
+
+      if (hooksData.ok) {
+        setCuratedHooks(hooksData.curated_hooks ?? []);
+        setImportedHooks(hooksData.imported_hooks ?? []);
+        setScanSummary(hooksData.scan_summary ?? { raw_total: 0, deduped_total: 0, source_counts: {} });
+        setScanPaths(hooksData.scan_paths ?? []);
+        setHookError("");
+      } else {
+        setCuratedHooks([]);
+        setImportedHooks([]);
+        setScanPaths(hooksData.scan_paths ?? []);
+        setHookError(
+          String(hooksData.error ?? hooksData.detail ?? `/api/hooks 请求失败（HTTP ${hooksRes.status || "unknown"}）`),
+        );
+      }
+      if (settingsData.ok) {
+        setSettings(settingsData);
+        setCustomPaths(settingsData.custom_paths ?? []);
+        setSettingsError("");
+      } else {
+        setSettingsError(String(settingsData.error ?? settingsData.detail ?? "/api/hooks/settings 拉取失败"));
+      }
+    } catch (err) {
+      setCuratedHooks([]);
+      setImportedHooks([]);
+      setScanPaths([]);
+      setHookError(err instanceof Error ? err.message : "拉取 Hook 配置失败");
+      setSettingsError("");
+    } finally {
+      setLoading(false);
+    }
+  }, [apiToken, apiBase]);
+
+  useEffect(() => { void fetchAll(); }, [fetchAll]);
+
+  const persistSettings = useCallback(
+    async (patch: Partial<HookSettings>) => {
+      setBusy(true);
+      try {
+        const token = apiToken || (await window.agenticxDesktop.getApiAuthToken()) || "";
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (token) headers["x-agx-desktop-token"] = token;
+        const resp = await studioFetch("/api/hooks/settings", {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(patch),
+          storeBase: apiBase,
+        });
+        const data = await resp.json().catch(() => null);
+        if (!resp.ok || !data?.ok) {
+          throw new Error(String(data?.detail ?? data?.error ?? `HTTP ${resp.status}`));
+        }
+        await fetchAll();
+      } finally {
+        setBusy(false);
+      }
+    },
+    [apiToken, apiBase, fetchAll],
+  );
+
+  const togglePreset = useCallback(
+    (key: string, enabled: boolean) => {
+      void persistSettings({ preset_paths: { ...settings.preset_paths, [key]: { enabled } } });
+    },
+    [settings.preset_paths, persistSettings],
+  );
+
+  const persistCustomPaths = useCallback(
+    (paths: string[]) => void persistSettings({ custom_paths: paths.filter((p) => p.trim()) }),
+    [persistSettings],
+  );
+
+  const toggleHookEnabled = useCallback(
+    (hookName: string, enabled: boolean) => {
+      const current = Array.isArray(settings.disabled) ? settings.disabled : [];
+      const next = enabled ? current.filter((id) => id !== hookName) : Array.from(new Set([...current, hookName]));
+      setSettings((prev) => ({ ...prev, disabled: next }));
+      setCuratedHooks((prev) => prev.map((h) => (h.name === hookName ? { ...h, enabled } : h)));
+      setImportedHooks((prev) => prev.map((h) => (h.name === hookName ? { ...h, enabled } : h)));
+      void persistSettings({ disabled: next }).catch(() => void fetchAll());
+    },
+    [fetchAll, persistSettings, settings.disabled],
+  );
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 py-8 text-sm text-text-subtle">
+        <Loader2 className="h-4 w-4 animate-spin" /> 正在加载钩子配置...
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-text-subtle">
+        钩子（Hooks）是智能体在执行的特定节点运行自定义脚本，可用于修改行为、执行策略或记录日志。
+      </div>
+
+      {hookError ? (
+        <div className="rounded-md border border-rose-500/30 bg-rose-500/10 p-2 text-xs text-rose-300">{hookError}</div>
+      ) : null}
+
+      {/* Block A: 预置钩子 */}
+      <Panel title={`预置钩子 (${curatedHooks.length})`} collapsible>
+        {curatedHooks.length === 0 ? (
+          <div className="py-3 text-center text-xs text-text-faint">暂无预置钩子</div>
+        ) : (
+          <div className="divide-y divide-border">
+            {curatedHooks.map((hook) => (
+              <div key={hook.name} className="flex items-center gap-3 px-1 py-2">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-text-primary">{hook.name}</span>
+                    <span className="shrink-0 rounded-full border border-zinc-500/30 bg-zinc-500/10 px-1.5 text-[10px] text-zinc-400">内置</span>
+                  </div>
+                  <div className="mt-0.5 text-xs text-text-faint truncate">{hook.description}</div>
+                  {hook.events?.length > 0 && (
+                    <div className="mt-0.5 flex flex-wrap gap-1">
+                      {hook.events.map((ev) => (
+                        <span key={ev} className="rounded bg-surface-hover px-1 py-0.5 text-[10px] font-mono text-text-subtle">{ev}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <SettingsSwitch
+                  checked={hook.enabled}
+                  disabled={busy}
+                  size="sm"
+                  aria-label={`启用 ${hook.name}`}
+                  onChange={(next) => toggleHookEnabled(hook.name, next)}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      {/* Block B: 外部导入（默认折叠） */}
+      <Panel
+        title={`外部导入钩子${scanSummary.deduped_total > 0 ? ` (${scanSummary.deduped_total} 条，去重自 ${scanSummary.raw_total} 条)` : ""}`}
+        collapsible
+        defaultCollapsed
+      >
+        <div className="space-y-3">
+            <div className="space-y-2">
+              {settingsError ? (
+                <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-200">配置路径读取异常：{settingsError}</div>
+              ) : null}
+              <div className="text-xs text-text-faint">勾选预设路径可自动导入 Cursor / Claude Code 等工具的 Hooks。</div>
+              {HOOK_PRESETS.map((preset) => {
+                const isOn = settings.preset_paths?.[preset.key]?.enabled !== false;
+                return (
+                  <label key={preset.key} className="flex cursor-pointer items-center gap-2 rounded-md border border-border px-2 py-1.5">
+                    <input type="checkbox" checked={isOn} disabled={busy} onChange={(e) => togglePreset(preset.key, e.target.checked)} className="h-3.5 w-3.5 accent-[var(--ui-btn-primary-bg)]" />
+                    <span className="flex-1 text-sm text-text-primary">{preset.label}</span>
+                    <span className="text-xs text-text-faint">{preset.path}</span>
+                  </label>
+                );
+              })}
+              {customPaths.map((row, idx) => (
+                <div key={`hook-path-${idx}`} className="flex gap-2">
+                  <input className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm" value={row} placeholder="例如 /path/to/hooks/" onChange={(e) => setCustomPaths((prev) => prev.map((p, i) => (i === idx ? e.target.value : p)))} onBlur={() => persistCustomPaths(customPaths)} disabled={busy} />
+                  <button type="button" className="shrink-0 rounded-md border border-border p-2 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40" title="移除此路径" disabled={busy} onClick={() => { const next = customPaths.filter((_, i) => i !== idx); setCustomPaths(next); persistCustomPaths(next); }}>
+                    <Trash2 className="h-4 w-4" aria-hidden />
+                  </button>
+                </div>
+              ))}
+              <button type="button" className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40" disabled={busy} onClick={() => setCustomPaths((prev) => [...prev, ""])}>
+                <Plus className="h-3.5 w-3.5" aria-hidden />
+                添加配置路径
+              </button>
+            </div>
+            {importedHooks.length === 0 ? (
+              <div className="py-2 text-center text-xs text-text-faint">未发现外部钩子</div>
+            ) : (
+              <div className="divide-y divide-border rounded-md border border-border">
+                {importedHooks.map((hook, idx) => {
+                  const srcBadge = hookSourceBadge(hook.source || "custom");
+                  const typeBadge = hookTypeBadge(hook.type);
+                  const snippet = hook.command?.slice(0, 100) ?? hook.url?.slice(0, 100) ?? "";
+                  const eventLabel = EVENT_LABELS[hook.event] ?? hook.event;
+                  return (
+                    <div key={`${hook.name}-${idx}`} className="px-3 py-2">
+                      <div className="flex items-center gap-2 justify-between">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span className="rounded bg-surface-hover px-1 py-0.5 text-[10px] font-mono text-text-subtle">{eventLabel}</span>
+                          <span className={srcBadge.className}>{srcBadge.label}</span>
+                          <span className={typeBadge.className}>{typeBadge.label}</span>
+                          {(hook.duplicate_count ?? 1) > 1 && (
+                            <span className="text-[10px] text-text-faint">x{hook.duplicate_count} 来自 {(hook.duplicate_sources ?? []).join(", ")}</span>
+                          )}
+                          {hook.usability === "needs_env" && (
+                            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 text-[10px] text-amber-300">需要外部环境</span>
+                          )}
+                        </div>
+                        <SettingsSwitch checked={hook.enabled} disabled={busy} size="sm" aria-label={`启用 ${hook.name}`} onChange={(next) => toggleHookEnabled(hook.name, next)} />
+                      </div>
+                      {snippet && <div className="mt-1 truncate font-mono text-[11px] text-text-faint">{snippet}</div>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Permissions Advanced Panel
+// ---------------------------------------------------------------------------
+
+type PathRule = { pattern: string; allow: boolean };
+
+type RegistryToolRow = { name: string; description?: string; category?: string; is_meta?: boolean };
+
+export type PermissionsAdvancedPanelHandle = {
+  /** 将路径/命令/工具拒绝列表写入后端；与输入框失焦保存等效，供窗口底部「保存」统一触发。 */
+  flushPermissions: () => Promise<{ ok: boolean; error?: string }>;
+};
+
+/**
+ * 「不再询问」写下的一条规则。
+ *
+ * 两种形态都可能出现在配置里:裸字符串是旧格式,**全局生效**;带 workspace 的是
+ * 界面写下的新格式,只在那个目录(及其子目录)内生效。同一条命令在两个仓里的含义
+ * 可以完全不同,所以新规则一律绑工作区。
+ */
+type AllowedCommandRule = {
+  pattern: string;
+  workspace: string;
+};
+
+function parseAllowedCommands(raw: unknown): AllowedCommandRule[] {
+  if (!Array.isArray(raw)) return [];
+  const out: AllowedCommandRule[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string") {
+      const pattern = entry.trim();
+      if (pattern) out.push({ pattern, workspace: "" });
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const pattern = String((entry as Record<string, unknown>).pattern ?? "").trim();
+      const workspace = String((entry as Record<string, unknown>).workspace ?? "").trim();
+      if (pattern) out.push({ pattern, workspace });
+    }
+  }
+  return out;
+}
+
+const PermissionsAdvancedPanel = forwardRef<PermissionsAdvancedPanelHandle>(function PermissionsAdvancedPanel(_props, ref) {
+  const [pathRules, setPathRules] = useState<PathRule[]>([]);
+  const [allowedCommands, setAllowedCommands] = useState<AllowedCommandRule[]>([]);
+  /** 这台机器上拒绝规则能被沙箱执行到什么程度，由后端按平台给出。 */
+  const [pathRulesEnforcement, setPathRulesEnforcement] = useState<string>("none");
+  /**
+   * 这台机器上 Shell 的**读取**有没有被限制在工作区内。
+   *
+   * 和上面那个分开，因为两者会不一致：Windows 上拒绝规则能挡住写（partial），读却
+   * 仍然放得很开。用一句话在三个平台上都说，必然有一个平台在过度承诺。
+   */
+  const [shellReadIsolation, setShellReadIsolation] = useState<string>("none");
+  const [deniedCommands, setDeniedCommands] = useState<string[]>([]);
+  const [deniedTools, setDeniedTools] = useState<string[]>([]);
+  const [registryTools, setRegistryTools] = useState<RegistryToolRow[]>([]);
+  const [toolInsertFilter, setToolInsertFilter] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  /**
+   * 这一页上任何一次保存或撤销失败的整句提示。
+   *
+   * 以前是空的:``persist`` 里 ``await fetch(...)`` 之后既不看状态码也不看异常。
+   * 于是一条改坏的路径规则、一次撤销授权,失败之后界面照旧显示新值——用户看到的
+   * 是「已经生效」,后端里是旧的。权限页上这种沉默比在别处贵得多。
+   */
+  const [saveError, setSaveError] = useState("");
+  const apiToken = useAppStore((s) => s.apiToken);
+  const apiBase = useAppStore((s) => s.apiBase);
+
+  /** 与 CC Bridge / Hooks 等面板一致：未配置远程 URL 时用本机内置 Studio 的 API 根地址，避免请求落到 `/api/...` 相对路径导致 HTTP 404。 */
+  const resolveApiBase = useCallback(async () => {
+    const u = (apiBase ?? "").trim();
+    if (u) return u.replace(/\/+$/, "");
+    const raw = String((await window.agenticxDesktop.getApiBase()) || "").trim();
+    return raw.replace(/\/+$/, "");
+  }, [apiBase]);
+
+  const filteredRegistryTools = useMemo(() => {
+    const q = toolInsertFilter.trim().toLowerCase();
+    const rows = registryTools.filter((t) => t.name);
+    if (!q) return rows;
+    return rows.filter((t) => {
+      const d = (t.description ?? "").toLowerCase();
+      return t.name.toLowerCase().includes(q) || d.includes(q) || (t.category ?? "").toLowerCase().includes(q);
+    });
+  }, [registryTools, toolInsertFilter]);
+
+  const fetchPerms = useCallback(async () => {
+    try {
+      const headers: Record<string, string> = {};
+      if (apiToken) headers["x-agx-desktop-token"] = apiToken;
+      const base = await resolveApiBase();
+      const [permRes, regRes] = await Promise.all([
+        fetch(`${base}/api/permissions`, { headers }),
+        fetch(`${base}/api/tools/registry`, { headers }),
+      ]);
+      const data = await permRes.json();
+      if (data.ok) {
+        setPathRules(
+          (data.path_rules ?? []).map((r: any) => ({
+            pattern: r.pattern ?? "",
+            allow: r.allow !== false,
+          })),
+        );
+        setDeniedCommands(data.denied_commands ?? []);
+        setDeniedTools(data.denied_tools ?? []);
+        setAllowedCommands(parseAllowedCommands(data.allowed_commands));
+        setPathRulesEnforcement(String(data.path_rules_enforcement ?? "none"));
+        setShellReadIsolation(String(data.shell_read_isolation ?? "none"));
+      }
+      try {
+        const reg = await regRes.json();
+        if (reg.ok && Array.isArray(reg.tools)) {
+          setRegistryTools(
+            reg.tools.map((t: any) => ({
+              name: String(t.name ?? "").trim(),
+              description: typeof t.description === "string" ? t.description : "",
+              category: typeof t.category === "string" ? t.category : "",
+              is_meta: Boolean(t.is_meta),
+            })),
+          );
+        } else {
+          setRegistryTools([]);
+        }
+      } catch {
+        setRegistryTools([]);
+      }
+    } catch {
+      // silent
+    } finally {
+      setLoading(false);
+    }
+  }, [apiToken, resolveApiBase]);
+
+  useEffect(() => { void fetchPerms(); }, [fetchPerms]);
+
+  /**
+   * 保存一批权限设置。**失败必须说出来,并且把界面拉回后端的真实值。**
+   *
+   * 「写请求失败了」和「没写进去」不是一回事(请求发出去了、后端处理完了、响应在
+   * 回来的路上断了),所以这里不做本地回滚——一律重新拉一次,显示后端此刻实际是什么。
+   */
+  const persist = useCallback(
+    async (patch: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> => {
+      setBusy(true);
+      try {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (apiToken) headers["x-agx-desktop-token"] = apiToken;
+        const base = await resolveApiBase();
+        const res = await fetch(`${base}/api/permissions`, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify(patch),
+        });
+        if (!res.ok) {
+          let detail = "";
+          try {
+            const body = (await res.json()) as { detail?: string; error?: string };
+            detail =
+              (typeof body?.detail === "string" && body.detail) ||
+              (typeof body?.error === "string" && body.error) ||
+              "";
+          } catch {
+            /* 响应体不是 JSON 就只报状态码 */
+          }
+          const error = detail || `HTTP ${res.status}`;
+          setSaveError(`保存失败：${error}（下方显示的是后端此刻的实际值）`);
+          await fetchPerms();
+          return { ok: false, error };
+        }
+        setSaveError("");
+        await fetchPerms();
+        return { ok: true };
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        setSaveError(`保存失败：${error}（下方显示的是后端此刻的实际值）`);
+        await fetchPerms();
+        return { ok: false, error };
+      } finally {
+        setBusy(false);
+      }
+    },
+    [apiToken, resolveApiBase, fetchPerms],
+  );
+
+  const appendDeniedTool = useCallback(
+    (rawName: string) => {
+      const trimmed = rawName.trim();
+      if (!trimmed) return;
+      setDeniedTools((prev) => {
+        if (prev.some((p) => p.trim() === trimmed)) return prev;
+        const next = [...prev, trimmed];
+        queueMicrotask(() => {
+          void persist({ denied_tools: next });
+        });
+        return next;
+      });
+    },
+    [persist],
+  );
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      flushPermissions: async () => {
+        const headers: Record<string, string> = { "Content-Type": "application/json" };
+        if (apiToken) headers["x-agx-desktop-token"] = apiToken;
+        const pathRulesPayload = pathRules.filter((r) => String(r.pattern ?? "").trim());
+        const deniedCommandsPayload = deniedCommands.map((s) => String(s).trim()).filter(Boolean);
+        const deniedToolsPayload = deniedTools.map((s) => String(s).trim()).filter(Boolean);
+        try {
+          const base = await resolveApiBase();
+          const res = await fetch(`${base}/api/permissions`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({
+              path_rules: pathRulesPayload,
+              denied_commands: deniedCommandsPayload,
+              denied_tools: deniedToolsPayload,
+            }),
+          });
+          let detail = "";
+          try {
+            const j = (await res.json()) as { detail?: string; error?: string };
+            if (!res.ok) {
+              detail =
+                (typeof j?.detail === "string" && j.detail) ||
+                (typeof j?.error === "string" && j.error) ||
+                "";
+            }
+          } catch {
+            /* ignore */
+          }
+          if (!res.ok) {
+            return { ok: false, error: detail || `HTTP ${res.status}` };
+          }
+          await fetchPerms();
+          return { ok: true };
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+    }),
+    [apiToken, resolveApiBase, pathRules, deniedCommands, deniedTools, fetchPerms],
+  );
+
+  /**
+   * 撤销一条「不再询问」。
+   *
+   * 两个地方跟原来不一样,都是为了不让「看起来撤销了」和「真的撤销了」分家:
+   *
+   * 1. **不先从界面删掉再异步写。** 乐观更新在别处只是显示抢跑,在这里是安全属性
+   *    抢跑:网络失败时用户看到规则没了,后端那条授权还在,而他不会再回来看一眼。
+   *    等后端确认,再由 ``fetchPerms`` 把新列表拉回来。
+   * 2. **走 DELETE 按值删,不再整表 PUT 回写。** 读改写在两个窗口下会互相覆盖,
+   *    撤销方向上的覆盖等于悄悄把授权还回去。追加走的是 POST,这里对称。
+   */
+  const revokeAllowedCommand = useCallback(
+    async (rule: AllowedCommandRule) => {
+      setBusy(true);
+      try {
+        const headers: Record<string, string> = {};
+        if (apiToken) headers["x-agx-desktop-token"] = apiToken;
+        const base = await resolveApiBase();
+        const query = new URLSearchParams({ pattern: rule.pattern });
+        if (rule.workspace) query.set("workspace", rule.workspace);
+        const res = await fetch(
+          `${base}/api/permissions/allowed_commands?${query.toString()}`,
+          { method: "DELETE", headers },
+        );
+        if (!res.ok) {
+          setSaveError(`撤销失败：HTTP ${res.status}（这条批准仍然有效）`);
+        } else {
+          setSaveError("");
+        }
+      } catch (e) {
+        setSaveError(
+          `撤销失败：${e instanceof Error ? e.message : String(e)}（这条批准仍然有效）`,
+        );
+      } finally {
+        setBusy(false);
+        await fetchPerms();
+      }
+    },
+    [apiToken, resolveApiBase, fetchPerms],
+  );
+
+  if (loading) return null;
+
+  return (
+    <>
+      {saveError ? (
+        <div
+          role="alert"
+          className="mb-2 rounded-md border border-status-error/40 bg-status-error/10 px-3 py-2 text-xs leading-5 text-status-error"
+        >
+          {saveError}
+        </div>
+      ) : null}
+      <Panel title="已保存的批准">
+        <div className="mb-2 text-xs leading-5 text-text-faint">
+          你在确认框里选过「以后都不再问这条命令」的规则。只对完全相同的命令生效，
+          并限定在当时的工作区内；删掉之后下次再遇到会重新询问。
+        </div>
+        {allowedCommands.length === 0 ? (
+          <div className="rounded-md border border-dashed border-border px-3 py-3 text-center text-[11px] text-text-faint">
+            还没有保存过任何批准
+          </div>
+        ) : (
+          <div className="space-y-1.5">
+            {allowedCommands.map((rule, idx) => (
+              <div
+                key={`ac-${idx}-${rule.pattern}`}
+                className="flex items-start gap-2 rounded-md border border-border bg-surface-panel px-2.5 py-2"
+              >
+                <div className="min-w-0 flex-1">
+                  <code className="block break-all font-mono text-xs text-text-primary">
+                    {rule.pattern}
+                  </code>
+                  <div className="mt-1 text-[11px] leading-4 text-text-faint">
+                    {rule.workspace ? (
+                      <>
+                        完全相同的命令，且只在 <code className="break-all">{rule.workspace}</code> 及其子目录内
+                      </>
+                    ) : (
+                      <span className="text-status-warning">
+                        手写的模式规则：按通配符匹配，且对所有工作区生效
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                  disabled={busy}
+                  title="撤销这条批准"
+                  aria-label={`撤销批准 ${rule.pattern}`}
+                  onClick={() => void revokeAllowedCommand(rule)}
+                >
+                  <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel title="路径权限规则">
+        <div className="space-y-1 text-xs leading-5 text-text-faint mb-2">
+          <p>
+            按 glob 模式匹配文件路径，例如 <code className="text-text-subtle">*/.env</code>。
+            只要命中任意一条<strong className="text-text-primary">拒绝</strong>就拒绝，与规则顺序无关；
+            没命中拒绝时，按顺序取第一条允许。
+          </p>
+          <p>
+            拒绝规则由操作系统沙箱执行，Shell 里的 <code className="text-text-subtle">rm</code> /
+            <code className="text-text-subtle">cp</code> / <code className="text-text-subtle">mv</code>
+            也一样挡得住。单次授权「主机完全访问」的命令不受这些规则约束，确认框里会写明。
+            {pathRulesEnforcement === "partial" ? (
+              <span className="text-text-subtle">
+                {" "}
+                （本系统上，命令运行过程中新建的同名文件不在拦截范围内。）
+              </span>
+            ) : pathRulesEnforcement === "none" ? (
+              <span className="text-status-warning">
+                {" "}
+                本系统上没有可用的沙箱后端，拒绝规则只对读写文件的工具生效，Shell 命令不受约束。
+              </span>
+            ) : null}
+          </p>
+          {shellReadIsolation === "full" ? (
+            <p>
+              <strong className="text-text-primary">读和写一起拒</strong>：命中拒绝规则的路径，
+              <code className="text-text-subtle">cat</code> / <code className="text-text-subtle">rg</code>{" "}
+              也读不到。本机上 Shell 的读取还被整体限制在工作区、你显式挂进来的只读引用、
+              临时目录和工具链目录之内——工作区外的文件读不到。
+            </p>
+          ) : (
+            <p className="text-status-warning">
+              本系统上拒绝的只是<strong>写入</strong>。读文件 / 编辑文件这些工具会按规则整个拒绝，
+              但 Shell 里的读取不受约束——<code>cat</code> / <code>rg</code> 仍然读得到被拒绝的
+              路径，工作区外的文件也读得到。（读取隔离目前只在 macOS 与 Linux 上实现。）
+            </p>
+          )}
+          <p>
+            允许规则的作用是<strong className="text-text-primary">免去逐次确认</strong>，
+            不会放开工作区边界——一条写成 <code className="text-text-subtle">/**</code> 的允许规则
+            也不能让命令写到工作区外面去。
+          </p>
+        </div>
+        <div className="space-y-1.5">
+          {pathRules.map((rule, idx) => (
+            <div key={`pr-${idx}`} className="flex gap-2 items-center">
+              <input
+                className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1 text-sm font-mono"
+                value={rule.pattern}
+                placeholder="/etc/*"
+                disabled={busy}
+                onChange={(e) => {
+                  const next = pathRules.map((r, i) => (i === idx ? { ...r, pattern: e.target.value } : r));
+                  setPathRules(next);
+                }}
+                onBlur={() => void persist({ path_rules: pathRules })}
+              />
+              <select
+                className="rounded-md border border-border bg-surface-panel px-1.5 py-1 text-xs"
+                value={rule.allow ? "allow" : "deny"}
+                disabled={busy}
+                onChange={(e) => {
+                  const next = pathRules.map((r, i) =>
+                    i === idx ? { ...r, allow: e.target.value === "allow" } : r,
+                  );
+                  setPathRules(next);
+                  void persist({ path_rules: next });
+                }}
+              >
+                <option value="allow">允许</option>
+                <option value="deny">拒绝</option>
+              </select>
+              <button
+                type="button"
+                className="shrink-0 rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                disabled={busy}
+                onClick={() => {
+                  const next = pathRules.filter((_, i) => i !== idx);
+                  setPathRules(next);
+                  void persist({ path_rules: next });
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+            disabled={busy}
+            onClick={() => setPathRules((prev) => [...prev, { pattern: "", allow: false }])}
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden />
+            添加路径规则
+          </button>
+        </div>
+      </Panel>
+
+      <Panel title="命令拒绝列表">
+        <div className="text-xs text-text-faint mb-2">
+          fnmatch 模式匹配，命中的 shell 命令将被阻止执行。
+        </div>
+        <div className="space-y-1.5">
+          {deniedCommands.map((cmd, idx) => (
+            <div key={`dc-${idx}`} className="flex gap-2">
+              <input
+                className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1 text-sm font-mono"
+                value={cmd}
+                placeholder="rm -rf *"
+                disabled={busy}
+                onChange={(e) => {
+                  const next = deniedCommands.map((c, i) => (i === idx ? e.target.value : c));
+                  setDeniedCommands(next);
+                }}
+                onBlur={() => void persist({ denied_commands: deniedCommands })}
+              />
+              <button
+                type="button"
+                className="shrink-0 rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                disabled={busy}
+                onClick={() => {
+                  const next = deniedCommands.filter((_, i) => i !== idx);
+                  setDeniedCommands(next);
+                  void persist({ denied_commands: next });
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+            disabled={busy}
+            onClick={() => setDeniedCommands((prev) => [...prev, ""])}
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden />
+            添加命令模式
+          </button>
+        </div>
+      </Panel>
+
+      <Panel title="工具拒绝列表">
+        <div className="text-xs text-text-faint mb-2">
+          按 Studio 工具名做 fnmatch（例如 <code className="text-text-subtle">bash_exec</code>、
+          <code className="text-text-subtle">mcp_call</code>、<code className="text-text-subtle">file_*</code>
+          ）。命中后<strong className="text-text-primary">直接拒绝</strong>该工具调用，且<strong className="text-text-primary">不会</strong>再弹出执行确认（策略优先于询问）。
+          工具名与<strong className="text-text-primary">设置 → 工具</strong>页预授权列表一致；亦可到该页查看说明。
+        </div>
+        {registryTools.length > 0 ? (
+          <details className="mb-3 rounded-md border border-border bg-surface-panel px-2 py-1.5">
+            <summary className="cursor-pointer text-xs font-medium text-text-primary">
+              从已注册工具插入（共 {registryTools.length} 个）
+            </summary>
+            <div className="mt-2 space-y-2">
+              <input
+                type="search"
+                className="w-full rounded-md border border-border bg-surface-card px-2 py-1 text-xs text-text-primary placeholder:text-text-faint"
+                placeholder="筛选工具名或描述…"
+                value={toolInsertFilter}
+                disabled={busy}
+                onChange={(e) => setToolInsertFilter(e.target.value)}
+                aria-label="筛选工具列表"
+              />
+              <div className="max-h-40 overflow-y-auto rounded border border-[var(--border-muted)] bg-surface-card p-1.5">
+                <div className="flex flex-wrap gap-1">
+                  {filteredRegistryTools.map((t) => (
+                    <button
+                      key={t.name}
+                      type="button"
+                      disabled={busy}
+                      title={t.description ? `${t.description.slice(0, 400)}` : t.name}
+                      className="rounded border border-border bg-surface-panel px-1.5 py-0.5 font-mono text-[11px] text-text-primary transition hover:bg-surface-hover hover:border-text-subtle disabled:opacity-40"
+                      onClick={() => appendDeniedTool(t.name)}
+                    >
+                      {t.name}
+                      {t.is_meta ? (
+                        <span className="ml-0.5 text-[9px] text-amber-400/90">meta</span>
+                      ) : null}
+                    </button>
+                  ))}
+                </div>
+                {filteredRegistryTools.length === 0 ? (
+                  <div className="py-2 text-center text-[11px] text-text-faint">无匹配项，清空筛选试试</div>
+                ) : null}
+              </div>
+            </div>
+          </details>
+        ) : (
+          <div className="mb-2 text-[11px] text-status-warning">
+            未能加载工具注册表（需后端在线）。仍可手动输入工具名；完整列表见设置 → 工具页。
+          </div>
+        )}
+        <datalist id="agx-studio-tool-names-datalist">
+          {registryTools.map((t) => (
+            <option key={t.name} value={t.name}>
+              {(t.description ?? "").slice(0, 80)}
+            </option>
+          ))}
+        </datalist>
+        <div className="space-y-1.5">
+          {deniedTools.map((toolPat, idx) => (
+            <div key={`dt-${idx}`} className="flex gap-2">
+              <input
+                className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1 text-sm font-mono"
+                value={toolPat}
+                placeholder="bash_exec"
+                list="agx-studio-tool-names-datalist"
+                autoComplete="off"
+                disabled={busy}
+                onChange={(e) => {
+                  const next = deniedTools.map((t, i) => (i === idx ? e.target.value : t));
+                  setDeniedTools(next);
+                }}
+                onBlur={() => void persist({ denied_tools: deniedTools })}
+              />
+              <button
+                type="button"
+                className="shrink-0 rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                disabled={busy}
+                onClick={() => {
+                  const next = deniedTools.filter((_, i) => i !== idx);
+                  setDeniedTools(next);
+                  void persist({ denied_tools: next });
+                }}
+              >
+                <Trash2 className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+            disabled={busy}
+            onClick={() => setDeniedTools((prev) => [...prev, ""])}
+          >
+            <Plus className="h-3.5 w-3.5" aria-hidden />
+            添加工具模式
+          </button>
+        </div>
+      </Panel>
+    </>
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Tools Tab
+// ---------------------------------------------------------------------------
+
+/** 与 `GET/PUT /api/tools/policy` 的 tools_options 字段对齐（仅含 UI 用到的键）。 */
+type StudioToolsOptions = {
+  bash_exec?: { default_timeout_sec?: number };
+};
+
+/** 预授权工具卡片下展示「高级设置」白名单（与后端 tools_options 白名单对齐）。 */
+const ADVANCED_TOOL_POLICY_NAMES = new Set<string>(["bash_exec"]);
+const BASH_DEFAULT_TIMEOUT_MIN = 30;
+const BASH_DEFAULT_TIMEOUT_MAX = 3600;
+
+type CcBridgePanelHandle = {
+  save: () => Promise<{ ok: boolean; error?: string }>;
+};
+
+type ToolsTabHandle = {
+  /** 持久化工具页内待提交的项（bash 默认超时 + 最大工具轮数 + CC Bridge 配置）。 */
+  saveAll: () => Promise<{ ok: boolean; error?: string }>;
+};
+
+const CcBridgeSettingsPanel = forwardRef<CcBridgePanelHandle>(
+  function CcBridgeSettingsPanel(_props, ref) {
+  const apiToken = useAppStore((s) => s.apiToken);
+  const apiBase = useAppStore((s) => s.apiBase);
+  const [url, setUrl] = useState("");
+  const [token, setToken] = useState("");
+  const [mode, setMode] = useState<"headless" | "visible_tui">("headless");
+  const [showToken, setShowToken] = useState(false);
+  const [idleStopSeconds, setIdleStopSeconds] = useState("600");
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+
+  const authHeaders = useCallback((): Record<string, string> => {
+    const h: Record<string, string> = {};
+    if (apiToken) h["x-agx-desktop-token"] = apiToken;
+    return h;
+  }, [apiToken]);
+
+  const parseJsonOrError = useCallback(async (res: Response): Promise<any> => {
+    const text = await res.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      const short = text.slice(0, 120).replace(/\s+/g, " ");
+      throw new Error(
+        `后端返回非 JSON（可能是 API 地址不正确或未连到 agx serve）：HTTP ${res.status}，响应片段：${short}`,
+      );
+    }
+  }, []);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setMsg("");
+    try {
+      const token = apiToken || (await window.agenticxDesktop.getApiAuthToken()) || "";
+      const effectiveBase = apiBase || (await window.agenticxDesktop.getApiBase());
+      const headers: Record<string, string> = {};
+      if (token) headers["x-agx-desktop-token"] = token;
+      const res = await fetch(`${effectiveBase}/api/cc-bridge/config`, { headers });
+      const data = (await parseJsonOrError(res)) as {
+        ok?: boolean;
+        url?: string;
+        token?: string;
+        idle_stop_seconds?: number;
+        mode?: string;
+        mode_effective?: string;
+        mode_env_override?: string;
+        error?: string;
+      };
+      if (data.ok) {
+        setUrl((data.url || "http://127.0.0.1:9742").trim());
+        setToken(data.token || "");
+        const m = (data.mode || "headless").toLowerCase();
+        setMode(m === "visible_tui" ? "visible_tui" : "headless");
+        const effective = String(data.mode_effective || "").toLowerCase();
+        const envOverride = String(data.mode_env_override || "").trim();
+        if (effective && effective !== m && envOverride) {
+          setMsg(`检测到环境变量覆盖：AGX_CC_BRIDGE_MODE=${envOverride}（当前生效模式：${effective}）`);
+        }
+        const idle = Number.isFinite(data.idle_stop_seconds as number)
+          ? Math.max(0, Math.min(86400, Math.round(Number(data.idle_stop_seconds))))
+          : 600;
+        setIdleStopSeconds(String(idle));
+      } else {
+        setMsg(data.error || "加载失败");
+      }
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [apiToken, apiBase, parseJsonOrError]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async save() {
+        if (loading) {
+          return { ok: false, error: "Bridge 配置仍在加载，请稍后再点窗口底部「退出」。" };
+        }
+        setBusy(true);
+        setMsg("");
+        try {
+          const tokenHeader = apiToken || (await window.agenticxDesktop.getApiAuthToken()) || "";
+          const effectiveBase = apiBase || (await window.agenticxDesktop.getApiBase());
+          const headers: Record<string, string> = { "Content-Type": "application/json" };
+          if (tokenHeader) headers["x-agx-desktop-token"] = tokenHeader;
+          const res = await fetch(`${effectiveBase}/api/cc-bridge/config`, {
+            method: "PUT",
+            headers,
+            body: JSON.stringify({
+              url: url.trim(),
+              token,
+              mode,
+              idle_stop_seconds: Math.max(0, Math.min(86400, parseInt(idleStopSeconds || "600", 10) || 600)),
+            }),
+          });
+          const data = (await parseJsonOrError(res)) as {
+            ok?: boolean;
+            url?: string;
+            token?: string;
+            idle_stop_seconds?: number;
+            mode?: string;
+            mode_effective?: string;
+            mode_env_override?: string;
+            detail?: unknown;
+          };
+          if (data.ok) {
+            setUrl((data.url || url).trim());
+            setToken(data.token || token);
+            const m = (data.mode || mode).toLowerCase();
+            setMode(m === "visible_tui" ? "visible_tui" : "headless");
+            const effective = String(data.mode_effective || "").toLowerCase();
+            const envOverride = String(data.mode_env_override || "").trim();
+            const idle = Number.isFinite(data.idle_stop_seconds as number)
+              ? Math.max(0, Math.min(86400, Math.round(Number(data.idle_stop_seconds))))
+              : 600;
+            setIdleStopSeconds(String(idle));
+            const hint =
+              effective && effective !== m && envOverride
+                ? `已保存（但当前被 AGX_CC_BRIDGE_MODE=${envOverride} 覆盖，生效模式：${effective}）`
+                : "已保存";
+            setMsg(hint);
+            return { ok: true };
+          }
+          const d = data.detail;
+          const errText = typeof d === "string" ? d : d != null ? JSON.stringify(d) : "保存失败";
+          setMsg(errText);
+          return { ok: false, error: errText };
+        } catch (e) {
+          const errText = String(e);
+          setMsg(errText);
+          return { ok: false, error: errText };
+        } finally {
+          setBusy(false);
+        }
+      },
+    }),
+    [apiToken, apiBase, idleStopSeconds, loading, mode, parseJsonOrError, token, url],
+  );
+
+  const regen = async () => {
+    setBusy(true);
+    setMsg("");
+    try {
+      const tokenHeader = apiToken || (await window.agenticxDesktop.getApiAuthToken()) || "";
+      const effectiveBase = apiBase || (await window.agenticxDesktop.getApiBase());
+      const headers: Record<string, string> = {};
+      if (tokenHeader) headers["x-agx-desktop-token"] = tokenHeader;
+      const res = await fetch(`${effectiveBase}/api/cc-bridge/token/regenerate`, {
+        method: "POST",
+        headers,
+      });
+      const data = (await parseJsonOrError(res)) as { ok?: boolean; token?: string; detail?: unknown };
+      if (data.ok && data.token) {
+        setToken(data.token);
+        setMsg("已重新生成 token。请重启本机 `agx cc-bridge serve`（或下次启动 bridge）以使用相同 token。");
+      } else {
+        const d = data.detail;
+        setMsg(typeof d === "string" ? d : d != null ? JSON.stringify(d) : "重新生成失败");
+      }
+    } catch (e) {
+      setMsg(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Panel title="Claude Code 本机 Bridge">
+        <div className="py-4 text-center text-xs text-text-faint">加载中…</div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel title="Claude Code 本机 Bridge">
+      <div className="mb-2 space-y-1 text-xs text-text-subtle">
+        <p>
+          与终端中运行的 <code className="rounded bg-surface-panel px-0.5">agx cc-bridge serve</code>{" "}
+          通信。首次使用会在本机配置中自动生成 token（与{APP_DISPLAY_NAME}工具 <code className="rounded bg-surface-panel px-0.5">cc_bridge_*</code>{" "}
+          一致）。
+        </p>
+        <p className="text-text-faint">
+          方式 B：先 <code className="rounded bg-surface-panel px-0.5">cc_bridge_start</code>，再{" "}
+          <code className="rounded bg-surface-panel px-0.5">cc_bridge_send</code>；完成后用{" "}
+          <code className="rounded bg-surface-panel px-0.5">test -f</code> / file_read 验收落盘。
+        </p>
+      </div>
+      <div className="space-y-2">
+        <div>
+          <span className="mb-0.5 block text-[11px] font-medium text-text-muted">运行模式</span>
+          <div className="flex flex-wrap gap-3 text-xs text-text-subtle">
+            <label className="inline-flex cursor-pointer items-center gap-1.5">
+              <input
+                type="radio"
+                name="cc-bridge-mode"
+                checked={mode === "headless"}
+                disabled={busy}
+                onChange={() => setMode("headless")}
+              />
+              Headless（stream-json，稳定）
+            </label>
+            <label className="inline-flex cursor-pointer items-center gap-1.5">
+              <input
+                type="radio"
+                name="cc-bridge-mode"
+                checked={mode === "visible_tui"}
+                disabled={busy}
+                onChange={() => setMode("visible_tui")}
+              />
+              Visible TUI（交互界面，日志解析回填）
+            </label>
+          </div>
+        </div>
+        <div>
+          <label className="mb-0.5 block text-[11px] font-medium text-text-muted" htmlFor="cc-bridge-url">
+            Bridge URL
+          </label>
+          <input
+            id="cc-bridge-url"
+            type="text"
+            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1 text-xs text-text-primary"
+            value={url}
+            disabled={busy}
+            onChange={(e) => setUrl(e.target.value)}
+            placeholder="http://127.0.0.1:9742"
+          />
+        </div>
+        <div>
+          <div className="mb-0.5 flex items-center justify-between gap-2">
+            <label className="text-[11px] font-medium text-text-muted" htmlFor="cc-bridge-token">
+              Bearer token
+            </label>
+            <button
+              type="button"
+              className="text-[10px] text-text-subtle underline hover:text-text-primary"
+              onClick={() => setShowToken((v) => !v)}
+            >
+              {showToken ? "隐藏" : "显示"}
+            </button>
+          </div>
+          <input
+            id="cc-bridge-token"
+            type={showToken ? "text" : "password"}
+            autoComplete="off"
+            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1 font-mono text-xs text-text-primary"
+            value={token}
+            disabled={busy}
+            onChange={(e) => setToken(e.target.value)}
+          />
+        </div>
+        <div>
+          <label className="mb-0.5 block text-[11px] font-medium text-text-muted" htmlFor="cc-bridge-idle-seconds">
+            空闲自动停止（秒，0=关闭）
+          </label>
+          <input
+            id="cc-bridge-idle-seconds"
+            type="text"
+            inputMode="numeric"
+            autoComplete="off"
+            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1 text-xs text-text-primary"
+            value={idleStopSeconds}
+            disabled={busy}
+            onChange={(e) => setIdleStopSeconds(e.target.value.replace(/\D/g, "").slice(0, 5))}
+          />
+        </div>
+        <p className="text-[11px] text-text-faint">
+          运行模式、URL、token、空闲时间修改后，请点击窗口底部「退出」与「工具」页其它项一并写入本机配置。
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            className="rounded-md border border-border px-2.5 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-amber-200 disabled:opacity-40"
+            disabled={busy}
+            onClick={() => void regen()}
+          >
+            重新生成 token
+          </button>
+          <button
+            type="button"
+            className="rounded-md border border-border px-2.5 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+            disabled={busy}
+            onClick={() => void load()}
+          >
+            重新加载
+          </button>
+        </div>
+        {msg ? <div className="text-xs text-text-subtle">{msg}</div> : null}
+      </div>
+    </Panel>
+  );
+});
+
+const ToolsTab = forwardRef<ToolsTabHandle>(function ToolsTab(_props, ref) {
+  const ccBridgePanelRef = useRef<CcBridgePanelHandle>(null);
+  const [registry, setRegistry] = useState<RegistryTool[]>([]);
+  const [policy, setPolicy] = useState<Record<string, boolean>>({});
+  const [toolsOptions, setToolsOptions] = useState<StudioToolsOptions>({});
+  const [advOpenByTool, setAdvOpenByTool] = useState<Record<string, boolean>>({});
+  /** 用字符串受控，避免 type=number + 每键 Number() 导致前导 0 与「0600」类显示问题 */
+  const [bashTimeoutInput, setBashTimeoutInput] = useState("30");
+  const [envTools, setEnvTools] = useState<ToolStatusItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [installing, setInstalling] = useState<Record<string, ToolInstallState>>({});
+  const [search, setSearch] = useState("");
+  const [maxToolRounds, setMaxToolRounds] = useState(60);
+  const [maxTaskspaces, setMaxTaskspaces] = useState(RUNTIME_DEFAULT_TASKSPACES);
+  const [toolSearchMode, setToolSearchMode] = useState<"off" | "auto" | "always">("off");
+  const [toolSearchThreshold, setToolSearchThreshold] = useState(6000);
+  const [toolSearchStrategy, setToolSearchStrategy] = useState<"adaptive" | "manual">("adaptive");
+  const [toolSearchRatioPercent, setToolSearchRatioPercent] = useState(5);
+  const [toolSearchPersistError, setToolSearchPersistError] = useState("");
+  const [stallNudge, setStallNudge] = useState<StallNudgeConfig>({
+    stall_detect_silence_seconds: 90,
+    stall_auto_nudge_enabled: false,
+    stall_auto_nudge_after_seconds: 120,
+    stall_auto_nudge_max_per_session: 2,
+    llm_stall_patience_enabled: true,
+    llm_stall_patience_max_attempts: 3,
+    llm_stall_patience_budget_seconds: 900,
+  });
+  const [unattended, setUnattended] = useState<UnattendedConfig>({
+    unattended_enabled: false,
+    unattended_max_continuations_per_session: 20,
+    unattended_max_wall_clock_hours: 6,
+    unattended_stall_continue_after_seconds: 120,
+    unattended_auto_resume_exhausted: true,
+    unattended_auto_resume_interrupted: true,
+  });
+  const [tokenBudget, setTokenBudget] = useState<TokenBudgetConfig>(
+    normalizeTokenBudgetConfig(undefined),
+  );
+  const [runtimeLoadError, setRuntimeLoadError] = useState("");
+  const toolSearchThresholdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const persistToolSearchConfig = useCallback(
+    async (
+      mode: "off" | "auto" | "always",
+      threshold: number,
+      strategy: "adaptive" | "manual",
+      ratioPercent: number,
+    ) => {
+      try {
+        const rtRes = await window.agenticxDesktop.saveRuntimeConfig({
+          tool_search_mode: mode,
+          tool_search_auto_schema_token_threshold: threshold,
+          tool_search_threshold_strategy: strategy,
+          tool_search_context_budget_ratio: Math.max(0.01, Math.min(0.25, ratioPercent / 100)),
+        });
+        if (!rtRes?.ok) {
+          setToolSearchPersistError(
+            rtRes?.error ? String(rtRes.error) : "工具按需加载配置写入失败",
+          );
+          return false;
+        }
+        setToolSearchPersistError("");
+        return true;
+      } catch (err) {
+        setToolSearchPersistError(err instanceof Error ? err.message : String(err));
+        return false;
+      }
+    },
+    [],
+  );
+
+  const handleToolSearchModeChange = useCallback(
+    (mode: "off" | "auto" | "always") => {
+      setToolSearchMode(mode);
+      void persistToolSearchConfig(mode, toolSearchThreshold, toolSearchStrategy, toolSearchRatioPercent);
+    },
+    [persistToolSearchConfig, toolSearchThreshold, toolSearchStrategy, toolSearchRatioPercent],
+  );
+
+  const handleToolSearchStrategyChange = useCallback(
+    (strategy: "adaptive" | "manual") => {
+      setToolSearchStrategy(strategy);
+      void persistToolSearchConfig(toolSearchMode, toolSearchThreshold, strategy, toolSearchRatioPercent);
+    },
+    [persistToolSearchConfig, toolSearchMode, toolSearchThreshold, toolSearchRatioPercent],
+  );
+
+  const handleToolSearchThresholdChange = useCallback(
+    (threshold: number) => {
+      setToolSearchThreshold(threshold);
+      if (toolSearchThresholdTimerRef.current) {
+        clearTimeout(toolSearchThresholdTimerRef.current);
+      }
+      toolSearchThresholdTimerRef.current = setTimeout(() => {
+        void persistToolSearchConfig(
+          toolSearchMode,
+          threshold,
+          toolSearchStrategy,
+          toolSearchRatioPercent,
+        );
+      }, 350);
+    },
+    [persistToolSearchConfig, toolSearchMode, toolSearchStrategy, toolSearchRatioPercent],
+  );
+
+  const handleToolSearchRatioPercentChange = useCallback(
+    (percent: number) => {
+      setToolSearchRatioPercent(percent);
+      if (toolSearchThresholdTimerRef.current) {
+        clearTimeout(toolSearchThresholdTimerRef.current);
+      }
+      toolSearchThresholdTimerRef.current = setTimeout(() => {
+        void persistToolSearchConfig(
+          toolSearchMode,
+          toolSearchThreshold,
+          toolSearchStrategy,
+          percent,
+        );
+      }, 350);
+    },
+    [persistToolSearchConfig, toolSearchMode, toolSearchThreshold, toolSearchStrategy],
+  );
+
+  useEffect(() => {
+    return () => {
+      if (toolSearchThresholdTimerRef.current) {
+        clearTimeout(toolSearchThresholdTimerRef.current);
+      }
+    };
+  }, []);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    setRuntimeLoadError("");
+    try {
+      const [regResult, policyResult, statusResult, runtimeResult] = await Promise.all([
+        window.agenticxDesktop.getToolsRegistry(),
+        window.agenticxDesktop.getToolsPolicy(),
+        window.agenticxDesktop.getToolsStatus(),
+        window.agenticxDesktop.loadRuntimeConfig().catch(() => ({ ok: false as const })),
+      ]);
+      if (regResult?.ok) setRegistry(Array.isArray(regResult.tools) ? regResult.tools : []);
+      else setError(regResult?.error ?? "加载工具注册表失败");
+      if (policyResult?.ok) {
+        setPolicy(policyResult.tools_enabled ?? {});
+        const opts = policyResult.tools_options ?? {};
+        setToolsOptions(opts);
+        const d = opts.bash_exec?.default_timeout_sec;
+        const n =
+          typeof d === "number" && Number.isFinite(d)
+            ? Math.max(BASH_DEFAULT_TIMEOUT_MIN, Math.min(BASH_DEFAULT_TIMEOUT_MAX, Math.round(d)))
+            : 30;
+        setBashTimeoutInput(String(n));
+      }
+      if (statusResult?.ok) setEnvTools(Array.isArray(statusResult.tools) ? statusResult.tools : []);
+      if (runtimeResult?.ok) {
+        const raw = Number(runtimeResult.max_tool_rounds);
+        const n = Number.isFinite(raw) ? raw : 60;
+        setMaxToolRounds(
+          Math.max(RUNTIME_MIN_TOOL_ROUNDS, Math.min(RUNTIME_MAX_TOOL_ROUNDS, n)),
+        );
+        const taskspacesRaw = Number(runtimeResult.max_taskspaces);
+        const taskspacesN = Number.isFinite(taskspacesRaw) ? taskspacesRaw : RUNTIME_DEFAULT_TASKSPACES;
+        setMaxTaskspaces(
+          Math.max(RUNTIME_MIN_TASKSPACES, Math.min(RUNTIME_MAX_TASKSPACES, taskspacesN)),
+        );
+        const tsMode = String(runtimeResult.tool_search_mode ?? "off").trim().toLowerCase();
+        setToolSearchMode(
+          tsMode === "auto" || tsMode === "always" || tsMode === "off" ? tsMode : "off",
+        );
+        const tsThreshold = Number(runtimeResult.tool_search_auto_schema_token_threshold ?? 6000);
+        setToolSearchThreshold(
+          Number.isFinite(tsThreshold)
+            ? Math.max(1000, Math.min(50000, Math.round(tsThreshold)))
+            : 6000,
+        );
+        const tsStrategy = String(runtimeResult.tool_search_threshold_strategy ?? "adaptive")
+          .trim()
+          .toLowerCase();
+        setToolSearchStrategy(tsStrategy === "manual" ? "manual" : "adaptive");
+        const tsRatio = Number(runtimeResult.tool_search_context_budget_ratio ?? 0.05);
+        setToolSearchRatioPercent(
+          Number.isFinite(tsRatio)
+            ? Math.max(1, Math.min(25, Math.round(tsRatio * 1000) / 10))
+            : 5,
+        );
+        const detectSec = Math.max(
+          30,
+          Math.min(300, Number(runtimeResult.stall_detect_silence_seconds ?? 90) || 90),
+        );
+        let afterSec = Math.max(
+          60,
+          Math.min(300, Number(runtimeResult.stall_auto_nudge_after_seconds ?? 120) || 120),
+        );
+        if (afterSec < detectSec) afterSec = detectSec;
+        setStallNudge({
+          stall_detect_silence_seconds: detectSec,
+          stall_auto_nudge_enabled: Boolean(runtimeResult.stall_auto_nudge_enabled),
+          stall_auto_nudge_after_seconds: afterSec,
+          stall_auto_nudge_max_per_session: Math.max(
+            1,
+            Math.min(5, Number(runtimeResult.stall_auto_nudge_max_per_session ?? 2) || 2),
+          ),
+          llm_stall_patience_enabled: Boolean(runtimeResult.llm_stall_patience_enabled ?? true),
+          llm_stall_patience_max_attempts: Math.max(
+            1,
+            Math.min(10, Number(runtimeResult.llm_stall_patience_max_attempts ?? 3) || 3),
+          ),
+          llm_stall_patience_budget_seconds: Math.max(
+            60,
+            Math.min(3600, Number(runtimeResult.llm_stall_patience_budget_seconds ?? 900) || 900),
+          ),
+        });
+        setUnattended({
+          unattended_enabled: Boolean(runtimeResult.unattended_enabled),
+          unattended_max_continuations_per_session: Math.max(
+            1,
+            Math.min(
+              100,
+              Number(runtimeResult.unattended_max_continuations_per_session ?? 20) || 20,
+            ),
+          ),
+          unattended_max_wall_clock_hours: Math.max(
+            0.5,
+            Math.min(48, Number(runtimeResult.unattended_max_wall_clock_hours ?? 6) || 6),
+          ),
+          unattended_stall_continue_after_seconds: Math.max(
+            30,
+            Math.min(
+              600,
+              Number(runtimeResult.unattended_stall_continue_after_seconds ?? 120) || 120,
+            ),
+          ),
+          unattended_auto_resume_exhausted: Boolean(
+            runtimeResult.unattended_auto_resume_exhausted ?? true,
+          ),
+          unattended_auto_resume_interrupted: Boolean(
+            runtimeResult.unattended_auto_resume_interrupted ?? true,
+          ),
+        });
+        setTokenBudget(
+          normalizeTokenBudgetConfig({
+            max_tokens_per_session: Number(runtimeResult.max_tokens_per_session),
+            max_tokens_per_turn: Number(runtimeResult.max_tokens_per_turn),
+          }),
+        );
+      } else {
+        setRuntimeLoadError("读取运行时参数失败，仍可按当前滑块值保存。");
+      }
+    } catch (err) {
+      setError(String(err));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { void loadAll(); }, [loadAll]);
+
+  useEffect(() => {
+    const dispose = window.agenticxDesktop.onToolInstallProgress((event) => {
+      setInstalling((prev) => {
+        const targetToolId =
+          event.tool_id ||
+          Object.keys(prev).find((key) => prev[key].requestId === event.requestId) ||
+          "";
+        if (!targetToolId) return prev;
+        const current = prev[targetToolId];
+        if (!current || current.requestId !== event.requestId) return prev;
+        const next: ToolInstallState = {
+          ...current,
+          percent: Number.isFinite(event.percent) ? event.percent : current.percent,
+          phase: event.phase || current.phase,
+          message: event.message || current.message,
+          error: event.phase === "error" ? event.message || "安装失败" : undefined,
+        };
+        return { ...prev, [targetToolId]: next };
+      });
+      if (event.phase === "done") void loadAll();
+    });
+    return dispose;
+  }, [loadAll]);
+
+  const toggleTool = useCallback(async (toolName: string, enabled: boolean) => {
+    const next = { ...policy, [toolName]: enabled };
+    setPolicy(next);
+    await window.agenticxDesktop.saveToolsPolicy({ tools_enabled: next });
+  }, [policy]);
+
+  const saveBashDefaultTimeout = useCallback(async () => {
+    const trimmed = bashTimeoutInput.trim();
+    let sec = trimmed === "" ? BASH_DEFAULT_TIMEOUT_MIN : parseInt(trimmed, 10);
+    if (!Number.isFinite(sec)) sec = BASH_DEFAULT_TIMEOUT_MIN;
+    sec = Math.max(BASH_DEFAULT_TIMEOUT_MIN, Math.min(BASH_DEFAULT_TIMEOUT_MAX, sec));
+    setBashTimeoutInput(String(sec));
+    const nextOpts: StudioToolsOptions = {
+      ...toolsOptions,
+      bash_exec: { default_timeout_sec: sec },
+    };
+    setToolsOptions(nextOpts);
+    const res = await window.agenticxDesktop.saveToolsPolicy({
+      tools_enabled: policy,
+      tools_options: nextOpts,
+    });
+    if (res?.ok && res.tools_options?.bash_exec?.default_timeout_sec != null) {
+      const synced = res.tools_options.bash_exec.default_timeout_sec;
+      setBashTimeoutInput(String(synced));
+      setToolsOptions(res.tools_options);
+    }
+  }, [bashTimeoutInput, policy, toolsOptions]);
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      async saveAll() {
+        if (loading) {
+          return { ok: false, error: "工具列表仍在加载，请稍后再点窗口底部「退出」。" };
+        }
+        await saveBashDefaultTimeout();
+        let afterSec = stallNudge.stall_auto_nudge_after_seconds;
+        if (stallNudge.stall_auto_nudge_enabled && afterSec < stallNudge.stall_detect_silence_seconds) {
+          afterSec = stallNudge.stall_detect_silence_seconds;
+        }
+        const rtRes = await window.agenticxDesktop.saveRuntimeConfig({
+          max_tool_rounds: maxToolRounds,
+          max_taskspaces: maxTaskspaces,
+          tool_search_mode: toolSearchMode,
+          tool_search_auto_schema_token_threshold: toolSearchThreshold,
+          tool_search_threshold_strategy: toolSearchStrategy,
+          tool_search_context_budget_ratio: Math.max(
+            0.01,
+            Math.min(0.25, toolSearchRatioPercent / 100),
+          ),
+          stall_detect_silence_seconds: stallNudge.stall_detect_silence_seconds,
+          stall_auto_nudge_enabled: stallNudge.stall_auto_nudge_enabled,
+          stall_auto_nudge_after_seconds: afterSec,
+          stall_auto_nudge_max_per_session: stallNudge.stall_auto_nudge_max_per_session,
+          llm_stall_patience_enabled: stallNudge.llm_stall_patience_enabled,
+          llm_stall_patience_max_attempts: stallNudge.llm_stall_patience_max_attempts,
+          llm_stall_patience_budget_seconds: stallNudge.llm_stall_patience_budget_seconds,
+          unattended_enabled: unattended.unattended_enabled,
+          unattended_max_continuations_per_session: unattended.unattended_max_continuations_per_session,
+          unattended_max_wall_clock_hours: unattended.unattended_max_wall_clock_hours,
+          unattended_stall_continue_after_seconds: unattended.unattended_stall_continue_after_seconds,
+          unattended_auto_resume_exhausted: unattended.unattended_auto_resume_exhausted,
+          unattended_auto_resume_interrupted: unattended.unattended_auto_resume_interrupted,
+          max_tokens_per_session: tokenBudget.max_tokens_per_session,
+          max_tokens_per_turn: tokenBudget.max_tokens_per_turn,
+        });
+        if (!rtRes?.ok) {
+          return {
+            ok: false,
+            error: rtRes?.error ? String(rtRes.error) : "运行时参数保存失败",
+          };
+        }
+        const bridge = ccBridgePanelRef.current;
+        if (!bridge) {
+          return { ok: false, error: "Claude Code Bridge 区块未就绪，请稍后再试。" };
+        }
+        return bridge.save();
+      },
+    }),
+    [
+      loading,
+      maxToolRounds,
+      maxTaskspaces,
+      toolSearchMode,
+      toolSearchThreshold,
+      toolSearchStrategy,
+      toolSearchRatioPercent,
+      saveBashDefaultTimeout,
+      stallNudge,
+      tokenBudget,
+      unattended,
+    ],
+  );
+
+  const startInstall = async (tool: ToolStatusItem) => {
+    if (!tool.auto_installable) {
+      const command = tool.install_command || "请参考官方文档安装";
+      setInstalling((prev) => ({
+        ...prev,
+        [tool.id]: { requestId: `manual-${tool.id}`, percent: 0, phase: "manual_required", message: command },
+      }));
+      return;
+    }
+    const requestId = `${tool.id}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    setInstalling((prev) => ({
+      ...prev,
+      [tool.id]: { requestId, percent: 0, phase: "starting", message: `开始安装 ${tool.name}...` },
+    }));
+    const result = await window.agenticxDesktop.installTool({ requestId, toolId: tool.id });
+    if (!result?.ok) {
+      setInstalling((prev) => ({
+        ...prev,
+        [tool.id]: { requestId, percent: 0, phase: "error", message: result?.error || "安装失败", error: result?.error || "安装失败" },
+      }));
+    }
+  };
+
+  const grouped = useMemo(() => {
+    const q = search.toLowerCase().trim();
+    const filtered = q
+      ? registry.filter((t) => {
+          const descZh = toolDisplayDescription(t.name, t.description).toLowerCase();
+          return (
+            t.name.toLowerCase().includes(q) ||
+            (TOOL_LABELS[t.name] ?? "").toLowerCase().includes(q) ||
+            descZh.includes(q) ||
+            t.description.toLowerCase().includes(q) ||
+            (CATEGORY_LABELS[t.category] ?? "").toLowerCase().includes(q)
+          );
+        })
+      : registry;
+    const map = new Map<string, RegistryTool[]>();
+    for (const t of filtered) {
+      const cat = t.category || "other";
+      const arr = map.get(cat);
+      if (arr) arr.push(t);
+      else map.set(cat, [t]);
+    }
+    return CATEGORY_ORDER
+      .filter((cat) => map.has(cat))
+      .map((cat) => ({ category: cat, label: CATEGORY_LABELS[cat] ?? cat, tools: map.get(cat)! }));
+  }, [registry, search]);
+
+  if (loading) return <div className="py-8 text-center text-sm text-text-faint">加载工具状态中...</div>;
+
+  return (
+    <div className="space-y-4">
+      <div className="text-sm text-text-subtle">
+        管理 Agent 可调用工具的全局启停状态。关闭后 Agent 将无法调用该工具。
+      </div>
+      <div className="text-xs text-text-faint">
+        仅部分工具提供可折叠的「高级设置」；其余工具仅支持启用/停用。窗口底部「退出」会一并提交本页 bash 默认超时、最大工具轮数与 Claude Code Bridge 配置。
+      </div>
+      <RuntimeConfigSection
+        maxToolRounds={maxToolRounds}
+        onMaxToolRoundsChange={setMaxToolRounds}
+        maxTaskspaces={maxTaskspaces}
+        onMaxTaskspacesChange={setMaxTaskspaces}
+        disabled={loading}
+      />
+      <ToolSearchConfigSection
+        mode={toolSearchMode}
+        onModeChange={handleToolSearchModeChange}
+        threshold={toolSearchThreshold}
+        onThresholdChange={handleToolSearchThresholdChange}
+        thresholdStrategy={toolSearchStrategy}
+        onThresholdStrategyChange={handleToolSearchStrategyChange}
+        contextBudgetRatioPercent={toolSearchRatioPercent}
+        onContextBudgetRatioPercentChange={handleToolSearchRatioPercentChange}
+        disabled={loading}
+      />
+      <TokenBudgetConfigSection value={tokenBudget} onChange={setTokenBudget} disabled={loading} />
+      <StallNudgeConfigSection value={stallNudge} onChange={setStallNudge} disabled={loading} />
+      <UnattendedConfigSection value={unattended} onChange={setUnattended} disabled={loading} />
+      {toolSearchPersistError ? (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+          {toolSearchPersistError}
+        </div>
+      ) : null}
+      {runtimeLoadError ? (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+          {runtimeLoadError}
+        </div>
+      ) : null}
+      {error ? (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">{error}</div>
+      ) : null}
+
+      {/* ── 内建 Agent 工具 ── */}
+      <Panel title={`预授权工具 (${registry.length})`} collapsible defaultCollapsed>
+        <div className="mb-2 flex items-center gap-2">
+          <input
+            type="text"
+            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1 text-xs text-text-primary placeholder:text-text-faint"
+            placeholder="搜索工具..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="space-y-3">
+          {grouped.map(({ category, label, tools: catTools }) => (
+            <div key={category}>
+              <div className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-text-faint">{label}</div>
+              <div className="space-y-1">
+                {catTools.map((t) => {
+                  const enabled = policy[t.name] !== false;
+                  const autoAdded = !(t.name in policy) || policy[t.name] === true;
+                  const showAdvanced = ADVANCED_TOOL_POLICY_NAMES.has(t.name);
+                  const advOpen = Boolean(advOpenByTool[t.name]);
+                  return (
+                    <div
+                      key={t.name}
+                      className="flex items-start justify-between gap-2 rounded-md border border-border bg-surface-card px-3 py-2"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="text-sm font-medium text-text-primary">{TOOL_LABELS[t.name] ?? t.name}</span>
+                          {autoAdded && enabled ? (
+                            <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-1.5 text-[10px] text-emerald-400">模式自动添加</span>
+                          ) : !enabled ? (
+                            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-1.5 text-[10px] text-amber-300">禁用时需要人工审批</span>
+                          ) : null}
+                        </div>
+                        <div className="mt-0.5 text-xs text-text-muted">{toolDisplayDescription(t.name, t.description)}</div>
+                        {showAdvanced ? (
+                          <div className="mt-2">
+                            <button
+                              type="button"
+                              className="flex items-center gap-1 text-xs text-text-subtle transition hover:text-text-primary"
+                              onClick={() =>
+                                setAdvOpenByTool((prev) => ({ ...prev, [t.name]: !prev[t.name] }))
+                              }
+                              aria-expanded={advOpen}
+                            >
+                              <ChevronRight
+                                className={`h-3.5 w-3.5 shrink-0 transition-transform ${advOpen ? "rotate-90" : ""}`}
+                                aria-hidden
+                              />
+                              高级设置
+                            </button>
+                            {advOpen && t.name === "bash_exec" ? (
+                              <div className="mt-2 space-y-1.5 pl-1">
+                                <label className="block text-[11px] font-medium text-text-muted" htmlFor={`bash-timeout-${t.name}`}>
+                                  默认超时（秒）
+                                </label>
+                                <input
+                                  id={`bash-timeout-${t.name}`}
+                                  type="text"
+                                  inputMode="numeric"
+                                  autoComplete="off"
+                                  className="w-32 rounded-md border border-border bg-surface-panel px-2 py-1 text-xs text-text-primary"
+                                  value={bashTimeoutInput}
+                                  onChange={(e) => {
+                                    const raw = e.target.value.replace(/\D/g, "").slice(0, 4);
+                                    setBashTimeoutInput(raw);
+                                  }}
+                                  onBlur={() => void saveBashDefaultTimeout()}
+                                />
+                                <p className="max-w-md text-[10px] leading-relaxed text-text-faint">
+                                  模型仍可在单次调用中传{" "}
+                                  <code className="rounded bg-surface-panel px-0.5">timeout_sec</code>{" "}
+                                  覆盖；未传时使用此处默认值（范围 {BASH_DEFAULT_TIMEOUT_MIN}–{BASH_DEFAULT_TIMEOUT_MAX}{" "}
+                                  秒）。保存后下一轮 <code className="rounded bg-surface-panel px-0.5">bash_exec</code>{" "}
+                                  起生效。
+                                </p>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                      </div>
+                      <div className="mt-0.5 shrink-0">
+                        <SettingsSwitch
+                          checked={enabled}
+                          onChange={(next) => void toggleTool(t.name, next)}
+                          aria-label={`启用工具 ${t.name}`}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+          {grouped.length === 0 && search ? (
+            <div className="py-4 text-center text-xs text-text-faint">未找到匹配工具</div>
+          ) : null}
+        </div>
+      </Panel>
+
+      {/* ── 环境依赖（可安装的外部工具） ── */}
+      <Panel title="环境依赖">
+        <div className="mb-2 text-xs text-text-subtle">
+          外部可执行文件依赖。全局安装一次后所有专家共享。
+        </div>
+        <div className="space-y-2">
+          {envTools.map((tool) => {
+            const installState = installing[tool.id];
+            const isInstalling = Boolean(installState) && !["done", "error", "manual_required"].includes(installState.phase);
+            const isManual = installState?.phase === "manual_required";
+            const badge = tool.installed
+              ? "已安装"
+              : isInstalling ? "安装中" : isManual ? "需手动安装" : "未安装";
+            const badgeClass = tool.installed
+              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+              : isInstalling
+                ? "border-[var(--settings-accent-border-muted)] bg-[var(--settings-accent-subtle-bg)] text-[var(--settings-accent-fg-muted)]"
+                : isManual ? "border-amber-500/30 bg-amber-500/10 text-amber-300" : "border-border bg-surface-panel text-text-faint";
+            return (
+              <div key={tool.id} className="rounded-md border border-border bg-surface-card p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="truncate text-sm font-medium text-text-primary">{tool.name}</span>
+                      <span className={`shrink-0 rounded-full border px-1.5 text-[10px] ${badgeClass}`}>{badge}</span>
+                    </div>
+                    <div className="mt-0.5 text-xs text-text-muted">{tool.description}</div>
+                    {tool.installed && tool.version ? (
+                      <div className="mt-0.5 text-[11px] text-text-faint">版本: {tool.version}</div>
+                    ) : null}
+                  </div>
+                  {!tool.installed ? (
+                    <button
+                      type="button"
+                      className="rounded-md border border-border px-2.5 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                      onClick={() => void startInstall(tool)}
+                      disabled={isInstalling}
+                    >
+                      {tool.auto_installable ? "安装" : "查看安装指南"}
+                    </button>
+                  ) : null}
+                </div>
+                {installState ? (
+                  <div className="mt-2">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-text-subtle">
+                      {isInstalling ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                      <span>{installState.message}</span>
+                      {!tool.installed ? <span>{Math.max(0, Math.min(100, installState.percent))}%</span> : null}
+                    </div>
+                    {!tool.installed ? (
+                      <div className="h-1.5 w-full overflow-hidden rounded bg-surface-panel">
+                        <div
+                          className={`h-full ${
+                            installState.phase === "error" ? "bg-rose-400" : installState.phase === "done" ? "bg-emerald-400" : "bg-[var(--settings-accent-progress)]"
+                          }`}
+                          style={{ width: `${Math.max(0, Math.min(100, installState.percent))}%` }}
+                        />
+                      </div>
+                    ) : null}
+                    {installState.error ? (
+                      <div className="mt-1 text-xs text-rose-300">{installState.error}</div>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </Panel>
+
+      <CcBridgeSettingsPanel ref={ccBridgePanelRef} />
+    </div>
+  );
+});
+
+function pinSkillFirst(skills: SkillItem[], pin: string | null): SkillItem[] {
+  if (!pin || skills.length === 0) return skills;
+  const i = skills.findIndex((s) => s.name === pin);
+  if (i <= 0) return skills;
+  const next = [...skills];
+  const [one] = next.splice(i, 1);
+  return [one, ...next];
+}
+
+function normalizeSkillScanCustomPaths(
+  raw: Array<string | SkillScanCustomRow> | undefined | null,
+): SkillScanCustomRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: SkillScanCustomRow[] = [];
+  const seen = new Set<string>();
+  for (const item of raw) {
+    if (typeof item === "string") {
+      const path = item.trim();
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      out.push({ path, enabled: true });
+      continue;
+    }
+    if (item && typeof item === "object") {
+      const path = String(item.path ?? "").trim();
+      if (!path || seen.has(path)) continue;
+      seen.add(path);
+      out.push({ path, enabled: item.enabled !== false });
+    }
+  }
+  return out;
+}
+
+function SkillsTab() {
+  // 企业禁止自助安装时，本机相关的入口整段隐藏而不是禁用——留一排点不动的东西
+  // 只会让员工反复点，然后来问为什么。
+  const capabilityLocks =
+    useAppStore((s) => s.userAccount.capabilityLocks) ?? UNRESTRICTED_CAPABILITY_LOCKS;
+  const userAccount = useAppStore((s) => s.userAccount);
+  const setUserAccount = useAppStore((s) => s.setUserAccount);
+  const [items, setItems] = useState<SkillItem[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [search, setSearch] = useState("");
+  const [detail, setDetail] = useState<{ name: string; content: string } | null>(null);
+  const [activeSkillName, setActiveSkillName] = useState<string | null>(null);
+  const [expandedSkillName, setExpandedSkillName] = useState<string | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [marketQuery, setMarketQuery] = useState("");
+  const [marketResults, setMarketResults] = useState<RegistrySearchItem[]>([]);
+  const [marketLoading, setMarketLoading] = useState(false);
+  const [marketMsg, setMarketMsg] = useState("");
+  const [registryInstallBusy, setRegistryInstallBusy] = useState(false);
+  const [marketPending, setMarketPending] = useState<RegistrySearchItem | null>(null);
+  const [marketNeedsConfirmNonHigh, setMarketNeedsConfirmNonHigh] = useState(false);
+  const [marketNeedsConfirmHigh, setMarketNeedsConfirmHigh] = useState(false);
+  const [marketUninstallPending, setMarketUninstallPending] = useState<{
+    slug: string;
+    label: string;
+    item: RegistrySearchItem;
+    skill: SkillItem;
+  } | null>(null);
+  const [marketUninstallBusy, setMarketUninstallBusy] = useState(false);
+  const [marketUninstallError, setMarketUninstallError] = useState("");
+  const [marketInstallingKey, setMarketInstallingKey] = useState<string | null>(null);
+  const [marketQueuedKeys, setMarketQueuedKeys] = useState<string[]>([]);
+  /** After marketplace install: pin this skill at top of its group and surface global section first. */
+  const [recentMarketSkillName, setRecentMarketSkillName] = useState<string | null>(null);
+  const [skillScanPresets, setSkillScanPresets] = useState<SkillScanPresetRow[]>([]);
+  const [skillScanCustomPaths, setSkillScanCustomPaths] = useState<SkillScanCustomRow[]>([]);
+  /** Local draft custom path: null = no draft; string (incl. "") = unconfirmed row, never persisted until 确认. */
+  const [skillScanDraftPath, setSkillScanDraftPath] = useState<string | null>(null);
+  const [preferredSkillSources, setPreferredSkillSources] = useState<Record<string, string>>({});
+  /** Skill names globally disabled in the desktop config (skills.disabled). */
+  const [disabledSkillNames, setDisabledSkillNames] = useState<string[]>([]);
+  const [skillScanBusy, setSkillScanBusy] = useState(false);
+  const [skillScanMsg, setSkillScanMsg] = useState("");
+  const marketSearchSeqRef = useRef(0);
+  const detailRequestSeqRef = useRef(0);
+  const marketInstallQueueRef = useRef<RegistrySearchItem[]>([]);
+  const marketActiveInstallKeyRef = useRef<string | null>(null);
+  const marketPendingRef = useRef<RegistrySearchItem | null>(null);
+  const marketPendingPreviewTokenRef = useRef("");
+  const [pendingProposalCount, setPendingProposalCount] = useState(0);
+
+  const addPane = useAppStore((s) => s.addPane);
+  const setForwardAutoReply = useAppStore((s) => s.setForwardAutoReply);
+  const { newMetaTask } = usePaneNavigation();
+  const closeSettings = useAppStore((s) => s.closeSettings);
+
+  const [installPromptBusy, setInstallPromptBusy] = useState(false);
+  const [skillhubMsg, setSkillhubMsg] = useState("");
+  const [enterpriseMarketRefreshing, setEnterpriseMarketRefreshing] = useState(false);
+  const [enterpriseMarketMessage, setEnterpriseMarketMessage] = useState("");
+  const [skillhubInstallMessages, setSkillhubInstallMessages] = useState<
+    Record<string, string>
+  >({});
+  const [marketPendingScanSummary, setMarketPendingScanSummary] = useState("");
+  const [recommendedInstallMessages, setRecommendedInstallMessages] = useState<
+    Record<string, string>
+  >({});
+  const [recommendedIconData, setRecommendedIconData] = useState<Record<string, string>>(() =>
+    Object.fromEntries(RECOMMENDED_SKILLS.map((skill) => [skill.id, skill.icon_src]))
+  );
+  const [recommendedIconBroken, setRecommendedIconBroken] = useState<Record<string, boolean>>({});
+  const [recommendedTierFilter, setRecommendedTierFilter] = useState<
+    "all" | RecommendedSkillTier
+  >("all");
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const next: Record<string, string> = {};
+      for (const skill of RECOMMENDED_SKILLS) {
+        const iconSrc = String(skill.icon_src ?? "").trim();
+        if (!iconSrc) {
+          next[skill.id] = "";
+          continue;
+        }
+        if (!isLikelyLocalImagePath(iconSrc)) {
+          next[skill.id] = iconSrc;
+          continue;
+        }
+        try {
+          const res = await window.agenticxDesktop.loadLocalImageDataUrl(iconSrc);
+          if (res?.ok && res.dataUrl) {
+            next[skill.id] = res.dataUrl;
+          } else {
+            next[skill.id] = iconSrc;
+          }
+        } catch {
+          next[skill.id] = iconSrc;
+        }
+      }
+      if (!cancelled) {
+        setRecommendedIconData(next);
+        setRecommendedIconBroken({});
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    void (async () => {
+      try {
+        const [skillsRes, scanRes] = await Promise.all([
+          window.agenticxDesktop.loadSkills(),
+          window.agenticxDesktop.getSkillSettings(),
+        ]);
+        if (!cancelled) {
+          if (skillsRes.ok) setItems(skillsRes.items ?? []);
+          else setErr(skillsRes.error ?? "加载技能失败");
+          if (scanRes.ok && Array.isArray(scanRes.preset_paths)) {
+            setSkillScanPresets(
+              scanRes.preset_paths.map((p) => ({
+                id: String(p.id ?? ""),
+                label: String(p.label ?? ""),
+                path: String(p.path ?? ""),
+                enabled: Boolean(p.enabled),
+              })),
+            );
+          }
+          if (scanRes.ok && Array.isArray(scanRes.custom_paths)) {
+            setSkillScanCustomPaths(normalizeSkillScanCustomPaths(scanRes.custom_paths));
+          }
+          if (scanRes.ok && scanRes.preferred_sources && typeof scanRes.preferred_sources === "object") {
+            setPreferredSkillSources({ ...scanRes.preferred_sources });
+          }
+          if (scanRes.ok && Array.isArray(scanRes.disabled_skills)) {
+            setDisabledSkillNames([...scanRes.disabled_skills]);
+          }
+        }
+      } catch (e) {
+        if (!cancelled) setErr(String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const off = window.agenticxDesktop.onSkillsChanged(() => {
+      void (async () => {
+        const skillsRes = await window.agenticxDesktop.loadSkills();
+        if (skillsRes.ok) {
+          setItems(skillsRes.items ?? []);
+          setErr("");
+        }
+      })();
+    });
+    return () => off();
+  }, []);
+
+  const persistSkillScanSettings = useCallback(
+    async (
+      presetRows: SkillScanPresetRow[],
+      customs: SkillScanCustomRow[],
+      preferredSources: Record<string, string>,
+      disabledSkills: string[],
+    ) => {
+      setSkillScanBusy(true);
+      setSkillScanMsg("");
+      try {
+        const cleanedCustom = normalizeSkillScanCustomPaths(customs);
+        const r = await window.agenticxDesktop.putSkillSettings({
+          presetPaths: presetRows.map((p) => ({ id: p.id, enabled: p.enabled })),
+          customPaths: cleanedCustom,
+          preferredSources,
+          disabledSkills,
+        });
+        if (r.ok) {
+          if (Array.isArray(r.preset_paths)) {
+            setSkillScanPresets(
+              r.preset_paths.map((p) => ({
+                id: String(p.id ?? ""),
+                label: String(p.label ?? ""),
+                path: String(p.path ?? ""),
+                enabled: Boolean(p.enabled),
+              })),
+            );
+          }
+          if (Array.isArray(r.custom_paths)) {
+            setSkillScanCustomPaths(normalizeSkillScanCustomPaths(r.custom_paths));
+          }
+          if (r.preferred_sources && typeof r.preferred_sources === "object") {
+            setPreferredSkillSources({ ...r.preferred_sources });
+          }
+          if (Array.isArray(r.disabled_skills)) {
+            setDisabledSkillNames([...r.disabled_skills]);
+          }
+          setSkillScanMsg("已保存扫描路径");
+          await window.agenticxDesktop.refreshSkills();
+          const skillsRes = await window.agenticxDesktop.loadSkills();
+          if (skillsRes.ok) setItems(skillsRes.items ?? []);
+        } else {
+          setSkillScanMsg(r.error ?? "保存失败");
+        }
+      } catch (e) {
+        setSkillScanMsg(String(e));
+      } finally {
+        setSkillScanBusy(false);
+      }
+    },
+    [],
+  );
+
+  const onRefresh = async () => {
+    setLoading(true);
+    setErr("");
+    setDetail(null);
+    setExpandedSkillName(null);
+    setRecentMarketSkillName(null);
+    try {
+      await window.agenticxDesktop.refreshSkills();
+      const [skillsRes, scanRes] = await Promise.all([
+        window.agenticxDesktop.loadSkills(),
+        window.agenticxDesktop.getSkillSettings(),
+      ]);
+      if (skillsRes.ok) setItems(skillsRes.items ?? []);
+      else setErr(skillsRes.error ?? "刷新失败");
+      if (scanRes.ok && Array.isArray(scanRes.preset_paths)) {
+        setSkillScanPresets(
+          scanRes.preset_paths.map((p) => ({
+            id: String(p.id ?? ""),
+            label: String(p.label ?? ""),
+            path: String(p.path ?? ""),
+            enabled: Boolean(p.enabled),
+          })),
+        );
+      }
+      if (scanRes.ok && Array.isArray(scanRes.custom_paths)) {
+        setSkillScanCustomPaths(normalizeSkillScanCustomPaths(scanRes.custom_paths));
+        setSkillScanDraftPath(null);
+      }
+      if (scanRes.ok && scanRes.preferred_sources && typeof scanRes.preferred_sources === "object") {
+        setPreferredSkillSources({ ...scanRes.preferred_sources });
+      }
+      if (scanRes.ok && Array.isArray(scanRes.disabled_skills)) {
+        setDisabledSkillNames([...scanRes.disabled_skills]);
+      }
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const refreshEnterpriseSkillMarket = async () => {
+    if (enterpriseMarketRefreshing) return;
+    setEnterpriseMarketRefreshing(true);
+    setEnterpriseMarketMessage("");
+    try {
+      const refreshed = await window.agenticxDesktop.enterpriseRefresh();
+      if (!refreshed.ok && refreshed.unauthorized) {
+        setEnterpriseMarketMessage(
+          "企业登录已失效，请重新登录。",
+        );
+        return;
+      }
+      // A sync can return a partial failure after persisting per-capability
+      // receipts (for example, one unreachable bundle). Always reload the
+      // snapshot so those failed rows reach the cards; only auth expiry skips it.
+      const syncError = !refreshed.ok ? (refreshed.error || "同步失败。") : "";
+      const snapshot = await window.agenticxDesktop.loadUserAccount();
+      if (!snapshot.ok) {
+        await onRefresh();
+        setEnterpriseMarketMessage(
+          syncError || "已请求同步，但未能重新读取企业配置。",
+        );
+        return;
+      }
+      setUserAccount({
+        loggedIn: Boolean(snapshot.loggedIn),
+        email: String(snapshot.email ?? ""),
+        displayName: String(snapshot.displayName ?? ""),
+        baseUrl: String(snapshot.baseUrl ?? ""),
+        feedbackScopeId: snapshot.scope_id ?? null,
+        feedbackAuthGeneration:
+          typeof snapshot.auth_generation === "number" ? snapshot.auth_generation : null,
+        capabilities: Array.isArray(snapshot.capabilities) ? snapshot.capabilities : [],
+        capabilitySyncStatuses: normalizeEnterpriseCapabilitySyncStatuses(
+          (snapshot as { capabilitySyncStatuses?: unknown }).capabilitySyncStatuses,
+        ),
+        capabilityLocks: readCapabilityLocks(snapshot.capabilityPolicy),
+        attachmentRouting: readAttachmentRoutingPolicy(snapshot.attachmentRouting),
+      });
+      await onRefresh();
+      setEnterpriseMarketMessage(syncError ? `同步失败：${syncError}` : "已同步管理员最新分配。");
+    } catch (error) {
+      setEnterpriseMarketMessage(`同步失败：${String(error)}`);
+    } finally {
+      setEnterpriseMarketRefreshing(false);
+    }
+  };
+
+  const choosePreferredSource = async (skillName: string, source: string) => {
+    const next = { ...preferredSkillSources, [skillName]: source };
+    setPreferredSkillSources(next);
+    await persistSkillScanSettings(skillScanPresets, skillScanCustomPaths, next, disabledSkillNames);
+  };
+
+  const toggleGlobalSkill = useCallback(
+    async (name: string, enabled: boolean) => {
+      const nextDisabled = enabled
+        ? disabledSkillNames.filter((n) => n !== name)
+        : [...new Set([...disabledSkillNames, name])].sort();
+      setDisabledSkillNames(nextDisabled);
+      await persistSkillScanSettings(
+        skillScanPresets,
+        skillScanCustomPaths,
+        preferredSkillSources,
+        nextDisabled,
+      );
+    },
+    [
+      disabledSkillNames,
+      persistSkillScanSettings,
+      skillScanPresets,
+      skillScanCustomPaths,
+      preferredSkillSources,
+    ],
+  );
+
+  const onAddCustomSkillPath = useCallback(() => {
+    if (skillScanBusy) return;
+    if (skillScanDraftPath !== null) {
+      setSkillScanMsg("请先确认或取消当前草稿路径");
+      return;
+    }
+    setSkillScanDraftPath("");
+    setSkillScanMsg("");
+  }, [skillScanBusy, skillScanDraftPath]);
+
+  const pickSkillDirectory = useCallback(async (): Promise<string | null> => {
+    const picker = window.agenticxDesktop.chooseDirectory;
+    if (typeof picker !== "function") {
+      setSkillScanMsg("当前客户端不支持目录选择，请重启桌面端后重试。");
+      return null;
+    }
+    try {
+      const picked = await picker();
+      if (picked.canceled) return null;
+      if (!picked.ok || !picked.path?.trim()) {
+        setSkillScanMsg(picked.error ? `选择目录失败: ${picked.error}` : "未选择目录");
+        return null;
+      }
+      return picked.path.trim();
+    } catch (e) {
+      setSkillScanMsg(String(e));
+      return null;
+    }
+  }, []);
+
+  const onBrowseSkillDraftPath = useCallback(async () => {
+    if (skillScanBusy || skillScanDraftPath === null) return;
+    const path = await pickSkillDirectory();
+    if (path == null) return;
+    setSkillScanDraftPath(path);
+    setSkillScanMsg("");
+  }, [skillScanBusy, skillScanDraftPath, pickSkillDirectory]);
+
+  const onBrowseCommittedSkillPath = useCallback(
+    async (index: number) => {
+      if (skillScanBusy) return;
+      const path = await pickSkillDirectory();
+      if (path == null) return;
+      if (skillScanCustomPaths.some((p, i) => i !== index && p.path.trim() === path)) {
+        setSkillScanMsg("该路径已在自定义列表中");
+        return;
+      }
+      const next = skillScanCustomPaths.map((row, i) =>
+        i === index ? { ...row, path } : row,
+      );
+      setSkillScanCustomPaths(next);
+      await persistSkillScanSettings(skillScanPresets, next, preferredSkillSources, disabledSkillNames);
+    },
+    [
+      skillScanBusy,
+      skillScanCustomPaths,
+      skillScanPresets,
+      preferredSkillSources,
+      disabledSkillNames,
+      persistSkillScanSettings,
+      pickSkillDirectory,
+    ],
+  );
+
+  const onConfirmSkillDraftPath = useCallback(async () => {
+    if (skillScanBusy || skillScanDraftPath === null) return;
+    const path = skillScanDraftPath.trim();
+    if (!path) {
+      setSkillScanMsg("请先填写路径");
+      return;
+    }
+    if (skillScanCustomPaths.some((p) => p.path.trim() === path)) {
+      setSkillScanMsg("该路径已在自定义列表中");
+      return;
+    }
+    const next = [...skillScanCustomPaths, { path, enabled: true }];
+    setSkillScanDraftPath(null);
+    setSkillScanCustomPaths(next);
+    await persistSkillScanSettings(skillScanPresets, next, preferredSkillSources, disabledSkillNames);
+  }, [
+    skillScanBusy,
+    skillScanDraftPath,
+    skillScanCustomPaths,
+    skillScanPresets,
+    preferredSkillSources,
+    disabledSkillNames,
+    persistSkillScanSettings,
+  ]);
+
+  const onCancelSkillDraftPath = useCallback(() => {
+    setSkillScanDraftPath(null);
+    setSkillScanMsg("");
+  }, []);
+
+  const reloadSkillsAfterMarketInstall = async (installedSlug: string) => {
+    try {
+      await window.agenticxDesktop.refreshSkills();
+    } catch {
+      /* still try load */
+    }
+    const skillsRes = await window.agenticxDesktop.loadSkills();
+    if (!skillsRes.ok) return;
+    const list = skillsRes.items ?? [];
+    setItems(list);
+    const needle = `/registry/${installedSlug}`;
+    const byRegistryPath = list.find((s) =>
+      (s.base_dir ?? "").replace(/\\/g, "/").includes(needle)
+    );
+    const pinName = byRegistryPath?.name ?? list.find((s) => s.name === installedSlug)?.name ?? installedSlug;
+    setRecentMarketSkillName(pinName);
+  };
+
+  const getInstalledMarketSkill = (skillName: string) =>
+    findInstalledMarketplaceSkill(items, skillName);
+
+  const isMarketSkillInstalled = (skillName: string) =>
+    Boolean(getInstalledMarketSkill(skillName));
+
+  const runPromptInNewMetaSession = useCallback(
+    async (prompt: string) => {
+      const text = prompt.trim();
+      if (!text) return;
+      setSkillhubMsg("");
+      setInstallPromptBusy(true);
+      try {
+        const created = await window.agenticxDesktop.createSession({});
+        if (!created.ok || !created.session_id) {
+          const err = created.error ?? "创建 Meta-Agent 会话失败";
+          setSkillhubMsg(err);
+          return;
+        }
+        const sid = created.session_id;
+        const paneId = addPane(null, META_AGENT_DISPLAY_NAME, sid);
+        setForwardAutoReply({
+          paneId,
+          sessionId: sid,
+          text,
+          suppressUserEcho: false,
+          skipUserHistory: false,
+        });
+        closeSettings();
+      } catch (e) {
+        const msg = String(e);
+        setSkillhubMsg(msg);
+      } finally {
+        setInstallPromptBusy(false);
+      }
+    },
+    [addPane, setForwardAutoReply, closeSettings],
+  );
+
+  const recommendedSkillInstallItem = (skill: RecommendedSkill): RegistrySearchItem => ({
+    name: skill.marketplace_slug || skill.id,
+    display_name: skill.name,
+    description: skill.description,
+    version: "latest",
+    author: skill.provider,
+    source: skill.marketplace_slug ? "skillhub" : "registry",
+    source_type: skill.marketplace_slug ? "skillhub" : "registry",
+    namespace: skill.marketplace_namespace,
+    provenance_source: skill.marketplace_slug ? "skillhub" : "registry",
+    recommended_id: skill.id,
+  });
+
+  const onRecommendedSkillInstall = (skill: RecommendedSkill) => {
+    if (skill.marketplace_slug) {
+      void onMarketInstall(recommendedSkillInstallItem(skill));
+      return;
+    }
+    const skillId = skill.id;
+    const prompt =
+      skillId === "officecli"
+        ? buildOfficeCliInstallPrompt()
+        : skillId === "archscribe"
+          ? buildArchscribeInstallPrompt()
+          : "";
+    if (!prompt.trim()) return;
+    void runPromptInNewMetaSession(prompt);
+  };
+
+  const filteredRecommendedSkills =
+    recommendedTierFilter === "all"
+      ? RECOMMENDED_SKILLS
+      : RECOMMENDED_SKILLS.filter((s) => s.tier === recommendedTierFilter);
+
+  const onMarketSearch = async () => {
+    const seq = ++marketSearchSeqRef.current;
+    const q = marketQuery.trim();
+    setMarketLoading(true);
+    setMarketMsg("");
+    try {
+      const res = await window.agenticxDesktop.searchRegistry({ q });
+      if (seq !== marketSearchSeqRef.current) return;
+      if (res.ok) {
+        setMarketResults(res.items ?? []);
+        if ((res.items ?? []).length === 0) {
+          setMarketMsg(res.hint?.trim() || "未找到相关技能");
+        } else {
+          setMarketMsg("");
+        }
+      } else {
+        setMarketMsg(res.error ?? "搜索失败");
+        setMarketResults([]);
+      }
+    } catch (e) {
+      if (seq !== marketSearchSeqRef.current) return;
+      setMarketMsg(String(e));
+    } finally {
+      if (seq === marketSearchSeqRef.current) {
+        setMarketLoading(false);
+      }
+    }
+  };
+
+  const marketInstallKey = (item: RegistrySearchItem) =>
+    `${item.source}:${item.namespace || ""}:${item.name}`;
+
+  const setMarketInstallMessage = (item: RegistrySearchItem, message: string) => {
+    const recommendedId = item.recommended_id;
+    if (recommendedId) {
+      setRecommendedInstallMessages((current) => ({
+        ...current,
+        [recommendedId]: message,
+      }));
+      return;
+    }
+    if (item.provenance_source === "skillhub") {
+      setSkillhubMsg(message);
+      const key = marketInstallKey(item);
+      setSkillhubInstallMessages((current) => {
+        if (message) return { ...current, [key]: message };
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    } else {
+      setMarketMsg(message);
+    }
+  };
+
+  function continueMarketInstallQueue() {
+    if (marketActiveInstallKeyRef.current || marketPendingRef.current) return;
+    const next = marketInstallQueueRef.current.shift();
+    if (!next) return;
+    const nextKey = marketInstallKey(next);
+    setMarketQueuedKeys((prev) => prev.filter((key) => key !== nextKey));
+    // onMarketInstall claims the active slot synchronously before its first await,
+    // so the next queue item cannot be started in parallel by another completion.
+    void onMarketInstall(next);
+  }
+
+  async function onMarketInstall(item: RegistrySearchItem) {
+    const key = marketInstallKey(item);
+    const itemLabel = item.display_name || item.name;
+    const queuedKeys = marketInstallQueueRef.current.map(marketInstallKey);
+    const decision = decideSkillInstallRequest({
+      requestedKey: key,
+      activeKey: marketActiveInstallKeyRef.current,
+      confirmationKey: marketPendingRef.current
+        ? marketInstallKey(marketPendingRef.current)
+        : null,
+      queuedKeys,
+    });
+    if (decision === "ignore") return;
+    if (decision === "queue") {
+      if (!queuedKeys.includes(key)) {
+        marketInstallQueueRef.current.push(item);
+        setMarketQueuedKeys((prev) => (prev.includes(key) ? prev : [...prev, key]));
+      }
+      setMarketInstallMessage(
+        item,
+        `正在安装另一个技能，已将「${itemLabel}」加入队列。`,
+      );
+      return;
+    }
+    setMarketQueuedKeys((prev) => prev.filter((k) => k !== key));
+    marketInstallQueueRef.current = marketInstallQueueRef.current.filter(
+      (q) => marketInstallKey(q) !== key
+    );
+    marketActiveInstallKeyRef.current = key;
+    setMarketInstallingKey(key);
+    setRegistryInstallBusy(true);
+    setMarketNeedsConfirmNonHigh(false);
+    setMarketNeedsConfirmHigh(false);
+    setMarketPendingScanSummary("");
+    marketPendingPreviewTokenRef.current = "";
+    marketPendingRef.current = null;
+    setMarketPending(null);
+    setMarketInstallMessage(item, `正在获取并检查「${itemLabel}」…`);
+    let pauseQueue = false;
+    try {
+      const prev = await window.agenticxDesktop.installFromRegistryPreview({
+        source: item.source,
+        name: item.name,
+        namespace: item.namespace,
+        originSource: item.origin_source,
+      });
+      if (!prev.ok) {
+        const rawErr = String(prev.error ?? "未知错误");
+        const is429 = rawErr.includes("rate limited (429)") || rawErr.includes("Too Many Requests");
+        if (is429) {
+          const secMatch = rawErr.match(/about (\d+)s/);
+          const waitSec = secMatch ? Math.min(Number(secMatch[1]), 30) : 10;
+          setMarketInstallMessage(item, `商店暂时繁忙，${waitSec} 秒后自动重试…`);
+          await new Promise((r) => setTimeout(r, waitSec * 1000));
+          setMarketInstallMessage(item, `正在重新获取「${itemLabel}」…`);
+          const retry = await window.agenticxDesktop.installFromRegistryPreview({
+            source: item.source,
+            name: item.name,
+            namespace: item.namespace,
+            originSource: item.origin_source,
+          });
+          if (!retry.ok) {
+            const retryErr = String(retry.error ?? "未知错误");
+            setMarketInstallMessage(item, `获取失败：${retryErr}`);
+            return;
+          }
+          Object.assign(prev, retry);
+        } else if (rawErr.includes("fetch failed") || rawErr.includes("Failed to fetch skill")) {
+          setMarketInstallMessage(item, `获取失败：${rawErr}`);
+          return;
+        } else {
+          setMarketInstallMessage(item, `检查未通过：${rawErr}`);
+          return;
+        }
+      }
+      if (prev.scan) {
+        setMarketInstallMessage(item, formatSkillScanSummary(prev.scan));
+      }
+
+      const res = await window.agenticxDesktop.installFromRegistry({
+        source: item.source,
+        name: item.name,
+        namespace: item.namespace,
+        originSource: item.origin_source,
+        provenanceSource: item.provenance_source,
+      });
+      if (res.ok) {
+        setMarketInstallMessage(item, `已安装好「${itemLabel}」。`);
+        await reloadSkillsAfterMarketInstall(String(res.name ?? item.name));
+        return;
+      }
+      if (res.error_code === "non_high_risk_confirm_required") {
+        marketPendingRef.current = item;
+        setMarketPending(item);
+        setMarketNeedsConfirmNonHigh(true);
+        marketPendingPreviewTokenRef.current = String(res.preview_token ?? "");
+        setMarketPendingScanSummary(
+          res.scan_summary ? formatSkillScanSummary(res.scan_summary) : "",
+        );
+        pauseQueue = true;
+        if (res.scan_summary) {
+          setMarketInstallMessage(
+            item,
+            `${formatSkillScanSummary(res.scan_summary)}\n\n当前策略要求你确认后再安装。`,
+          );
+        } else {
+          setMarketInstallMessage(item, "当前策略要求你确认后再安装。");
+        }
+        return;
+      }
+      if (res.error_code === "high_risk_confirm_required") {
+        marketPendingRef.current = item;
+        setMarketPending(item);
+        setMarketNeedsConfirmHigh(true);
+        marketPendingPreviewTokenRef.current = String(res.preview_token ?? "");
+        setMarketPendingScanSummary(
+          res.scan_summary ? formatSkillScanSummary(res.scan_summary) : "",
+        );
+        pauseQueue = true;
+        if (res.scan_summary) {
+          setMarketInstallMessage(
+            item,
+            `${formatSkillScanSummary(res.scan_summary)}\n\n发现高风险内容，请阅读摘要后确认。`,
+          );
+        } else {
+          setMarketInstallMessage(item, "发现高风险内容，请阅读说明后确认。");
+        }
+        return;
+      }
+      setMarketInstallMessage(item, `安装失败：${res.error ?? "未知错误"}`);
+    } catch (e) {
+      setMarketInstallMessage(item, String(e));
+    } finally {
+      marketActiveInstallKeyRef.current = null;
+      setRegistryInstallBusy(false);
+      setMarketInstallingKey(null);
+      if (!pauseQueue) continueMarketInstallQueue();
+    }
+  }
+
+  const onConfirmMarketInstall = async (kind: "non_high" | "high") => {
+    const pending = marketPendingRef.current ?? marketPending;
+    if (!pending || marketActiveInstallKeyRef.current) return;
+    const pendingLabel = pending.display_name || pending.name;
+    const pendingKey = marketInstallKey(pending);
+    marketActiveInstallKeyRef.current = pendingKey;
+    setMarketInstallingKey(pendingKey);
+    setRegistryInstallBusy(true);
+    let keepPending = false;
+    let refreshPending = false;
+    try {
+      const res = await window.agenticxDesktop.installFromRegistry({
+        source: pending.source,
+        name: pending.name,
+        namespace: pending.namespace,
+        originSource: pending.origin_source,
+        previewToken: marketPendingPreviewTokenRef.current,
+        confirmNonHighRisk: kind === "non_high",
+        acknowledgeHighRisk: kind === "high",
+        provenanceSource: pending.provenance_source,
+      });
+      if (res.ok) {
+        setMarketInstallMessage(pending, `已安装好「${pendingLabel}」。`);
+        await reloadSkillsAfterMarketInstall(String(res.name ?? pending.name));
+      } else if (
+        res.error_code === "high_risk_confirm_required" ||
+        res.error_code === "non_high_risk_confirm_required"
+      ) {
+        const isHighRisk = res.error_code === "high_risk_confirm_required";
+        marketPendingRef.current = pending;
+        setMarketPending(pending);
+        setMarketNeedsConfirmHigh(isHighRisk);
+        setMarketNeedsConfirmNonHigh(!isHighRisk);
+        keepPending = true;
+        marketPendingPreviewTokenRef.current = String(res.preview_token ?? "");
+        const summary = res.scan_summary
+          ? formatSkillScanSummary(res.scan_summary)
+          : "";
+        setMarketPendingScanSummary(summary);
+        setMarketInstallMessage(
+          pending,
+          `${summary ? `${summary}\n\n` : ""}安全检查结果已更新，请再次确认后安装。`,
+        );
+        return;
+      } else if (res.error_code === "preview_refresh_required") {
+        refreshPending = true;
+        setMarketInstallMessage(pending, "技能包预览已过期，正在重新获取并检查…");
+      } else {
+        setMarketInstallMessage(pending, `安装失败：${res.error ?? "未知错误"}`);
+      }
+    } catch (e) {
+      setMarketInstallMessage(pending, String(e));
+    } finally {
+      if (!keepPending) {
+        marketPendingRef.current = null;
+        setMarketNeedsConfirmNonHigh(false);
+        setMarketNeedsConfirmHigh(false);
+        setMarketPendingScanSummary("");
+        marketPendingPreviewTokenRef.current = "";
+        setMarketPending(null);
+      }
+      marketActiveInstallKeyRef.current = null;
+      setRegistryInstallBusy(false);
+      setMarketInstallingKey(null);
+      if (refreshPending) {
+        void onMarketInstall(pending);
+      } else if (!keepPending) {
+        continueMarketInstallQueue();
+      }
+    }
+  };
+
+  const onCancelMarketInstall = () => {
+    const pending = marketPendingRef.current ?? marketPending;
+    if (pending) {
+      setMarketInstallMessage(pending, "");
+      void window.agenticxDesktop.discardRegistryInstallPreview({
+        source: pending.source,
+        name: pending.name,
+        namespace: pending.namespace,
+        previewToken: marketPendingPreviewTokenRef.current,
+      });
+    }
+    marketPendingRef.current = null;
+    setMarketNeedsConfirmNonHigh(false);
+    setMarketNeedsConfirmHigh(false);
+    setMarketPendingScanSummary("");
+    marketPendingPreviewTokenRef.current = "";
+    setMarketPending(null);
+    continueMarketInstallQueue();
+  };
+
+  const onExpandDetail = async (name: string) => {
+    setActiveSkillName(name);
+    setExpandedSkillName(name);
+    if (detail?.name === name && detail.content) return;
+    const requestSeq = detailRequestSeqRef.current + 1;
+    detailRequestSeqRef.current = requestSeq;
+    setLoadingDetail(true);
+    try {
+      const res = await window.agenticxDesktop.loadSkillDetail({ name });
+      if (detailRequestSeqRef.current !== requestSeq) return;
+      if (res.ok) setDetail({ name, content: res.content });
+      else setErr(res.error ?? "加载详情失败");
+    } catch (e) {
+      if (detailRequestSeqRef.current !== requestSeq) return;
+      setErr(String(e));
+    } finally {
+      if (detailRequestSeqRef.current === requestSeq) {
+        setLoadingDetail(false);
+      }
+    }
+  };
+
+  const projectSkills = pinSkillFirst(
+    items.filter((s) => effectiveSkillLocation(s) === "project"),
+    recentMarketSkillName
+  );
+  const globalSkillPool = items.filter((s) => effectiveSkillLocation(s) !== "project");
+  const globalSkills = pinSkillFirst(
+    filterAndRankSkills(globalSkillPool, search),
+    recentMarketSkillName,
+  );
+  const hasGlobalSkills = globalSkillPool.length > 0;
+  const showGlobalSkillsFirst =
+    Boolean(recentMarketSkillName) &&
+    globalSkills.some((s) => s.name === recentMarketSkillName);
+
+  const skillHubInstallItem = (item: SkillHubMarketItem): RegistrySearchItem => ({
+    ...item,
+    name: item.slug,
+    display_name: item.name,
+    provenance_source: "skillhub",
+  });
+  const enterpriseSkillInstallItem = (
+    capability: EnterpriseCapabilityLike,
+  ): RegistrySearchItem => skillHubInstallItem(enterpriseCapabilitySkillItem(capability));
+  const getMarketInstallState = (
+    installItem: RegistrySearchItem,
+    installedSlug = installItem.name,
+  ): SkillHubInstallState => {
+    const installKey = marketInstallKey(installItem);
+    if (isMarketSkillInstalled(installedSlug)) return "installed";
+    if (marketInstallingKey === installKey) return "installing";
+    if (marketQueuedKeys.includes(installKey)) return "queued";
+    if (marketPending && marketInstallKey(marketPending) === installKey) return "pending";
+    return "idle";
+  };
+  const getMarketSkillEnabled = (slug: string) => {
+    const installed = getInstalledMarketSkill(slug);
+    return installed ? !disabledSkillNames.includes(installed.name) : true;
+  };
+  const tryMarketSkill = (slug: string, installItem: RegistrySearchItem) => {
+    const installed = getInstalledMarketSkill(slug);
+    if (!installed) {
+      setMarketInstallMessage(installItem, "未找到已安装技能，请刷新后重试。");
+      return;
+    }
+    if (disabledSkillNames.includes(installed.name)) {
+      setMarketInstallMessage(installItem, "请先启用这个技能再试用。");
+      return;
+    }
+    newMetaTask(buildSkillTryDraft(installed.name));
+    closeSettings();
+  };
+  const toggleMarketSkill = (
+    slug: string,
+    installItem: RegistrySearchItem,
+    enabled: boolean,
+  ) => {
+    const installed = getInstalledMarketSkill(slug);
+    if (!installed) {
+      setMarketInstallMessage(installItem, "未找到已安装技能，请刷新后重试。");
+      return;
+    }
+    void toggleGlobalSkill(installed.name, enabled);
+  };
+  const editMarketSkill = async (slug: string, installItem: RegistrySearchItem) => {
+    const installed = getInstalledMarketSkill(slug);
+    if (!installed?.base_dir) {
+      setMarketInstallMessage(installItem, "未找到技能文件，请刷新后重试。");
+      return;
+    }
+    const result = await window.agenticxDesktop.shellOpenPath(
+      skillMarkdownPath(installed.base_dir),
+    );
+    if (!result.ok) {
+      setMarketInstallMessage(
+        installItem,
+        `打开失败：${result.error || "无法打开技能文件"}`,
+      );
+    }
+  };
+  const requestMarketSkillUninstall = (
+    slug: string,
+    label: string,
+    installItem: RegistrySearchItem,
+  ) => {
+    const installed = getInstalledMarketSkill(slug);
+    if (!installed) {
+      setMarketInstallMessage(installItem, "未找到已安装技能，请刷新后重试。");
+      return;
+    }
+    setMarketUninstallError("");
+    setMarketUninstallPending({ slug, label, item: installItem, skill: installed });
+  };
+  const confirmMarketSkillUninstall = async () => {
+    const pending = marketUninstallPending;
+    if (!pending || marketUninstallBusy) return;
+    setMarketUninstallBusy(true);
+    setMarketUninstallError("");
+    try {
+      const result = await window.agenticxDesktop.uninstallMarketSkill({
+        name: pending.slug,
+      });
+      if (!result.ok) {
+        setMarketUninstallError(result.error || "卸载失败");
+        return;
+      }
+      const nextDisabled = hasAlternateSkillVariant(pending.skill)
+        ? disabledSkillNames
+        : disabledSkillNames.filter((name) => name !== pending.skill.name);
+      if (nextDisabled.length !== disabledSkillNames.length) {
+        setDisabledSkillNames(nextDisabled);
+        await persistSkillScanSettings(
+          skillScanPresets,
+          skillScanCustomPaths,
+          preferredSkillSources,
+          nextDisabled,
+        );
+      }
+      await onRefresh();
+      setMarketInstallMessage(pending.item, "已卸载这个技能。");
+      setMarketUninstallPending(null);
+    } catch (error) {
+      setMarketUninstallError(String(error));
+    } finally {
+      setMarketUninstallBusy(false);
+    }
+  };
+  const getSkillHubInstallState = (item: SkillHubMarketItem): SkillHubInstallState =>
+    getMarketInstallState(skillHubInstallItem(item), item.slug);
+  const getSkillHubSkillEnabled = (item: SkillHubMarketItem) =>
+    getMarketSkillEnabled(item.slug);
+  const trySkillHubSkill = (item: SkillHubMarketItem) =>
+    tryMarketSkill(item.slug, skillHubInstallItem(item));
+  const toggleSkillHubSkill = (item: SkillHubMarketItem, enabled: boolean) =>
+    toggleMarketSkill(item.slug, skillHubInstallItem(item), enabled);
+  const editSkillHubSkill = (item: SkillHubMarketItem) =>
+    editMarketSkill(item.slug, skillHubInstallItem(item));
+  const requestSkillHubUninstall = (item: SkillHubMarketItem) =>
+    requestMarketSkillUninstall(
+      item.slug,
+      item.name || item.slug,
+      skillHubInstallItem(item),
+    );
+  const getEnterpriseSkillInstallState = (capability: EnterpriseCapabilityLike) => {
+    if (hasManagedSkillDelivery(capability)) {
+      return isEnterpriseManagedSkillInstalled(items, capability) ? "installed" : "idle";
+    }
+    const item = enterpriseSkillInstallItem(capability);
+    return getMarketInstallState(item, item.name);
+  };
+  const getEnterpriseSkillEnabled = (capability: EnterpriseCapabilityLike) => {
+    const item = enterpriseSkillInstallItem(capability);
+    return getMarketSkillEnabled(item.name);
+  };
+  const getEnterpriseSkillInstallMessage = (capability: EnterpriseCapabilityLike) => {
+    const item = enterpriseSkillInstallItem(capability);
+    return skillhubInstallMessages[marketInstallKey(item)] || "";
+  };
+  const skillHubStatusTone =
+    skillhubMsg.includes("失败") ||
+    skillhubMsg.includes("繁忙") ||
+    skillhubMsg.includes("高风险") ||
+    skillhubMsg.includes("确认")
+      ? "warning"
+      : skillhubMsg.includes("已安装")
+        ? "success"
+        : "neutral";
+
+  if (loading) {
+    return <div className="py-8 text-center text-sm text-text-faint">加载技能中...</div>;
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <Modal
+        open={Boolean(marketPending) && (marketNeedsConfirmNonHigh || marketNeedsConfirmHigh)}
+        title="安装第三方技能"
+        onClose={registryInstallBusy ? undefined : onCancelMarketInstall}
+        panelClassName="w-full max-w-[440px] bg-surface-panel"
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+              disabled={registryInstallBusy}
+              onClick={onCancelMarketInstall}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className={
+                marketNeedsConfirmHigh
+                  ? "rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-40"
+                  : "rounded-md border border-[var(--settings-accent-border-strong)] bg-[var(--settings-accent-subtle-bg)] px-3 py-1.5 text-xs text-[var(--settings-accent-fg-muted)] transition hover:bg-[var(--settings-accent-subtle-bg-hover)] disabled:opacity-40"
+              }
+              disabled={registryInstallBusy}
+              onClick={() =>
+                void onConfirmMarketInstall(marketNeedsConfirmHigh ? "high" : "non_high")
+              }
+            >
+              {registryInstallBusy
+                ? "安装中…"
+                : marketNeedsConfirmHigh
+                  ? "了解风险并继续"
+                  : "允许安装"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm leading-6 text-text-subtle">
+          <p>
+            应用将获取第三方技能「{marketPending?.display_name || marketPending?.name || ""}」并加入你的技能列表。
+          </p>
+          <p className={marketNeedsConfirmHigh ? "text-rose-300" : "text-text-muted"}>
+            {marketNeedsConfirmHigh
+              ? "安全检查发现高风险内容。这个技能可能在使用时运行自带脚本；请只在你信任其来源时继续。"
+              : "当前安全策略要求先获得你的允许。确认后将继续安装，无需执行额外操作。"}
+          </p>
+          {marketPendingScanSummary ? (
+            <div
+              className={`max-h-44 overflow-y-auto whitespace-pre-wrap rounded-lg border p-3 text-xs leading-5 ${
+                marketNeedsConfirmHigh
+                  ? "border-rose-500/30 bg-rose-500/10 text-rose-200"
+                  : "border-border bg-surface-base text-text-muted"
+              }`}
+            >
+              {marketPendingScanSummary}
+            </div>
+          ) : null}
+        </div>
+      </Modal>
+
+      <Modal
+        open={Boolean(marketUninstallPending)}
+        title="卸载技能"
+        onClose={
+          marketUninstallBusy
+            ? undefined
+            : () => {
+                setMarketUninstallPending(null);
+                setMarketUninstallError("");
+              }
+        }
+        panelClassName="w-full max-w-[420px] bg-surface-panel"
+        footer={
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+              disabled={marketUninstallBusy}
+              onClick={() => {
+                setMarketUninstallPending(null);
+                setMarketUninstallError("");
+              }}
+            >
+              取消
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs text-rose-300 transition hover:bg-rose-500/20 disabled:opacity-40"
+              disabled={marketUninstallBusy}
+              onClick={() => void confirmMarketSkillUninstall()}
+            >
+              {marketUninstallBusy ? "卸载中…" : "卸载"}
+            </button>
+          </div>
+        }
+      >
+        <div className="space-y-3 text-sm leading-6 text-text-subtle">
+          <p>
+            将从本机删除技能「
+            {marketUninstallPending?.label || marketUninstallPending?.skill.name || ""}」。
+            此操作不会删除该技能产生的文档或会话。
+          </p>
+          {marketUninstallError ? (
+            <div className="rounded-lg border border-rose-500/30 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
+              {marketUninstallError}
+            </div>
+          ) : null}
+        </div>
+      </Modal>
+
+      {capabilityLocks.allowLocalSkillInstall ? (
+        pendingProposalCount > 0 ? (
+          <Panel title={`待审 (${pendingProposalCount})`}>
+            <PendingProposalsList onCountChange={setPendingProposalCount} />
+          </Panel>
+        ) : (
+          <PendingProposalsList onCountChange={setPendingProposalCount} hideWhenEmpty />
+        )
+      ) : null}
+
+      {/* Skill scan roots (presets + custom paths) —— 企业禁止自助安装时整段消失。
+          扫描路径存在的意义就是让本机自行放置的技能被认出来；不许自装还留着这一段，
+          等于摆一个改了也不会有任何效果的开关。 */}
+      {capabilityLocks.allowLocalSkillInstall ? (
+      <Panel
+        title="技能来源与扫描路径"
+        collapsible
+        defaultCollapsed
+        className="order-last"
+        titleClassName={SKILLS_SECTION_PANEL_TITLE_CLASS}
+      >
+        <p className="mb-3 text-xs leading-relaxed text-text-subtle">
+          项目内 <code className="text-text-muted">.agents/skills</code>、<code className="text-text-muted">.claude/skills</code>、<code className="text-text-muted">{AGX_HOME_DISPLAY}/skills</code>（含 ClawHub 安装、智能体创建）以及内置包始终参与扫描。以下第三方根目录可按开关启用；也可添加自定义文件夹。
+        </p>
+        
+        <div className="overflow-hidden rounded-lg border border-border bg-surface-base">
+          <div className="divide-y divide-border">
+            {skillScanPresets.map((p) => (
+              <div key={p.id} className="flex items-center justify-between px-3 py-2.5">
+                <div className="min-w-0 flex-1 pr-3">
+                  <div className="text-xs font-semibold text-text-strong">{p.label}</div>
+                  <div className="mt-0.5 truncate font-mono text-[10px] text-text-muted">{p.path}</div>
+                </div>
+                <div className="shrink-0">
+                  <SettingsSwitch
+                    checked={p.enabled}
+                    disabled={skillScanBusy}
+                    aria-label={`切换 ${p.label}`}
+                    onChange={(next) => {
+                      const updated = skillScanPresets.map((row) =>
+                        row.id === p.id ? { ...row, enabled: next } : row,
+                      );
+                      setSkillScanPresets(updated);
+                      void persistSkillScanSettings(updated, skillScanCustomPaths, preferredSkillSources, disabledSkillNames);
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="divide-y divide-border border-t border-border">
+            {skillScanCustomPaths.map((row, i) => (
+              <div key={`skill-custom-${i}`} className="flex items-center gap-2 px-3 py-2 bg-surface-base">
+                <div className="flex-1 min-w-0">
+                  <input
+                    className="w-full rounded bg-surface-panel px-2 py-1.5 font-mono text-xs text-text-primary outline-none placeholder:text-text-faint focus:ring-1 focus:ring-border"
+                    placeholder="例如 ~/my-skills 或绝对路径"
+                    value={row.path}
+                    disabled={skillScanBusy}
+                    onChange={(e) => {
+                      const next = skillScanCustomPaths.map((r, j) =>
+                        j === i ? { ...r, path: e.target.value } : r,
+                      );
+                      setSkillScanCustomPaths(next);
+                    }}
+                    onBlur={(e) => {
+                      const next = skillScanCustomPaths.map((r, j) =>
+                        j === i ? { ...r, path: e.target.value } : r,
+                      );
+                      void persistSkillScanSettings(
+                        skillScanPresets,
+                        next,
+                        preferredSkillSources,
+                        disabledSkillNames,
+                      );
+                    }}
+                  />
+                </div>
+                <button
+                  type="button"
+                  className="shrink-0 rounded p-1.5 text-text-faint transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                  disabled={skillScanBusy}
+                  title="浏览选目录"
+                  onClick={() => void onBrowseCommittedSkillPath(i)}
+                >
+                  <FolderOpen className="h-3.5 w-3.5" aria-hidden />
+                </button>
+                <button
+                  type="button"
+                  className="shrink-0 rounded p-1.5 text-text-faint transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                  disabled={skillScanBusy}
+                  title="移除"
+                  onClick={() => {
+                    const next = skillScanCustomPaths.filter((_, j) => j !== i);
+                    setSkillScanCustomPaths(next);
+                    void persistSkillScanSettings(
+                      skillScanPresets,
+                      next,
+                      preferredSkillSources,
+                      disabledSkillNames,
+                    );
+                  }}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+                <div className="shrink-0 pl-1">
+                  <SettingsSwitch
+                    checked={row.enabled}
+                    disabled={skillScanBusy}
+                    aria-label={`切换自定义路径 ${row.path || i + 1}`}
+                    onChange={(nextEnabled) => {
+                      const next = skillScanCustomPaths.map((r, j) =>
+                        j === i ? { ...r, enabled: nextEnabled } : r,
+                      );
+                      setSkillScanCustomPaths(next);
+                      void persistSkillScanSettings(
+                        skillScanPresets,
+                        next,
+                        preferredSkillSources,
+                        disabledSkillNames,
+                      );
+                    }}
+                  />
+                </div>
+              </div>
+            ))}
+
+            {skillScanDraftPath !== null ? (
+              <div className="bg-surface-base px-3 py-2">
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <input
+                      className="w-full rounded bg-surface-panel px-2 py-1.5 font-mono text-xs text-text-primary outline-none placeholder:text-text-faint focus:ring-1 focus:ring-border"
+                      placeholder="例如 ~/.agents/skills 或绝对路径"
+                      value={skillScanDraftPath}
+                      disabled={skillScanBusy}
+                      autoFocus
+                      onChange={(e) => setSkillScanDraftPath(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void onConfirmSkillDraftPath();
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          onCancelSkillDraftPath();
+                        }
+                      }}
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded p-1.5 text-text-faint transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                    disabled={skillScanBusy}
+                    title="浏览选目录"
+                    onClick={() => void onBrowseSkillDraftPath()}
+                  >
+                    <FolderOpen className="h-3.5 w-3.5" aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md border border-border bg-[var(--ui-btn-primary-bg)] px-2 py-1 text-xs font-medium text-[var(--ui-btn-primary-fg)] transition hover:opacity-90 disabled:opacity-40"
+                    disabled={skillScanBusy}
+                    onClick={() => void onConfirmSkillDraftPath()}
+                  >
+                    确认
+                  </button>
+                  <button
+                    type="button"
+                    className="shrink-0 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                    disabled={skillScanBusy}
+                    onClick={onCancelSkillDraftPath}
+                  >
+                    取消
+                  </button>
+                </div>
+                <p className="mt-1.5 text-[10px] text-text-faint">仅本地草稿，尚未写入配置</p>
+              </div>
+            ) : null}
+
+            <div className="bg-surface-base px-3 py-2">
+              <button
+                type="button"
+                className="flex w-full items-center justify-center rounded-md border border-dashed border-border px-3 py-2.5 text-sm text-text-subtle transition hover:border-border-strong hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                disabled={skillScanBusy}
+                onClick={onAddCustomSkillPath}
+              >
+                添加自定义路径
+              </button>
+            </div>
+          </div>
+        </div>
+        
+        {skillScanMsg ? (
+          <div
+            className={`mt-2 text-xs ${skillScanMsg.includes("失败") ? "text-amber-400" : "text-emerald-400"}`}
+          >
+            {skillScanMsg}
+          </div>
+        ) : null}
+      </Panel>
+      ) : null}
+
+      {err && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">
+          {err}
+        </div>
+      )}
+
+      {items.length === 0 && !err && (
+        <div className="py-6 text-center text-sm text-text-faint">
+          未发现任何技能。<br />
+          <span className="text-xs text-text-subtle">
+            可将 SKILL.md 放置在项目 .agents/skills/，或展开下方的「技能来源与扫描路径」。
+          </span>
+        </div>
+      )}
+
+      {/* Skills list grouped by location; after market install, global block first + pinned row */}
+      <div className="space-y-3">
+        {showGlobalSkillsFirst ? (
+          <>
+            <SkillsLocationSection
+              skills={globalSkills}
+              title="全局技能"
+              locationLabel="全局"
+              search={search}
+              onSearchChange={setSearch}
+              onRefresh={() => void onRefresh()}
+              listLoading={loading}
+              showWhenEmpty={hasGlobalSkills}
+              activeSkillName={activeSkillName}
+              expandedSkillName={expandedSkillName}
+              detail={detail}
+              loadingDetail={loadingDetail}
+              recentMarketSkillName={recentMarketSkillName}
+              preferredSources={preferredSkillSources}
+              onChoosePreferredSource={choosePreferredSource}
+              onActivate={setActiveSkillName}
+              onExpandDetail={onExpandDetail}
+              onCollapseDetail={() => setExpandedSkillName(null)}
+              disabledSkillNames={disabledSkillNames}
+              skillScanBusy={skillScanBusy}
+              onToggleGlobalSkill={toggleGlobalSkill}
+            />
+            <SkillsLocationSection
+              skills={projectSkills}
+              title="项目技能"
+              locationLabel="项目"
+              activeSkillName={activeSkillName}
+              expandedSkillName={expandedSkillName}
+              detail={detail}
+              loadingDetail={loadingDetail}
+              recentMarketSkillName={recentMarketSkillName}
+              preferredSources={preferredSkillSources}
+              onChoosePreferredSource={choosePreferredSource}
+              onActivate={setActiveSkillName}
+              onExpandDetail={onExpandDetail}
+              onCollapseDetail={() => setExpandedSkillName(null)}
+              disabledSkillNames={disabledSkillNames}
+              skillScanBusy={skillScanBusy}
+              onToggleGlobalSkill={toggleGlobalSkill}
+            />
+          </>
+        ) : (
+          <>
+            <SkillsLocationSection
+              skills={projectSkills}
+              title="项目技能"
+              locationLabel="项目"
+              activeSkillName={activeSkillName}
+              expandedSkillName={expandedSkillName}
+              detail={detail}
+              loadingDetail={loadingDetail}
+              recentMarketSkillName={recentMarketSkillName}
+              preferredSources={preferredSkillSources}
+              onChoosePreferredSource={choosePreferredSource}
+              onActivate={setActiveSkillName}
+              onExpandDetail={onExpandDetail}
+              onCollapseDetail={() => setExpandedSkillName(null)}
+              disabledSkillNames={disabledSkillNames}
+              skillScanBusy={skillScanBusy}
+              onToggleGlobalSkill={toggleGlobalSkill}
+            />
+            <SkillsLocationSection
+              skills={globalSkills}
+              title="全局技能"
+              locationLabel="全局"
+              search={search}
+              onSearchChange={setSearch}
+              onRefresh={() => void onRefresh()}
+              listLoading={loading}
+              showWhenEmpty={hasGlobalSkills}
+              activeSkillName={activeSkillName}
+              expandedSkillName={expandedSkillName}
+              detail={detail}
+              loadingDetail={loadingDetail}
+              recentMarketSkillName={recentMarketSkillName}
+              preferredSources={preferredSkillSources}
+              onChoosePreferredSource={choosePreferredSource}
+              onActivate={setActiveSkillName}
+              onExpandDetail={onExpandDetail}
+              onCollapseDetail={() => setExpandedSkillName(null)}
+              disabledSkillNames={disabledSkillNames}
+              skillScanBusy={skillScanBusy}
+              onToggleGlobalSkill={toggleGlobalSkill}
+            />
+          </>
+        )}
+      </div>
+
+      {/* === Skills Marketplace Section (Collapsible) === */}
+      {userAccount.loggedIn || capabilityLocks.allowLocalSkillInstall ? (
+        <Panel
+          title="技能市场"
+          collapsible
+          defaultCollapsed={false}
+          className="order-first"
+          titleClassName={SKILLS_SECTION_PANEL_TITLE_CLASS}
+        >
+        <div className="space-y-4 pt-1 pb-1">
+          {userAccount.loggedIn ? (
+            <EnterpriseSkillMarketplace
+              capabilities={userAccount.capabilities}
+              localSkills={items}
+              syncStatuses={userAccount.capabilitySyncStatuses}
+              refreshing={enterpriseMarketRefreshing}
+              refreshMessage={enterpriseMarketMessage}
+              onRefresh={refreshEnterpriseSkillMarket}
+              onRetrySync={() => refreshEnterpriseSkillMarket()}
+              getInstallState={getEnterpriseSkillInstallState}
+              getInstallMessage={getEnterpriseSkillInstallMessage}
+              getSkillEnabled={getEnterpriseSkillEnabled}
+              onInstall={(capability) =>
+                void onMarketInstall(enterpriseSkillInstallItem(capability))
+              }
+              onTrySkill={(capability) => {
+                const item = enterpriseSkillInstallItem(capability);
+                tryMarketSkill(item.name, item);
+              }}
+              onToggleSkill={(capability, enabled) => {
+                const item = enterpriseSkillInstallItem(capability);
+                toggleMarketSkill(item.name, item, enabled);
+              }}
+              onEditSkill={(capability) => {
+                const item = enterpriseSkillInstallItem(capability);
+                void editMarketSkill(item.name, item);
+              }}
+              onUninstallSkill={(capability) => {
+                const item = enterpriseSkillInstallItem(capability);
+                requestMarketSkillUninstall(
+                  item.name,
+                  item.display_name || item.name,
+                  item,
+                );
+              }}
+            />
+          ) : (
+            <>
+          {/* === Recommended official shortcuts (suite-style cards, 图2) === */}
+            <section className="pt-0.5">
+              <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
+                <div className="text-[11px] font-semibold tracking-wide text-text-strong">
+                  官方推荐
+                </div>
+                <div
+                  className="inline-flex rounded-full bg-surface-panel p-0.5"
+                  role="tablist"
+                  aria-label="推荐来源档筛选"
+                >
+                  {(
+                    [
+                      { id: "all" as const, label: "全部" },
+                      { id: "enterprise" as const, label: RECOMMENDED_TIER_LABEL.enterprise },
+                      { id: "third_party" as const, label: RECOMMENDED_TIER_LABEL.third_party },
+                    ] as const
+                  ).map((tab) => {
+                    const active = recommendedTierFilter === tab.id;
+                    return (
+                      <button
+                        key={tab.id}
+                        type="button"
+                        role="tab"
+                        aria-selected={active}
+                        className={
+                          active
+                            ? "rounded-full bg-surface-card px-2.5 py-1 text-[11px] font-medium text-text-strong shadow-sm"
+                            : "rounded-full px-2.5 py-1 text-[11px] text-text-faint transition-colors hover:text-text-primary"
+                        }
+                        onClick={() => setRecommendedTierFilter(tab.id)}
+                      >
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              {filteredRecommendedSkills.length === 0 ? (
+                <p className="py-8 text-center text-xs text-text-faint">
+                  该来源档暂无推荐技能
+                </p>
+              ) : (
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {filteredRecommendedSkills.map((skill) => {
+                  const canInstall = skill.cta === "install";
+                  const installItem = recommendedSkillInstallItem(skill);
+                  const installedSlug = installItem.name;
+                  const directInstalled = canInstall && isMarketSkillInstalled(installedSlug);
+                  const directInstallState: SkillHubInstallState = directInstalled
+                    ? "installed"
+                    : skill.marketplace_slug
+                      ? getMarketInstallState(installItem, installedSlug)
+                      : installPromptBusy
+                        ? "installing"
+                        : "idle";
+                  const directMessage = recommendedInstallMessages[skill.id] || "";
+                  return (
+                  <div
+                    key={skill.id}
+                    className="flex min-h-[132px] flex-col rounded-2xl border border-black/[0.08] bg-surface-panel px-3.5 py-3.5 transition-colors hover:bg-surface-hover/50 dark:border-white/[0.1]"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      {recommendedIconBroken[skill.id] || !(recommendedIconData[skill.id] || skill.icon_src) ? (
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-surface-panel text-[13px] font-semibold text-text-subtle">
+                          {(skill.name || skill.id).slice(0, 1).toUpperCase()}
+                        </div>
+                      ) : (
+                        <img
+                          src={recommendedIconData[skill.id] || skill.icon_src}
+                          alt=""
+                          className="h-9 w-9 shrink-0 rounded-full bg-white object-cover ring-1 ring-black/[0.04]"
+                          loading="lazy"
+                          onError={() =>
+                            setRecommendedIconBroken((prev) =>
+                              prev[skill.id] ? prev : { ...prev, [skill.id]: true }
+                            )
+                          }
+                        />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-semibold tracking-tight text-text-strong">
+                          {skill.name}
+                        </div>
+                        <div
+                          className={
+                            skill.tier === "enterprise"
+                              ? "mt-0.5 text-[10px] font-medium text-[#07C160]"
+                              : "mt-0.5 text-[10px] text-text-faint"
+                          }
+                        >
+                          {RECOMMENDED_TIER_LABEL[skill.tier]}
+                          <span className="mx-1 text-border">·</span>
+                          <span className="font-normal text-text-faint">{skill.category}</span>
+                        </div>
+                      </div>
+                      {canInstall ? (
+                        <SkillMarketActions
+                          label={skill.name}
+                          installState={directInstallState}
+                          skillEnabled={getMarketSkillEnabled(installedSlug)}
+                          onInstall={() => onRecommendedSkillInstall(skill)}
+                          onTrySkill={() => tryMarketSkill(installedSlug, installItem)}
+                          onToggleSkill={(enabled) =>
+                            toggleMarketSkill(installedSlug, installItem, enabled)
+                          }
+                          onEditSkill={() => void editMarketSkill(installedSlug, installItem)}
+                          onUninstallSkill={
+                            skill.marketplace_slug
+                              ? () =>
+                                  requestMarketSkillUninstall(
+                                    installedSlug,
+                                    skill.name,
+                                    installItem,
+                                  )
+                              : undefined
+                          }
+                        />
+                      ) : (
+                        <button
+                          type="button"
+                          title="打开官网"
+                          aria-label={`打开 ${skill.name} 官网`}
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-border bg-black/[0.06] text-text-strong transition-colors hover:bg-black/[0.1] active:scale-[0.97] dark:bg-white/10 dark:hover:bg-white/15"
+                          onClick={() => openExternalUrl(skill.official_url)}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </div>
+                    <HoverTip
+                      label={skill.description}
+                      delayMs={280}
+                      className="mt-2.5 min-h-0 w-full flex-1 flex-col"
+                    >
+                      <ClampToFitText
+                        text={skill.description}
+                        className="min-h-0 w-full min-w-0 flex-1 break-words text-[12px] leading-4 text-text-muted"
+                      />
+                    </HoverTip>
+                    {directMessage ? (
+                      <div
+                        className={`mt-2 whitespace-pre-wrap text-[11px] leading-4 ${
+                          directMessage.includes("失败") || directMessage.includes("高风险")
+                            ? "text-amber-300"
+                            : directMessage.includes("已安装")
+                              ? "text-emerald-400"
+                              : "text-text-muted"
+                        }`}
+                      >
+                        {directMessage}
+                      </div>
+                    ) : null}
+                    {!canInstall ? (
+                      <button
+                        type="button"
+                        className="mt-2 self-start text-[11px] text-text-faint transition hover:text-text-primary"
+                        onClick={() => openExternalUrl(skill.official_url)}
+                      >
+                        官网
+                      </button>
+                    ) : null}
+                  </div>
+                  );
+                })}
+              </div>
+              )}
+            </section>
+
+            {/* === ClawHub marketplace (registry aggregate) === */}
+            <section className="rounded-lg bg-surface-panel p-3 border border-border">
+              <div className="mb-3 text-[11px] font-semibold text-text-strong">
+                CLAWHUB 市场
+              </div>
+              <div className="flex gap-2">
+                <input
+                  className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-primary placeholder:text-text-faint"
+                  placeholder="搜索技能名称..."
+                  value={marketQuery}
+                  onChange={(e) => setMarketQuery(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void onMarketSearch(); }}
+                />
+                <button
+                  className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                  onClick={() => void onMarketSearch()}
+                  disabled={marketLoading}
+                >
+                  {marketLoading ? "搜索中..." : "搜索"}
+                </button>
+              </div>
+              {marketMsg && (
+                <div
+                  className={`mt-1.5 whitespace-pre-wrap text-xs ${
+                    marketMsg.includes("失败") || marketMsg.includes("未找到")
+                      ? "text-amber-400"
+                      : ((marketNeedsConfirmNonHigh || marketNeedsConfirmHigh) &&
+                            marketPending?.provenance_source !== "skillhub" &&
+                            !marketPending?.recommended_id) ||
+                          marketMsg.includes("高危")
+                        ? "text-amber-300"
+                        : "text-emerald-400"
+                  }`}
+                >
+                  {marketMsg}
+                </div>
+              )}
+              {marketResults.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {marketResults.map((item) => {
+                    const label = item.display_name || item.name;
+                    return (
+                      <div
+                        key={`${item.source}:${item.name}`}
+                        className="flex items-start gap-2 rounded-md border border-transparent bg-surface-card px-3 py-2"
+                      >
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate text-sm font-medium text-text-primary">{label}</span>
+                            <span className="shrink-0 rounded-full border border-border px-1.5 text-[10px] text-text-faint">
+                              {item.source}
+                            </span>
+                            {item.source_type === "clawhub" && (
+                              <span className="shrink-0 rounded-full border border-violet-500/30 bg-violet-500/10 px-1.5 text-[10px] text-violet-400">
+                                ClawHub
+                              </span>
+                            )}
+                          </div>
+                          {item.description && (
+                            <p className="mt-0.5 line-clamp-2 text-xs text-text-muted">{item.description}</p>
+                          )}
+                          <p className="mt-0.5 text-[10px] text-text-faint">by {item.author} · v{item.version}</p>
+                        </div>
+                        <SkillMarketActions
+                          label={label}
+                          installState={getMarketInstallState(item)}
+                          skillEnabled={getMarketSkillEnabled(item.name)}
+                          requiresApiKey={item.requires_api_key}
+                          onInstall={() => void onMarketInstall(item)}
+                          onTrySkill={() => tryMarketSkill(item.name, item)}
+                          onToggleSkill={(enabled) =>
+                            toggleMarketSkill(item.name, item, enabled)
+                          }
+                          onEditSkill={() => void editMarketSkill(item.name, item)}
+                          onUninstallSkill={() =>
+                            requestMarketSkillUninstall(item.name, label, item)
+                          }
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            <SkillHubMarketplace
+              installStatusMessage={skillhubMsg}
+              installStatusTone={skillHubStatusTone}
+              getInstallState={getSkillHubInstallState}
+              getInstallMessage={(item) =>
+                skillhubInstallMessages[
+                  marketInstallKey(skillHubInstallItem(item))
+                ] || ""
+              }
+              getSkillEnabled={getSkillHubSkillEnabled}
+              onInstall={(item) => void onMarketInstall(skillHubInstallItem(item))}
+              onTrySkill={trySkillHubSkill}
+              onToggleSkill={toggleSkillHubSkill}
+              onEditSkill={(item) => void editSkillHubSkill(item)}
+              onUninstallSkill={requestSkillHubUninstall}
+            />
+            </>
+          )}
+        </div>
+        </Panel>
+      ) : null}
+    </div>
+  );
+}
+
+function EmailSettingsTab() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [message, setMessage] = useState("");
+  const [preset, setPreset] = useState<EmailPresetId>("custom");
+  const [form, setForm] = useState<EmailSettingsForm>({ ...DEFAULT_EMAIL_SETTINGS });
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      setLoading(true);
+      setMessage("");
+      try {
+        const result = await window.agenticxDesktop.loadEmailConfig();
+        const config = normalizeEmailSettings(result?.config);
+        if (!disposed) {
+          setForm(config);
+          setPreset(inferPresetFromConfig(config));
+        }
+      } catch (err) {
+        if (!disposed) setMessage("读取配置失败，请稍后重试。");
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const updateField = <K extends keyof EmailSettingsForm>(field: K, value: EmailSettingsForm[K]) => {
+    setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const onPresetChange = (next: EmailPresetId) => {
+    setPreset(next);
+    if (next === "custom") return;
+    const target = EMAIL_PRESETS.find((item) => item.id === next);
+    if (!target) return;
+    setForm((prev) => ({
+      ...prev,
+      smtp_host: target.smtp_host,
+      smtp_port: target.smtp_port,
+      smtp_use_tls: target.smtp_use_tls,
+    }));
+  };
+
+  const onTestSend = async () => {
+    setTesting(true);
+    setMessage("");
+    try {
+      const res = await window.agenticxDesktop.testEmailConfig({
+        config: form,
+        toEmail: form.default_to_email,
+      });
+      setMessage(res?.ok ? "测试邮件发送成功。" : `测试失败: ${res?.error ?? "未知错误"}`);
+    } catch (err) {
+      setMessage("测试失败，请检查 SMTP 配置与网络。");
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const onSave = async () => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const res = await window.agenticxDesktop.saveEmailConfig(form);
+      setMessage(res?.ok ? "邮件配置已保存。" : `保存失败: ${res?.error ?? "未知错误"}`);
+    } catch (err) {
+      setMessage("保存失败，请稍后重试。");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="py-8 text-center text-sm text-text-faint">加载邮件配置中...</div>;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-border bg-surface-card p-3">
+        <div className="mb-3 flex items-center justify-between gap-3">
+          <div className="text-sm font-medium text-text-primary">SMTP 配置</div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-text-muted">启用邮件通知</span>
+            <SettingsSwitch
+              checked={form.enabled}
+              onChange={(next) => updateField("enabled", next)}
+              aria-label="启用邮件通知"
+            />
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          <label className="block text-sm text-text-muted">
+            SMTP 预设
+            <select
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={preset}
+              onChange={(e) => onPresetChange(e.target.value as EmailPresetId)}
+            >
+              {EMAIL_PRESETS.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="block text-sm text-text-muted">
+            SMTP Host
+            <input
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={form.smtp_host}
+              onChange={(e) => updateField("smtp_host", e.target.value)}
+              placeholder="smtp.qq.com"
+            />
+          </label>
+
+          <div className="grid grid-cols-2 gap-3">
+            <label className="block text-sm text-text-muted">
+              SMTP Port
+              <input
+                type="number"
+                className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                value={String(form.smtp_port)}
+                onChange={(e) => updateField("smtp_port", Number(e.target.value) || 0)}
+              />
+            </label>
+            <label className="block text-sm text-text-muted">
+              TLS
+              <select
+                className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                value={form.smtp_use_tls ? "true" : "false"}
+                onChange={(e) => updateField("smtp_use_tls", e.target.value === "true")}
+              >
+                <option value="true">启用</option>
+                <option value="false">关闭</option>
+              </select>
+            </label>
+          </div>
+
+          <label className="block text-sm text-text-muted">
+            SMTP 用户名
+            <input
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={form.smtp_username}
+              onChange={(e) => updateField("smtp_username", e.target.value)}
+              placeholder="your_email@qq.com"
+            />
+          </label>
+
+          <label className="block text-sm text-text-muted">
+            SMTP 授权码 / 密码
+            <input
+              type="password"
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={form.smtp_password}
+              onChange={(e) => updateField("smtp_password", e.target.value)}
+              placeholder="应用专用密码"
+            />
+          </label>
+
+          <label className="block text-sm text-text-muted">
+            发件邮箱
+            <input
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={form.from_email}
+              onChange={(e) => updateField("from_email", e.target.value)}
+              placeholder="your_email@qq.com"
+            />
+          </label>
+
+          <label className="block text-sm text-text-muted">
+            默认收件邮箱
+            <input
+              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+              value={form.default_to_email}
+              onChange={(e) => updateField("default_to_email", e.target.value)}
+              placeholder="bingzhenli@hotmail.com"
+            />
+          </label>
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-end gap-2">
+        <button
+          className="rounded-md border border-border px-3 py-1.5 text-xs text-text-muted transition hover:bg-surface-hover disabled:opacity-40"
+          onClick={onTestSend}
+          disabled={testing || saving}
+        >
+          {testing ? "测试中..." : "测试发送"}
+        </button>
+        <button
+          className="rounded-md bg-[var(--settings-accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--settings-accent-solid-text)] transition hover:bg-[var(--settings-accent-solid-hover)] disabled:opacity-40"
+          onClick={onSave}
+          disabled={testing || saving}
+        >
+          {saving ? "保存中..." : "保存邮件配置"}
+        </button>
+      </div>
+      {message ? <div className="mt-2 text-xs text-text-subtle">{message}</div> : null}
+    </div>
+  );
+}
+
+type FavoriteRow = {
+  message_id?: string;
+  session_id?: string;
+  content?: string;
+  saved_at?: string;
+  role?: string;
+  tags?: string[];
+};
+
+function FavoritesTab({
+  apiBase,
+  apiToken,
+  sessionId,
+  panes,
+  avatars,
+  groups,
+  onForwardFavorite,
+}: {
+  apiBase: string;
+  apiToken: string;
+  sessionId: string;
+  panes: ChatPane[];
+  avatars: Avatar[];
+  groups: GroupChat[];
+  onForwardFavorite: (
+    ctx: FavoriteForwardContext,
+    payload: ForwardConfirmPayload,
+    note: string
+  ) => Promise<void>;
+}) {
+  const [items, setItems] = useState<FavoriteRow[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [forwardOpen, setForwardOpen] = useState(false);
+  const [forwardCtx, setForwardCtx] = useState<FavoriteForwardContext | null>(null);
+  const [editing, setEditing] = useState<{
+    messageId: string;
+    tags: string[];
+    input: string;
+  } | null>(null);
+  const [tagSaving, setTagSaving] = useState(false);
+
+  const base = apiBase.replace(/\/$/, "");
+
+  const reload = useCallback(async () => {
+    if (!base) return;
+    const r = await fetch(`${base}/api/memory/favorites`, {
+      headers: { "x-agx-desktop-token": apiToken },
+    });
+    const data = (await r.json().catch(() => null)) as { items?: FavoriteRow[]; detail?: string } | null;
+    if (!r.ok) {
+      throw new Error(data?.detail ? String(data.detail) : `HTTP ${r.status}`);
+    }
+    setItems(Array.isArray(data?.items) ? data.items : []);
+  }, [apiToken, base]);
+
+  useEffect(() => {
+    if (!apiBase.trim()) {
+      setErr("未连接 Studio，无法加载收藏");
+      setItems([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    setErr("");
+    void (async () => {
+      try {
+        await reload();
+      } catch (e) {
+        if (!cancelled) setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [apiBase, apiToken, reload]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+    };
+  }, []);
+
+  const patchTags = useCallback(
+    async (messageId: string, tags: string[]) => {
+      if (!base || !messageId.trim()) return;
+      setTagSaving(true);
+      try {
+        const r = await fetch(`${base}/api/memory/favorites/${encodeURIComponent(messageId)}/tags`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "x-agx-desktop-token": apiToken,
+          },
+          body: JSON.stringify({ tags }),
+        });
+        const data = (await r.json().catch(() => null)) as { ok?: boolean; detail?: string } | null;
+        if (!r.ok || !data?.ok) {
+          throw new Error(data?.detail ? String(data.detail) : `HTTP ${r.status}`);
+        }
+        setItems((prev) =>
+          prev.map((row) =>
+            String(row.message_id ?? "").trim() === messageId ? { ...row, tags: [...tags] } : row
+          )
+        );
+        setEditing(null);
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e));
+      } finally {
+        setTagSaving(false);
+      }
+    },
+    [apiToken, base]
+  );
+
+  const finishEditingTags = useCallback(() => {
+    if (!editing || tagSaving) return;
+    void patchTags(editing.messageId, editing.tags);
+  }, [editing, patchTags, tagSaving]);
+
+  if (!apiBase.trim()) {
+    return <div className="py-8 text-center text-sm text-text-faint">未连接 Studio，无法加载收藏</div>;
+  }
+  if (loading) {
+    return <div className="py-8 text-center text-sm text-text-faint">加载中…</div>;
+  }
+  if (err && items.length === 0 && !loading) {
+    return <div className="py-8 text-center text-sm text-rose-400">{err}</div>;
+  }
+  if (items.length === 0) {
+    return <div className="py-8 text-center text-sm text-text-faint">暂无收藏</div>;
+  }
+
+  return (
+    <div className="space-y-2">
+      {err ? <div className="mb-2 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs text-amber-200">{err}</div> : null}
+      <p className="mb-3 text-xs text-text-subtle">
+        以下为全局收藏（按保存时间倒序）。同一条消息重复收藏不会重复写入。
+      </p>
+      <ForwardPicker
+        open={forwardOpen}
+        currentSessionId={forwardCtx?.sourceSessionId ?? sessionId}
+        currentAvatarId={null}
+        avatars={avatars}
+        groups={groups}
+        onClose={() => {
+          setForwardOpen(false);
+          setForwardCtx(null);
+        }}
+        onConfirm={async (payload, note) => {
+          if (!forwardCtx) return;
+          await onForwardFavorite(forwardCtx, payload, note);
+        }}
+      />
+      {items.map((row, idx) => {
+        const content = String(row.content ?? "").trim() || "（无文本）";
+        const savedAt = String(row.saved_at ?? "");
+        const sid = String(row.session_id ?? "").trim();
+        const mid = String(row.message_id ?? "").trim();
+        let timeLabel = savedAt;
+        try {
+          if (savedAt) timeLabel = new Date(savedAt).toLocaleString();
+        } catch {
+          // keep raw
+        }
+        const tags = Array.isArray(row.tags)
+          ? row.tags.map((t) => String(t).trim()).filter(Boolean)
+          : [];
+        const isEditing = editing?.messageId === mid;
+
+        return (
+          <div
+            key={`${mid || idx}-${savedAt}`}
+            className="flex gap-3 rounded-lg border border-border bg-surface-card px-3 py-2.5"
+          >
+            <div className="min-w-0 flex-1">
+              <p className="line-clamp-3 whitespace-pre-wrap break-words text-sm text-text-primary">{content}</p>
+              {!isEditing && tags.length > 0 ? (
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {tags.map((t) => (
+                    <span
+                      key={t}
+                      className="rounded-full border border-border bg-surface-panel px-2 py-0.5 text-[11px] text-text-muted"
+                    >
+                      #{t}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              {isEditing ? (
+                <div
+                  className="mt-2 space-y-2 rounded-md border border-border bg-surface-panel p-2"
+                  onBlur={(ev) => {
+                    if (!ev.currentTarget.contains(ev.relatedTarget as Node | null)) {
+                      finishEditingTags();
+                    }
+                  }}
+                >
+                  <div className="flex flex-wrap gap-1">
+                    {editing.tags.map((t) => (
+                      <span
+                        key={t}
+                        className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-card px-2 py-0.5 text-[11px] text-text-muted"
+                      >
+                        {t}
+                        <button
+                          type="button"
+                          className="text-text-faint hover:text-rose-400"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() =>
+                            setEditing((prev) =>
+                              prev && prev.messageId === mid
+                                ? { ...prev, tags: prev.tags.filter((x) => x !== t) }
+                                : prev
+                            )
+                          }
+                        >
+                          ×
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      value={editing.input}
+                      onChange={(e) =>
+                        setEditing((prev) => (prev && prev.messageId === mid ? { ...prev, input: e.target.value } : prev))
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key !== "Enter") return;
+                        e.preventDefault();
+                        const next = editing.input.trim();
+                        if (!next) return;
+                        setEditing((prev) => {
+                          if (!prev || prev.messageId !== mid) return prev;
+                          if (prev.tags.includes(next)) return { ...prev, input: "" };
+                          return { ...prev, tags: [...prev.tags, next], input: "" };
+                        });
+                      }}
+                      placeholder="输入新标签后按 Enter"
+                      className="min-w-[8rem] flex-1 rounded border border-border bg-surface-card px-2 py-1 text-xs text-text-primary outline-none focus:border-[var(--settings-accent-focus)]"
+                    />
+                    <button
+                      type="button"
+                      disabled={tagSaving}
+                      className="rounded border border-border px-2 py-1 text-xs text-text-subtle hover:bg-surface-hover disabled:opacity-40"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={() => void patchTags(mid, editing.tags)}
+                    >
+                      {tagSaving ? "保存中…" : "保存"}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                <button
+                  type="button"
+                  className="rounded border border-border px-2 py-0.5 text-text-subtle transition hover:bg-surface-hover"
+                  onClick={async () => {
+                    if (!mid) return;
+                    try {
+                      await navigator.clipboard.writeText(content);
+                      if (copiedTimerRef.current) clearTimeout(copiedTimerRef.current);
+                      setCopiedId(mid);
+                      copiedTimerRef.current = setTimeout(() => setCopiedId(null), 1000);
+                    } catch {
+                      setErr("复制失败");
+                    }
+                  }}
+                >
+                  {copiedId === mid ? "已复制" : "复制"}
+                </button>
+                <button
+                  type="button"
+                  disabled={!sid}
+                  className="rounded border border-border px-2 py-0.5 text-text-subtle transition hover:bg-surface-hover disabled:opacity-40"
+                  onClick={() => {
+                    if (!sid) return;
+                    setForwardCtx({
+                      sourceSessionId: sid,
+                      content,
+                      role: row.role,
+                    });
+                    setForwardOpen(true);
+                  }}
+                >
+                  转发
+                </button>
+                <button
+                  type="button"
+                  disabled={!mid}
+                  className="rounded border border-border px-2 py-0.5 text-text-subtle transition hover:bg-surface-hover disabled:opacity-40"
+                  onClick={() =>
+                    setEditing({
+                      messageId: mid,
+                      tags: [...tags],
+                      input: "",
+                    })
+                  }
+                >
+                  编辑标签
+                </button>
+                <button
+                  type="button"
+                  disabled={!mid}
+                  className="rounded border border-rose-500/40 px-2 py-0.5 text-rose-300 transition hover:bg-rose-500/10 disabled:opacity-40"
+                  onClick={() => {
+                    if (!mid || !base) return;
+                    const prev = items;
+                    setItems((list) => list.filter((r) => String(r.message_id ?? "").trim() !== mid));
+                    setErr("");
+                    void (async () => {
+                      try {
+                        const r = await fetch(`${base}/api/memory/favorites/${encodeURIComponent(mid)}`, {
+                          method: "DELETE",
+                          headers: { "x-agx-desktop-token": apiToken },
+                        });
+                        const data = (await r.json().catch(() => null)) as { ok?: boolean; detail?: string } | null;
+                        if (!r.ok || !data?.ok) {
+                          throw new Error(data?.detail ? String(data.detail) : `HTTP ${r.status}`);
+                        }
+                      } catch (e) {
+                        setItems(prev);
+                        setErr(e instanceof Error ? e.message : String(e));
+                      }
+                    })();
+                  }}
+                >
+                  删除
+                </button>
+                {sid ? <span className="text-text-faint">会话 {sid.slice(0, 8)}…</span> : null}
+                {row.role ? <span className="text-text-faint">{row.role}</span> : null}
+              </div>
+            </div>
+            <div className="shrink-0 text-right text-[11px] text-text-subtle tabular-nums">{timeLabel}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 设置内统一开关：绿轨 + 白钮（与技能高级设置卡片一致） */
+function SettingsSwitch({
+  checked,
+  disabled,
+  onChange,
+  size = "md",
+  "aria-label": ariaLabel,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+  size?: "sm" | "md";
+  "aria-label"?: string;
+}) {
+  const trackClass = size === "sm" ? "h-4 w-7" : "h-5 w-9";
+  const knobClass = size === "sm" ? "left-0.5 top-0.5 h-3 w-3" : "left-0.5 top-0.5 h-4 w-4";
+  const knobTranslate = size === "sm" ? "translate-x-3" : "translate-x-4";
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={ariaLabel}
+      disabled={disabled}
+      onClick={() => {
+        if (!disabled) onChange(!checked);
+      }}
+      className={`relative ${trackClass} shrink-0 rounded-full transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[rgba(var(--theme-color-rgb,16,185,129),0.55)] disabled:opacity-40 ${
+        checked ? "bg-[rgb(var(--theme-color-rgb,16,185,129))]" : "bg-surface-hover"
+      }`}
+    >
+      <span
+        className={`pointer-events-none absolute ${knobClass} rounded-full shadow-sm transition-transform ${
+          checked ? "bg-[var(--theme-color-text)]" : "bg-white"
+        } ${checked ? knobTranslate : "translate-x-0"}`}
+      />
+    </button>
+  );
+}
+
+const TRINITY_DEFAULTS: TrinityConfigForm = {
+  skill_protocol: true,
+  session_summary: false,
+  learning_enabled: false,
+  skill_manage_enabled: false,
+  learning_nudge_interval: 10,
+  learning_min_tool_calls: 5,
+};
+
+/** Keys mirrored into agx serve env at startup — toggling requires app restart. */
+const TRINITY_RESTART_ENV_KEYS = new Set<keyof TrinityConfigForm>([
+  "skill_protocol",
+  "session_summary",
+  "learning_enabled",
+  "skill_manage_enabled",
+  "learning_nudge_interval",
+  "learning_min_tool_calls",
+]);
+
+async function promptAppRestartAfterTrinitySave(
+  patch: Partial<TrinityConfigForm>,
+): Promise<boolean> {
+  const touched = (Object.keys(patch) as (keyof TrinityConfigForm)[]).some((key) =>
+    TRINITY_RESTART_ENV_KEYS.has(key),
+  );
+  if (!touched || typeof window === "undefined" || !window.agenticxDesktop?.confirmDialog) {
+    return false;
+  }
+
+  let message: string;
+  if ("skill_manage_enabled" in patch) {
+    message = patch.skill_manage_enabled
+      ? `「允许助手改本地技能」已开启。需完全退出${APP_DISPLAY_NAME}（⌘Q）后重新打开，模型才能调用 skill_manage 修改 ${AGX_HOME_DISPLAY}/skills/ 下的技能。`
+      : `「允许助手改本地技能」已关闭。需重启${APP_DISPLAY_NAME}后，后端才会禁止 skill_manage。`;
+  } else {
+      message =
+      `智能体三件套设置已保存。需完全退出${APP_DISPLAY_NAME}（⌘Q）后重新打开，内置助手才会加载新配置。`;
+  }
+
+  const restartDlg = await window.agenticxDesktop.confirmDialog({
+    title: `需要重启${APP_DISPLAY_NAME}`,
+    message,
+    detail:
+      "内置 agx serve 仅在启动时注入相关环境变量；不重启则当前对话里 skill_manage 等能力仍按旧设置运行。",
+    confirmText: "立即重启",
+    cancelText: "稍后手动重启",
+  });
+  if (restartDlg.confirmed && window.agenticxDesktop.appRelaunch) {
+    await window.agenticxDesktop.appRelaunch();
+    return true;
+  }
+  return false;
+}
+
+function useTrinityConfig() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [form, setForm] = useState<TrinityConfigForm>({ ...TRINITY_DEFAULTS });
+  const [message, setMessage] = useState("");
+  const [lastSaved, setLastSaved] = useState<TrinityConfigForm>({ ...TRINITY_DEFAULTS });
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      setLoading(true);
+      setMessage("");
+      try {
+        const result = await window.agenticxDesktop.loadTrinityConfig();
+        if (!disposed && result?.ok && result.config) {
+          const loaded: TrinityConfigForm = {
+            skill_protocol: Boolean(result.config.skill_protocol),
+            session_summary: Boolean(result.config.session_summary),
+            learning_enabled: Boolean(result.config.learning_enabled),
+            skill_manage_enabled: Boolean(result.config.skill_manage_enabled),
+            learning_nudge_interval:
+              Number(result.config.learning_nudge_interval) > 0
+                ? Number(result.config.learning_nudge_interval)
+                : TRINITY_DEFAULTS.learning_nudge_interval,
+            learning_min_tool_calls:
+              Number(result.config.learning_min_tool_calls) > 0
+                ? Number(result.config.learning_min_tool_calls)
+                : TRINITY_DEFAULTS.learning_min_tool_calls,
+          };
+          setForm(loaded);
+          setLastSaved(loaded);
+        } else if (!disposed) {
+          setMessage(result?.error ? String(result.error) : "读取配置失败。");
+        }
+      } catch {
+        if (!disposed) setMessage("读取配置失败。");
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    };
+    void load();
+    return () => { disposed = true; };
+  }, []);
+
+  const update = useCallback(async (patch: Partial<TrinityConfigForm>) => {
+    const next = { ...form, ...patch };
+    setForm(next);
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await window.agenticxDesktop.saveTrinityConfig(next);
+      if (!result?.ok) {
+        setForm(lastSaved);
+        setMessage(result?.error ? String(result.error) : "保存失败。");
+        return;
+      }
+      setLastSaved(next);
+      const relaunched = await promptAppRestartAfterTrinitySave(patch);
+      if (!relaunched) {
+        setMessage(`已保存。完全退出${APP_DISPLAY_NAME}（⌘Q）后重新打开生效。`);
+      }
+    } catch (e) {
+      setForm(lastSaved);
+      setMessage(e instanceof Error ? e.message : "保存失败。");
+    } finally {
+      setSaving(false);
+    }
+  }, [form, lastSaved]);
+
+  return { loading, saving, form, message, update };
+}
+
+function useSkillInstallPolicy() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [nonHighRiskAutoInstall, setNonHighRiskAutoInstall] = useState(true);
+  const [lastSaved, setLastSaved] = useState(true);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      setLoading(true);
+      setMessage("");
+      try {
+        const result = await window.agenticxDesktop.loadSkillInstallPolicy();
+        if (!disposed && result?.ok && result.config) {
+          const v = Boolean(result.config.non_high_risk_auto_install);
+          setNonHighRiskAutoInstall(v);
+          setLastSaved(v);
+        } else if (!disposed) {
+          setMessage(result?.error ? String(result.error) : "读取技能安装策略失败。");
+        }
+      } catch {
+        if (!disposed) setMessage("读取技能安装策略失败。");
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const updatePolicy = useCallback(async (next: boolean) => {
+    setNonHighRiskAutoInstall(next);
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await window.agenticxDesktop.saveSkillInstallPolicy({
+        non_high_risk_auto_install: next,
+      });
+      if (!result?.ok) {
+        setNonHighRiskAutoInstall(lastSaved);
+        setMessage(result?.error ? String(result.error) : "保存失败。");
+        return;
+      }
+      setLastSaved(next);
+      setMessage("已保存。之后装扩展包或从 ClawHub 安装的技能时，是否跳过确认由本开关与安装前扫描结果一起决定（与后端共用同一份配置）。");
+    } catch (e) {
+      setNonHighRiskAutoInstall(lastSaved);
+      setMessage(e instanceof Error ? e.message : "保存失败。");
+    } finally {
+      setSaving(false);
+    }
+  }, [lastSaved]);
+
+  return { loading, saving, nonHighRiskAutoInstall, message, updatePolicy };
+}
+
+type GuardScanItem = {
+  skill_name: string;
+  verdict: string;
+  score?: number;
+  grade?: string;
+  tier?: string;
+  source?: string;
+  base_dir?: string;
+  can_fix?: boolean;
+  ignored?: boolean;
+  findings?: Array<{
+    pattern_name: string;
+    severity?: string;
+    matched_text?: string;
+    file_path?: string;
+    line_number?: number;
+    category?: string;
+  }>;
+};
+
+function useGuardSettings() {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [version, setVersion] = useState(1);
+  const [scanMode, setScanMode] = useState("standard");
+  const [message, setMessage] = useState("");
+  const [scanBusy, setScanBusy] = useState(false);
+  const [scanResults, setScanResults] = useState<GuardScanItem[]>([]);
+  const [ignoredSkills, setIgnoredSkills] = useState<string[]>([]);
+  const [scanned, setScanned] = useState(false);
+  const [scanMsg, setScanMsg] = useState("");
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [snapshotMap, setSnapshotMap] = useState<Record<string, { id: string; ts: string }>>({});
+  const [restoreMsg, setRestoreMsg] = useState("");
+
+  const refreshSnapshotsFor = useCallback(async (items: GuardScanItem[]) => {
+    const fixable = items.filter((r) => r.can_fix && r.base_dir?.trim());
+    if (fixable.length === 0) return;
+    const entries = await Promise.all(
+      fixable.map(async (r) => {
+        try {
+          const res = await window.agenticxDesktop.skillSnapshotsList({
+            base_dir: r.base_dir!.trim(),
+          });
+          if (res?.ok && res.snapshots?.length) {
+            const latest = res.snapshots[0];
+            return [r.skill_name, { id: latest.id, ts: latest.ts }] as const;
+          }
+        } catch {
+          /* ignore per-skill list errors */
+        }
+        return null;
+      }),
+    );
+    const next: Record<string, { id: string; ts: string }> = {};
+    for (const row of entries) {
+      if (row) next[row[0]] = row[1];
+    }
+    if (Object.keys(next).length > 0) {
+      setSnapshotMap((prev) => ({ ...prev, ...next }));
+    }
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      setLoading(true);
+      try {
+        const result = await window.agenticxDesktop.getGuardSettings();
+        if (!disposed && result?.ok) {
+          if (typeof result.version === "number") setVersion(result.version);
+          if (result.scan_mode) setScanMode(result.scan_mode);
+          if (Array.isArray(result.ignored)) setIgnoredSkills(result.ignored);
+        }
+      } catch {
+        if (!disposed) setMessage("读取安全扫描配置失败。");
+      } finally {
+        if (!disposed) setLoading(false);
+      }
+    };
+    void load();
+    return () => {
+      disposed = true;
+    };
+  }, []);
+
+  const saveGuard = useCallback(async (next: { version?: number; scan_mode?: string }) => {
+    setSaving(true);
+    setMessage("");
+    try {
+      const result = await window.agenticxDesktop.putGuardSettings(next);
+      if (!result?.ok) {
+        setMessage(result?.error ? String(result.error) : "保存失败。");
+        return;
+      }
+      if (typeof result.version === "number") setVersion(result.version);
+      if (result.scan_mode) setScanMode(result.scan_mode);
+      setMessage("已保存安全扫描配置。");
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "保存失败。");
+    } finally {
+      setSaving(false);
+    }
+  }, []);
+
+  const runScanAll = useCallback(async () => {
+    setScanBusy(true);
+    setScanMsg("");
+    try {
+      const result = await window.agenticxDesktop.guardScanAll({});
+      if (!result?.ok) {
+        setScanMsg(result?.error ? String(result.error) : "扫描失败。");
+        return;
+      }
+      const rows = Array.isArray(result.results) ? result.results : [];
+      setScanResults(rows);
+      if (Array.isArray(result.ignored)) setIgnoredSkills(result.ignored);
+      setScanned(true);
+      void refreshSnapshotsFor(rows);
+    } catch (e) {
+      setScanMsg(e instanceof Error ? e.message : "扫描失败。");
+    } finally {
+      setScanBusy(false);
+    }
+  }, [refreshSnapshotsFor]);
+
+  const restoreSnapshot = useCallback(
+    async (item: GuardScanItem) => {
+      const meta = snapshotMap[item.skill_name];
+      const base = item.base_dir?.trim();
+      if (!base || !meta?.id) {
+        setRestoreMsg("无可用的修复前备份。");
+        return;
+      }
+      setRestoreMsg("");
+      setActionBusy(item.skill_name);
+      try {
+        const res = await window.agenticxDesktop.skillSnapshotRestore({
+          base_dir: base,
+          snapshot_id: meta.id,
+        });
+        if (!res?.ok) {
+          setRestoreMsg(res?.error ? String(res.error) : "恢复失败。");
+          return;
+        }
+        setRestoreMsg(`已恢复到修复前备份（${formatGuardSnapshotTs(meta.ts)}）。`);
+        const scan = await window.agenticxDesktop.guardScanAll({});
+        if (scan?.ok) {
+          const rows = Array.isArray(scan.results) ? scan.results : [];
+          setScanResults(rows);
+          if (Array.isArray(scan.ignored)) setIgnoredSkills(scan.ignored);
+          void refreshSnapshotsFor(rows);
+        }
+      } catch (e) {
+        setRestoreMsg(e instanceof Error ? e.message : "恢复失败。");
+      } finally {
+        setActionBusy(null);
+      }
+    },
+    [refreshSnapshotsFor, snapshotMap],
+  );
+
+  const ignoreSkill = useCallback(async (name: string) => {
+    setActionBusy(name);
+    try {
+      const result = await window.agenticxDesktop.putGuardSettings({ add_ignore: name });
+      if (result?.ok && Array.isArray(result.ignored)) setIgnoredSkills(result.ignored);
+      setScanResults((prev) => prev.filter((r) => r.skill_name !== name));
+    } finally {
+      setActionBusy(null);
+    }
+  }, []);
+
+  const unignoreSkill = useCallback(async (name: string) => {
+    setActionBusy(name);
+    try {
+      const result = await window.agenticxDesktop.putGuardSettings({ remove_ignore: name });
+      if (result?.ok && Array.isArray(result.ignored)) setIgnoredSkills(result.ignored);
+    } finally {
+      setActionBusy(null);
+    }
+  }, []);
+
+  const disableSkill = useCallback(async (name: string) => {
+    setActionBusy(name);
+    try {
+      const settings = await window.agenticxDesktop.getSkillSettings();
+      const presetPaths = Array.isArray(settings?.preset_paths)
+        ? settings.preset_paths.map((p) => ({ id: p.id, enabled: p.enabled }))
+        : [];
+      const customPaths = normalizeSkillScanCustomPaths(
+        Array.isArray(settings?.custom_paths) ? settings.custom_paths : [],
+      );
+      const preferredSources =
+        settings?.preferred_sources && typeof settings.preferred_sources === "object"
+          ? settings.preferred_sources
+          : {};
+      const current = Array.isArray(settings?.disabled_skills) ? settings.disabled_skills : [];
+      const nextDisabled = current.includes(name) ? current : [...current, name];
+      await window.agenticxDesktop.putSkillSettings({
+        presetPaths,
+        customPaths,
+        preferredSources,
+        disabledSkills: nextDisabled,
+      });
+      setScanResults((prev) => prev.filter((r) => r.skill_name !== name));
+    } finally {
+      setActionBusy(null);
+    }
+  }, []);
+
+  return {
+    loading,
+    saving,
+    version,
+    scanMode,
+    message,
+    scanBusy,
+    scanResults,
+    ignoredSkills,
+    scanned,
+    scanMsg,
+    actionBusy,
+    saveGuard,
+    runScanAll,
+    ignoreSkill,
+    unignoreSkill,
+    disableSkill,
+    snapshotMap,
+    restoreMsg,
+    restoreSnapshot,
+    setSnapshotMap,
+  };
+}
+
+function SkillAdvancedPanel() {
+  const capabilityLocks =
+    useAppStore((s) => s.userAccount.capabilityLocks) ?? UNRESTRICTED_CAPABILITY_LOCKS;
+  const { loading: trinityLoading, saving: trinitySaving, form, message: trinityMessage, update } =
+    useTrinityConfig();
+  const {
+    loading: policyLoading,
+    saving: policySaving,
+    nonHighRiskAutoInstall,
+    message: policyMessage,
+    updatePolicy,
+  } = useSkillInstallPolicy();
+  const {
+    loading: guardLoading,
+    saving: guardSaving,
+    version: guardVersion,
+    scanMode,
+    message: guardMessage,
+    scanBusy,
+    scanResults,
+    ignoredSkills,
+    scanned,
+    scanMsg,
+    actionBusy,
+    saveGuard,
+    runScanAll,
+    ignoreSkill,
+    unignoreSkill,
+    disableSkill,
+    snapshotMap,
+    restoreMsg,
+    restoreSnapshot,
+    setSnapshotMap,
+  } = useGuardSettings();
+
+  const addPane = useAppStore((s) => s.addPane);
+  const setForwardAutoReply = useAppStore((s) => s.setForwardAutoReply);
+  const closeSettings = useAppStore((s) => s.closeSettings);
+
+  const loading = trinityLoading || policyLoading || guardLoading;
+  const busy = trinitySaving || policySaving || guardSaving;
+  const [nudgeDraft, setNudgeDraft] = useState(String(form.learning_nudge_interval));
+  const [minCallsDraft, setMinCallsDraft] = useState(String(form.learning_min_tool_calls));
+  const [reviewAdvancedOpen, setReviewAdvancedOpen] = useState(false);
+  const [guardFixBusy, setGuardFixBusy] = useState(false);
+  const [guardFixMsg, setGuardFixMsg] = useState("");
+
+  const runGuardFixInMetaAgent = useCallback(
+    async (item: GuardFixScanItem) => {
+      if (!capabilityLocks.allowLocalSkillInstall) {
+        setGuardFixMsg("企业管理员已关闭本地技能修改。");
+        return;
+      }
+      if (!form.skill_manage_enabled) {
+        setGuardFixMsg("请先在上方开启「允许助手改本地技能」，再使用 AI 修复。");
+        return;
+      }
+      const prompt = buildGuardFixPrompt(item);
+      if (!prompt.trim()) {
+        setGuardFixMsg("缺少技能目录，无法委派修复。");
+        return;
+      }
+      setGuardFixMsg("");
+      setGuardFixBusy(true);
+      try {
+        const base = item.base_dir?.trim();
+        if (base) {
+          const snap = await window.agenticxDesktop.skillSnapshot({
+            base_dir: base,
+            trigger: "guard_ai_fix",
+            skill_name: item.skill_name,
+          });
+          if (snap?.ok && snap.snapshot_id) {
+            setSnapshotMap((prev) => ({
+              ...prev,
+              [item.skill_name]: {
+                id: snap.snapshot_id!,
+                ts: snap.timestamp ?? snap.snapshot_id!,
+              },
+            }));
+          } else if (snap?.error) {
+            setGuardFixMsg(`备份未创建（${snap.error}），仍将继续修复。`);
+          }
+        }
+        const created = await window.agenticxDesktop.createSession({});
+        if (!created.ok || !created.session_id) {
+          setGuardFixMsg(created.error ?? "创建元智能体会话失败");
+          return;
+        }
+        const sid = created.session_id;
+        const paneId = addPane(null, META_AGENT_DISPLAY_NAME, sid);
+        setForwardAutoReply({ paneId, sessionId: sid, text: prompt });
+        closeSettings();
+      } catch (e) {
+        setGuardFixMsg(e instanceof Error ? e.message : String(e));
+      } finally {
+        setGuardFixBusy(false);
+      }
+    },
+    [
+      addPane,
+      capabilityLocks.allowLocalSkillInstall,
+      closeSettings,
+      form.skill_manage_enabled,
+      setForwardAutoReply,
+      setSnapshotMap,
+    ],
+  );
+
+  useEffect(() => {
+    setNudgeDraft(String(form.learning_nudge_interval));
+    setMinCallsDraft(String(form.learning_min_tool_calls));
+  }, [form.learning_min_tool_calls, form.learning_nudge_interval]);
+
+  const commitLearningNumber = useCallback(
+    (field: "learning_nudge_interval" | "learning_min_tool_calls", raw: string) => {
+      const parsed = Number.parseInt(raw, 10);
+      const next = Number.isFinite(parsed) ? Math.max(1, parsed) : 1;
+      if (form[field] !== next) {
+        void update({ [field]: next });
+      }
+      if (field === "learning_nudge_interval") {
+        setNudgeDraft(String(next));
+      } else {
+        setMinCallsDraft(String(next));
+      }
+    },
+    [form, update]
+  );
+
+  if (loading) {
+    return (
+      <Panel
+        title="技能高级设置"
+        collapsible
+        defaultCollapsed
+        titleClassName={SKILLS_SECTION_PANEL_TITLE_CLASS}
+      >
+        <div className="py-2 text-sm text-text-faint">加载中…</div>
+      </Panel>
+    );
+  }
+
+  return (
+    <Panel
+      title="技能高级设置"
+      collapsible
+      defaultCollapsed
+      titleClassName={SKILLS_SECTION_PANEL_TITLE_CLASS}
+    >
+      <p className="mb-3 text-xs text-text-faint">
+        写入 <code className="text-text-subtle">{AGX_CONFIG_DISPLAY_PATH}</code>，重启后生效。
+      </p>
+      <div className="space-y-3">
+        <SettingsToggleCard
+          title="技能文档优先"
+          description="当任务命中已安装技能时，优先按该技能里的步骤与约束来选工具和执行顺序。"
+          checked={form.skill_protocol}
+          disabled={busy}
+          onChange={(next) => void update({ skill_protocol: next })}
+        />
+        {capabilityLocks.allowLocalSkillInstall ? (
+          <SettingsToggleCard
+            title="允许助手改本地技能"
+            description={`开启后，模型可在授权范围内通过 skill_manage 新增、改写或删除 ${AGX_HOME_DISPLAY}/skills/ 下的技能；保存后需完全退出并重启${APP_DISPLAY_NAME}才生效。`}
+            checked={form.skill_manage_enabled}
+            disabled={busy}
+            onChange={(next) => void update({ skill_manage_enabled: next })}
+          />
+        ) : null}
+        <div className="rounded-xl border border-border bg-surface-card px-4 py-3.5">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-semibold text-text-strong">启用技能自进化</div>
+              <p className="mt-1 text-xs leading-relaxed text-text-muted">
+                自动记录工具调用过程，会话结束后评估是否值得提炼为新技能。
+              </p>
+            </div>
+            <SettingsSwitch
+              checked={form.learning_enabled}
+              disabled={busy}
+              onChange={(next) => void update({ learning_enabled: next })}
+              aria-label="启用技能自进化"
+            />
+          </div>
+          <div className="mt-2.5 rounded-md bg-surface-panel px-3 py-2 text-[11px] text-text-faint">
+            观测数据存储于 <code className="text-text-subtle">{AGX_HOME_DISPLAY}/sessions/&lt;session_id&gt;/tool_call_observations.json</code>
+          </div>
+          <div className="mt-3 border-t border-border pt-3">
+            <button
+              type="button"
+              className="flex items-center gap-1 text-xs text-text-subtle transition hover:text-text-primary"
+              onClick={() => setReviewAdvancedOpen((v) => !v)}
+              aria-expanded={reviewAdvancedOpen}
+            >
+              <ChevronRight
+                className={`h-3.5 w-3.5 shrink-0 transition-transform ${reviewAdvancedOpen ? "rotate-90" : ""}`}
+                aria-hidden
+              />
+              高级设置
+            </button>
+            {reviewAdvancedOpen ? (
+              <div className="mt-2 space-y-3">
+                <label className="block text-sm text-text-muted">
+                  复盘触发间隔
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                    value={nudgeDraft}
+                    disabled={busy || !form.learning_enabled}
+                    onChange={(e) => setNudgeDraft(e.target.value)}
+                    onBlur={() => commitLearningNumber("learning_nudge_interval", nudgeDraft)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                  />
+                </label>
+                <label className="block text-sm text-text-muted">
+                  最小工具调用数
+                  <input
+                    type="number"
+                    min={1}
+                    step={1}
+                    className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                    value={minCallsDraft}
+                    disabled={busy || !form.learning_enabled}
+                    onChange={(e) => setMinCallsDraft(e.target.value)}
+                    onBlur={() => commitLearningNumber("learning_min_tool_calls", minCallsDraft)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        (e.target as HTMLInputElement).blur();
+                      }
+                    }}
+                  />
+                </label>
+              </div>
+            ) : null}
+          </div>
+        </div>
+        {capabilityLocks.allowLocalSkillInstall ? (
+          <SettingsToggleCard
+            title="未见高危则自动装完"
+            description="安装前仍会跑一遍静态规则扫描并展示摘要；只有未命中高危规则时才可能一路装完，一旦命中高危必须你点确认。"
+            checked={nonHighRiskAutoInstall}
+            disabled={busy}
+            onChange={(next) => void updatePolicy(next)}
+          />
+        ) : null}
+        <div className="rounded-xl border border-border bg-surface-card px-4 py-3.5">
+          <div className="text-xs font-semibold text-text-strong">技能安全扫描</div>
+          <div className="mt-1 space-y-1 text-xs leading-relaxed text-text-muted">
+            <p>
+              从技能市场、Bundle 或扩展安装前会<strong className="font-medium text-text-subtle">自动扫描</strong>
+              ，命中高危须你确认后才可安装。已安装的技能可用下方「扫描已安装技能」复查，逐个列出问题并给出处置选项。本页配置写入{" "}
+              <code className="text-text-subtle">{AGX_CONFIG_DISPLAY_PATH}</code>，重启后生效。
+            </p>
+            <p>
+              <span className="text-text-subtle">引擎 v1</span>：经典正则规则，与历史版本行为一致。
+              <span className="text-text-subtle">引擎 v2</span>：YAML 规则库，按技能体量分级扫描，并给出 0–100
+              分与安全等级，规则更全（推荐）。
+            </p>
+            <p>
+              <span className="text-text-subtle">扫描模式</span>（仅 v2 对安装流程生效）：
+              <span className="text-text-subtle">快速</span>—主要检查 SKILL.md，跳过重项，最快；
+              <span className="text-text-subtle">标准</span>—按目录文件量自动选深度，默认推荐；
+              <span className="text-text-subtle">完整</span>—尽量扫全目录与依赖，更严、更慢。
+            </p>
+          </div>
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <span className="shrink-0 text-xs text-text-muted">引擎版本</span>
+              <SettingsDropdown
+                value={String(guardVersion)}
+                displayLabel={`v${guardVersion}`}
+                options={[
+                  { value: "1", label: "v1" },
+                  { value: "2", label: "v2" },
+                ]}
+                onChange={(v) => void saveGuard({ version: Number(v) })}
+                disabled={busy}
+                size="compact"
+                menuPortal
+                className="w-[7rem] shrink-0"
+              />
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="shrink-0 text-xs text-text-muted">扫描模式</span>
+              <SettingsDropdown
+                value={scanMode}
+                displayLabel={
+                  scanMode === "quick" ? "快速" : scanMode === "full" ? "完整" : "标准"
+                }
+                options={[
+                  { value: "quick", label: "快速" },
+                  { value: "standard", label: "标准" },
+                  { value: "full", label: "完整" },
+                ]}
+                onChange={(v) => void saveGuard({ scan_mode: v })}
+                disabled={busy || guardVersion < 2}
+                size="compact"
+                menuPortal
+                className="w-[7rem] shrink-0"
+                title={guardVersion < 2 ? "仅引擎 v2 支持扫描模式" : undefined}
+              />
+            </div>
+          </div>
+          <div className="mt-3 flex items-center gap-3 border-t border-border pt-3">
+            <button
+              type="button"
+              className="rounded-md bg-btnPrimary px-3 py-1.5 text-xs font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-50"
+              disabled={scanBusy}
+              onClick={() => void runScanAll()}
+            >
+              {scanBusy ? "扫描中…" : "扫描已安装技能"}
+            </button>
+            <span className="text-[11px] text-text-faint">
+              逐个技能扫描，仅列出有问题的。扫描只出报告，不会自动改动。
+            </span>
+          </div>
+          {guardMessage ? (
+            <div className={`mt-2 text-xs ${guardMessage.startsWith("已保存") ? "text-text-muted" : "text-rose-400"}`}>
+              {guardMessage}
+            </div>
+          ) : null}
+          {scanMsg ? <div className="mt-2 text-xs text-rose-400">{scanMsg}</div> : null}
+          {guardFixMsg ? (
+            <div
+              className={`mt-2 text-xs ${guardFixMsg.includes("请先在上方") || guardFixMsg.includes("备份未创建") ? "text-amber-400" : "text-rose-400"}`}
+            >
+              {guardFixMsg}
+            </div>
+          ) : null}
+          {restoreMsg ? (
+            <div
+              className={`mt-2 text-xs ${restoreMsg.startsWith("已恢复") ? "text-emerald-400" : "text-rose-400"}`}
+            >
+              {restoreMsg}
+            </div>
+          ) : null}
+          {scanned && !scanBusy ? (
+            scanResults.length === 0 ? (
+              <div className="mt-3 rounded-md border border-emerald-500/25 bg-emerald-500/5 px-3 py-2 text-xs text-emerald-400">
+                未发现有风险的已安装技能。
+              </div>
+            ) : (
+              <div className="mt-3 space-y-2">
+                {scanResults.map((r) => (
+                  <GuardScanResultCard
+                    key={r.skill_name}
+                    item={r}
+                    busy={actionBusy === r.skill_name || guardFixBusy}
+                    aiFixDisabled={
+                      !capabilityLocks.allowLocalSkillInstall || !form.skill_manage_enabled
+                    }
+                    aiFixDisabledReason={
+                      !capabilityLocks.allowLocalSkillInstall
+                        ? "企业管理员已关闭本地技能修改"
+                        : undefined
+                    }
+                    onAiFix={
+                      capabilityLocks.allowLocalSkillInstall && r.can_fix
+                        ? () => void runGuardFixInMetaAgent(r)
+                        : undefined
+                    }
+                    hasSnapshot={Boolean(
+                      capabilityLocks.allowLocalSkillInstall &&
+                      r.can_fix &&
+                      snapshotMap[r.skill_name]?.id,
+                    )}
+                    onRestore={
+                      capabilityLocks.allowLocalSkillInstall &&
+                      r.can_fix &&
+                      snapshotMap[r.skill_name]?.id
+                        ? () => void restoreSnapshot(r)
+                        : undefined
+                    }
+                    onDisable={() => void disableSkill(r.skill_name)}
+                    onIgnore={() => void ignoreSkill(r.skill_name)}
+                  />
+                ))}
+              </div>
+            )
+          ) : null}
+          {ignoredSkills.length > 0 ? (
+            <div className="mt-3 border-t border-border pt-3">
+              <div className="text-[11px] text-text-faint">已忽略（不再扫出）：</div>
+              <div className="mt-1.5 flex flex-wrap gap-1.5">
+                {ignoredSkills.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-full border border-border bg-surface-panel px-2 py-0.5 text-[11px] text-text-muted transition hover:text-text-primary disabled:opacity-50"
+                    disabled={actionBusy === name}
+                    title="点击撤销忽略"
+                    onClick={() => void unignoreSkill(name)}
+                  >
+                    {name}
+                    <span className="text-text-faint">✕</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
+      </div>
+      {trinityMessage ? (
+        <div
+          className={`mt-2 text-xs ${trinityMessage.startsWith("已保存") ? "text-text-muted" : "text-rose-400"}`}
+        >
+          {trinityMessage}
+        </div>
+      ) : null}
+      {policyMessage ? (
+        <div
+          className={`mt-2 text-xs ${policyMessage.startsWith("已保存") ? "text-text-muted" : "text-rose-400"}`}
+        >
+          {policyMessage}
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
+
+function SessionMemoryPanel() {
+  const { loading, saving, form, message, update } = useTrinityConfig();
+
+  if (loading) {
+    return (
+      <section className="rounded-xl border border-border bg-surface-card px-4 py-3.5">
+        <div className="text-sm font-semibold text-text-strong">会话摘要延续</div>
+        <div className="mt-1 text-xs leading-5 text-text-faint">加载中…</div>
+      </section>
+    );
+  }
+
+  return (
+    <section className="rounded-xl border border-border bg-surface-card px-4 py-3.5">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <div className="text-sm font-semibold text-text-strong">会话摘要延续</div>
+          <p className="mt-1 text-xs leading-5 text-text-faint">
+            新对话可承接前一次对话的摘要；修改后重启应用生效。
+          </p>
+        </div>
+        <SettingsSwitch
+          checked={form.session_summary}
+          disabled={saving}
+          onChange={(next) => void update({ session_summary: next })}
+          aria-label="启用会话摘要延续"
+        />
+      </div>
+      {message ? (
+        <div className={`mt-2 text-xs ${message.startsWith("已保存") ? "text-text-muted" : "text-rose-400"}`}>
+          {message}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+const GUARD_PATTERN_LABELS: Record<string, string> = {
+  exfiltration_curl: "数据外泄（curl）",
+  exfiltration_wget: "数据外泄（wget）",
+  exfiltration_fetch_env: "读取环境变量并上传",
+  credential_ssh: "访问 SSH 密钥",
+  credential_dotenv: "引用 .env 文件",
+  credential_word: "涉及凭据/密码关键词",
+  prompt_ignore_previous: "提示词注入（忽略先前指令）",
+  prompt_system: "提示词注入（system prompt）",
+  prompt_system_tag: "提示词注入（<system> 标签）",
+  destructive_rm: "破坏性操作（rm -rf /）",
+  destructive_chmod: "破坏性操作（chmod 777）",
+  destructive_sql: "破坏性操作（DROP TABLE）",
+  curl_pipe_shell: "远程脚本管道执行",
+  reverse_shell: "反向 Shell",
+  invisible_unicode: "不可见 Unicode 字符",
+  suspicious_url: "可疑外发 URL",
+  typosquat_dependency: "疑似 typosquat 依赖",
+  dynamic_download_l2: "嵌套动态下载",
+  base64_decode_pipe: "Base64 解码后执行",
+};
+const GUARD_PATTERN_LABEL_HIGH_ENTROPY = "high_entropy_secret";
+
+function guardVerdictLabel(v: string): string {
+  return v === "dangerous" ? "高危" : v === "caution" ? "需注意" : "未见高危规则";
+}
+
+function formatGuardSnapshotTs(ts: string): string {
+  const idMatch = ts.match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+  if (idMatch) {
+    return `${idMatch[1]}-${idMatch[2]}-${idMatch[3]} ${idMatch[4]}:${idMatch[5]}:${idMatch[6]} UTC`;
+  }
+  return ts;
+}
+
+function GuardScanResultCard({
+  item,
+  busy,
+  aiFixDisabled,
+  aiFixDisabledReason,
+  onAiFix,
+  hasSnapshot,
+  onRestore,
+  onDisable,
+  onIgnore,
+}: {
+  item: GuardScanItem;
+  busy: boolean;
+  aiFixDisabled?: boolean;
+  aiFixDisabledReason?: string;
+  onAiFix?: () => void;
+  hasSnapshot?: boolean;
+  onRestore?: () => void;
+  onDisable: () => void;
+  onIgnore: () => void;
+}) {
+  const dangerous = item.verdict === "dangerous";
+  const findings = item.findings ?? [];
+  return (
+    <div className="rounded-xl border border-border bg-surface-card px-3.5 py-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="truncate text-sm font-medium text-text-primary">{item.skill_name}</span>
+        <span
+          className={`shrink-0 rounded-full px-1.5 text-[10px] ${
+            dangerous
+              ? "border border-rose-500/35 bg-rose-500/10 text-rose-300"
+              : "border border-amber-500/35 bg-amber-500/10 text-amber-300"
+          }`}
+        >
+          {guardVerdictLabel(item.verdict)}
+        </span>
+        {!item.can_fix ? (
+          <span className="shrink-0 rounded-full border border-border bg-surface-panel px-1.5 text-[10px] text-text-faint">
+            外部
+          </span>
+        ) : null}
+        <span className="ml-auto text-[11px] text-text-faint">
+          {[item.grade ? `等级 ${item.grade}` : "", typeof item.score === "number" ? `${item.score} 分` : "", item.tier]
+            .filter(Boolean)
+            .join(" · ")}
+        </span>
+      </div>
+      {findings.length > 0 ? (
+        <ul className="mt-2 space-y-0.5 text-[11px] text-text-subtle">
+          {findings.slice(0, 5).map((f, i) => (
+            <li key={`${item.skill_name}-f-${i}`} className="flex gap-1.5">
+              <span className={f.severity === "dangerous" ? "text-rose-400" : "text-amber-400"}>
+                {f.severity === "dangerous" ? "⛔" : "⚠"}
+              </span>
+              <span className="min-w-0">
+                {GUARD_PATTERN_LABELS[f.pattern_name] ||
+                  (f.pattern_name === GUARD_PATTERN_LABEL_HIGH_ENTROPY
+                    ? "高熵可疑字符串"
+                    : f.pattern_name)}
+                {f.matched_text ? (
+                  <span className="text-text-faint">：「{f.matched_text.slice(0, 50)}」</span>
+                ) : null}
+              </span>
+            </li>
+          ))}
+          {findings.length > 5 ? (
+            <li className="text-text-faint">… 另有 {findings.length - 5} 条</li>
+          ) : null}
+        </ul>
+      ) : null}
+      <div className="mt-2.5 flex flex-wrap items-center gap-2">
+        {item.can_fix ? (
+          <button
+            type="button"
+            className="rounded-md border border-[var(--settings-accent-border-strong)] bg-[var(--settings-accent-subtle-bg)] px-2.5 py-1 text-xs text-[var(--settings-accent-fg-muted)] transition hover:bg-[var(--settings-accent-subtle-bg-hover)] disabled:opacity-50"
+            disabled={busy || !onAiFix || aiFixDisabled}
+            title={
+              aiFixDisabled
+                ? aiFixDisabledReason || "请先在上方开启「允许助手改本地技能」"
+                : "委派元智能体新会话修复；写入前会展示 diff 供确认"
+            }
+            onClick={onAiFix}
+          >
+            AI 修复
+          </button>
+        ) : (
+          <span className="text-[11px] text-text-faint">外部来源只读，可禁用或忽略</span>
+        )}
+        {item.can_fix && hasSnapshot ? (
+          <button
+            type="button"
+            className="rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1 text-xs text-amber-300 transition hover:bg-amber-500/15 disabled:opacity-50"
+            disabled={busy || !onRestore}
+            title="恢复到本次 AI 修复前自动保存的快照"
+            onClick={onRestore}
+          >
+            恢复备份
+          </button>
+        ) : null}
+        <button
+          type="button"
+          className="rounded-md border border-border px-2.5 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-50"
+          disabled={busy}
+          title="模型不再加载该技能，文件保留"
+          onClick={onDisable}
+        >
+          禁用
+        </button>
+        <button
+          type="button"
+          className="rounded-md border border-border px-2.5 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-50"
+          disabled={busy}
+          title="后续扫描默认跳过该技能"
+          onClick={onIgnore}
+        >
+          忽略
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function formatSkillScanSummary(scan: {
+  overall: string;
+  skills: Array<{
+    skill_name: string;
+    verdict: string;
+    score?: number;
+    grade?: string;
+    tier?: string;
+    findings?: Array<{
+      pattern_name: string;
+      severity?: string;
+      matched_text?: string;
+    }>;
+  }>;
+}): string {
+  const verdictLabel = (v: string) =>
+    v === "dangerous" ? "高危" : v === "caution" ? "需注意" : "未见高危规则";
+  const sevLabel = (s: string | undefined) =>
+    s === "dangerous" ? "⛔ 高危" : s === "caution" ? "⚠ 注意" : s ?? "";
+  const patternLabel: Record<string, string> = {
+    exfiltration_curl: "数据外泄（curl）",
+    exfiltration_wget: "数据外泄（wget）",
+    exfiltration_fetch_env: "读取环境变量并上传",
+    credential_ssh: "访问 SSH 密钥",
+    credential_dotenv: "引用 .env 文件",
+    credential_word: "涉及凭据/密码关键词",
+    prompt_ignore_previous: "提示词注入（忽略先前指令）",
+    prompt_system: "提示词注入（system prompt）",
+    prompt_system_tag: "提示词注入（<system> 标签）",
+    destructive_rm: "破坏性操作（rm -rf /）",
+    destructive_chmod: "破坏性操作（chmod 777）",
+    destructive_sql: "破坏性操作（DROP TABLE）",
+    curl_pipe_shell: "远程脚本管道执行",
+    reverse_shell: "反向 Shell",
+    invisible_unicode: "不可见 Unicode 字符",
+    suspicious_url: "可疑外发 URL",
+    typosquat_dependency: "疑似 typosquat 依赖",
+    dynamic_download_l2: "嵌套动态下载",
+    base64_decode_pipe: "Base64 解码后执行",
+  };
+  patternLabel["high_entropy" + "_secret"] = "高熵可疑字符串";
+
+  const lines = [
+    `安装前扫描 · 总体：${verdictLabel(scan.overall)}`,
+  ];
+  for (const s of scan.skills) {
+    const meta: string[] = [];
+    if (s.grade) meta.push(`等级 ${s.grade}`);
+    if (typeof s.score === "number") meta.push(`${s.score} 分`);
+    if (s.tier) meta.push(s.tier);
+    lines.push(
+      `· ${s.skill_name || "skill"}：${verdictLabel(s.verdict)}${
+        s.findings?.length ? `（命中 ${s.findings.length} 条规则）` : ""
+      }${meta.length ? ` · ${meta.join(" · ")}` : ""}`
+    );
+    if (s.findings?.length) {
+      for (const f of s.findings.slice(0, 8)) {
+        const label = patternLabel[f.pattern_name] || f.pattern_name;
+        const matched = f.matched_text ? `「${f.matched_text.slice(0, 60)}」` : "";
+        lines.push(`  ${sevLabel(f.severity)} ${label}${matched ? " — " + matched : ""}`);
+      }
+      if (s.findings.length > 8) {
+        lines.push(`  … 另有 ${s.findings.length - 8} 条`);
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function MetaMarkdownField({
+  label,
+  showLabel = true,
+  value,
+  rows,
+  externalHint,
+  externalHintText,
+  placeholder,
+  onChange,
+  onAiAssist,
+  aiAssistLoading,
+  onOpenInEditor,
+}: {
+  label: string;
+  showLabel?: boolean;
+  value: string;
+  rows: number;
+  externalHint?: boolean;
+  externalHintText?: string;
+  placeholder?: string;
+  onChange: (v: string) => void;
+  onAiAssist?: () => void;
+  aiAssistLoading?: boolean;
+  onOpenInEditor?: () => void;
+}) {
+  const [preview, setPreview] = useState(false);
+  const toolbarBtnClass = (active?: boolean) =>
+    `flex h-7 w-7 items-center justify-center rounded-md text-text-muted transition-colors disabled:opacity-40 ${
+      active
+        ? "bg-surface-hover"
+        : "hover:bg-surface-hover hover:text-text-primary"
+    }`;
+  const iconClass = "h-3.5 w-3.5 shrink-0";
+  return (
+    <div>
+      {showLabel ? <div className="mb-1.5 text-sm font-medium text-text-muted">{label}</div> : null}
+      {externalHint ? (
+        <div className="mb-1 text-[10px] text-amber-600/90 dark:text-amber-400/90">
+          {externalHintText}
+        </div>
+      ) : null}
+      <div className="overflow-hidden rounded-lg border border-[var(--border-subtle)] bg-surface-panel">
+        <div className="flex h-9 items-center justify-between bg-surface-hover/35 pl-3 pr-2">
+          <span className="text-[10px] font-medium tracking-wide text-text-faint">Markdown</span>
+          <div className="flex items-center gap-0.5">
+            {onAiAssist ? (
+              <HoverTip label={value.trim() ? "AI 润色" : "AI 生成"}>
+                <button
+                  type="button"
+                  disabled={aiAssistLoading}
+                  className={toolbarBtnClass()}
+                  onClick={onAiAssist}
+                >
+                  {aiAssistLoading ? (
+                    <Loader2 className={`${iconClass} animate-spin`} aria-hidden />
+                  ) : (
+                    <Sparkles className={iconClass} aria-hidden />
+                  )}
+                </button>
+              </HoverTip>
+            ) : null}
+            <HoverTip label="编辑">
+              <button
+                type="button"
+                className={toolbarBtnClass(!preview)}
+                onClick={() => setPreview(false)}
+              >
+                <SquarePen className={iconClass} aria-hidden />
+              </button>
+            </HoverTip>
+            <HoverTip label="预览">
+              <button
+                type="button"
+                className={toolbarBtnClass(preview)}
+                onClick={() => setPreview(true)}
+              >
+                <Eye className={iconClass} aria-hidden />
+              </button>
+            </HoverTip>
+            {onOpenInEditor ? (
+              <HoverTip label="在编辑器中打开">
+                <button type="button" className={toolbarBtnClass()} onClick={onOpenInEditor}>
+                  <ExternalLink className={iconClass} aria-hidden />
+                </button>
+              </HoverTip>
+            ) : null}
+          </div>
+        </div>
+        {preview ? (
+          <div
+            className="agx-settings-md min-h-[4rem] w-full overflow-auto px-3 py-2 text-[13px] leading-5 text-text-primary [scrollbar-gutter:stable]"
+            style={{ minHeight: `${rows * 1.625}rem` }}
+          >
+            {value.trim() ? (
+              <ReactMarkdown
+                remarkPlugins={settingsRemarkPlugins}
+                components={settingsMarkdownComponents}
+                urlTransform={chatUrlTransform}
+              >
+                {normalizeChatMarkdownContent(value)}
+              </ReactMarkdown>
+            ) : (
+              <span className="text-text-faint italic">（空）</span>
+            )}
+          </div>
+        ) : (
+          <textarea
+            className="block w-full resize-none border-0 bg-transparent px-3 py-2 text-[13px] leading-5 text-text-primary placeholder:text-text-faint outline-none [scrollbar-gutter:stable] focus:ring-0"
+            rows={rows}
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder={placeholder}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function formatMetaWorkspaceHistoryTime(id: string, savedAt: string): string {
+  const m = id.match(/^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})$/);
+  if (m) return `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`;
+  return savedAt;
+}
+
+function SettingsToggleCard(props: {
+  title: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  const { title, description, checked, disabled, onChange } = props;
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-surface-card px-4 py-3.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-semibold text-text-strong">{title}</div>
+        <p className="mt-1 text-xs leading-relaxed text-text-muted">{description}</p>
+      </div>
+      <SettingsSwitch
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+        aria-label={title}
+      />
+    </div>
+  );
+}
+
+
+export function SettingsPanel({
+  open,
+  defaultProvider,
+  providers,
+  sessionId,
+  apiBase,
+  apiToken,
+  mcpServers,
+  onRefreshMcp,
+  runMode,
+  theme,
+  chatStyle,
+  onThemeChange,
+  onChatStyleChange,
+  onRunModeChange,
+  onClose,
+  onSave,
+  panes,
+  avatars,
+  groups,
+  onForwardFavorite,
+}: Props) {
+  // 企业管控：不许自助添加 MCP / 不许扫描本机配置时，对应入口整段消失。
+  const capabilityLocks =
+    useAppStore((s) => s.userAccount.capabilityLocks) ?? UNRESTRICTED_CAPABILITY_LOCKS;
+  const userNickname = useAppStore((s) => s.userNickname);
+  const userAccount = useAppStore((s) => s.userAccount);
+  const setUserAccount = useAppStore((s) => s.setUserAccount);
+  const setUserNickname = useAppStore((s) => s.setUserNickname);
+  const userAvatarUrl = useAppStore((s) => s.userAvatarUrl);
+  const setUserAvatarUrl = useAppStore((s) => s.setUserAvatarUrl);
+  const userPreference = useAppStore((s) => s.userPreference);
+  const setUserPreference = useAppStore((s) => s.setUserPreference);
+  const themeColor = useAppStore((s) => s.themeColor);
+  const setThemeColor = useAppStore((s) => s.setThemeColor);
+  const metaAvatarUrl = useAppStore((s) => s.metaAvatarUrl);
+  const effectiveMetaAvatarUrl = metaAvatarUrl.trim() || DEFAULT_META_AVATAR_URL;
+  const setMetaAvatarUrl = useAppStore((s) => s.setMetaAvatarUrl);
+  const showToolCalls = useAppStore((s) => s.showToolCalls);
+  const setShowToolCalls = useAppStore((s) => s.setShowToolCalls);
+  const settingsOpenToTab = useAppStore((s) => s.settings.openToTab);
+  const activePaneId = useAppStore((s) => s.activePaneId);
+  const memoryContextPane = panes.find((p) => p.id === activePaneId) ?? panes[0];
+  const updateSettingsSlice = useAppStore((s) => s.updateSettings);
+  const enterpriseStrictConfigured = Object.values(providers).some(
+    (entry) => entry?.managed === true,
+  );
+  const deliverySettingsAccess = useMemo(
+    () => ({
+      enterpriseLoggedIn: userAccount.loggedIn,
+      enterpriseStrict: enterpriseStrictConfigured,
+    }),
+    [enterpriseStrictConfigured, userAccount.loggedIn],
+  );
+  const selfManagedServiceSettingsAvailable =
+    canConfigureSelfManagedServices(deliverySettingsAccess);
+  const initializedForOpenRef = useRef(false);
+  const metaWorkspaceHydratedRef = useRef({ identity: false, soul: false });
+  const metaWorkspaceLoadGenerationRef = useRef(0);
+  const metaWorkspaceReloadRef = useRef<Promise<void> | null>(null);
+  const [aiAssistLoading, setAiAssistLoading] = useState<"identity" | "soul" | "preference" | null>(null);
+  const metaIdentityDraftRef = useRef("");
+  const metaIdentitySavedRef = useRef("");
+  const metaSoulDraftRef = useRef("");
+  const metaSoulSavedRef = useRef("");
+  const toolsTabRef = useRef<ToolsTabHandle>(null);
+  const knowledgeRef = useRef<KnowledgeSettingsHandle>(null);
+  const voiceSettingsRef = useRef<VoiceSettingsPanelHandle>(null);
+  const [runModeError, setRunModeError] = useState("");
+  /**
+   * 以前这里是 `void onRunModeChange(next)`——保存失败被整个吞掉，界面把模式弹回去，
+   * 用户不知道发生了什么。权限设置上，静默失败比失败本身更糟。
+   */
+  const applyRunMode = useCallback(
+    async (next: RunMode) => {
+      const result = await onRunModeChange(next);
+      setRunModeError(result?.ok === false ? result.error ?? "未知原因" : "");
+    },
+    [onRunModeChange],
+  );
+
+  const permissionsPanelRef = useRef<PermissionsAdvancedPanelHandle>(null);
+  const [tab, setTab] = useState<SettingsTab>("general");
+  const [userProfileEditing, setUserProfileEditing] = useState(false);
+  const [metaEditorKind, setMetaEditorKind] = useState<"identity" | "soul" | null>(null);
+  const [panelSize, setPanelSize] = useState<SettingsPanelSize>(() => loadSettingsPanelSize());
+  const [navWidth, setNavWidth] = useState(() =>
+    loadSettingsNavWidth(loadSettingsPanelSize().width),
+  );
+  useEffect(() => {
+    if (!open || !settingsOpenToTab) return;
+    setTab(resolveDeliverySettingsTab(settingsOpenToTab, deliverySettingsAccess));
+    updateSettingsSlice({ openToTab: undefined });
+  }, [deliverySettingsAccess, open, settingsOpenToTab, updateSettingsSlice]);
+  useEffect(() => {
+    if (!open) return;
+    setTab((current) => resolveDeliverySettingsTab(current, deliverySettingsAccess));
+  }, [deliverySettingsAccess, open]);
+  useEffect(() => {
+    if (!open) return;
+    const size = loadSettingsPanelSize();
+    setPanelSize(size);
+    setNavWidth(loadSettingsNavWidth(size.width));
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    const onWindowResize = () => {
+      setPanelSize((prev) => {
+        const next = clampSettingsPanelSize(prev);
+        setNavWidth((nav) => clampSettingsNavWidth(nav, next.width));
+        return next;
+      });
+    };
+    window.addEventListener("resize", onWindowResize);
+    return () => window.removeEventListener("resize", onWindowResize);
+  }, [open]);
+  useEffect(() => {
+    if (!open) return;
+    setNavWidth((prev) => clampSettingsNavWidth(prev, panelSize.width));
+  }, [open, panelSize.width]);
+  const onPanelResizeMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = panelSize.width;
+    const startHeight = panelSize.height;
+    document.body.classList.add("agx-settings-panel-resizing");
+    const onMove = (moveEvent: MouseEvent) => {
+      setPanelSize(
+        clampSettingsPanelSize({
+          width: startWidth + (moveEvent.clientX - startX),
+          height: startHeight + (moveEvent.clientY - startY),
+        }),
+      );
+    };
+    const onUp = () => {
+      document.body.classList.remove("agx-settings-panel-resizing");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setPanelSize((prev) => {
+        saveSettingsPanelSize(prev);
+        return prev;
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [panelSize.height, panelSize.width]);
+  const onNavResizeMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const startWidth = navWidth;
+    document.body.classList.add("agx-settings-nav-resizing");
+    const onMove = (moveEvent: MouseEvent) => {
+      setNavWidth(clampSettingsNavWidth(startWidth + (moveEvent.clientX - startX), panelSize.width));
+    };
+    const onUp = () => {
+      document.body.classList.remove("agx-settings-nav-resizing");
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      setNavWidth((prev) => {
+        saveSettingsNavWidth(prev, panelSize.width);
+        return prev;
+      });
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [navWidth, panelSize.width]);
+  const [active, setActive] = useState(defaultProvider || ALL_PROVIDERS[0]);
+  const providerListScrollRef = useScrollbarOnScroll<HTMLDivElement>();
+  const [draft, setDraft] = useState<Record<string, ProviderEntry>>({});
+  const [providerSavedSnapshot, setProviderSavedSnapshot] = useState<Record<string, ProviderEntry>>({});
+  const [providerSavedDefProv, setProviderSavedDefProv] = useState(defaultProvider);
+  const [providerConfigMessage, setProviderConfigMessage] = useState("");
+  const [providerConfigSaving, setProviderConfigSaving] = useState(false);
+  const [generalDefaultModelSaving, setGeneralDefaultModelSaving] = useState(false);
+  const [generalDefaultModelMessage, setGeneralDefaultModelMessage] = useState("");
+  const [defProv, setDefProv] = useState(defaultProvider);
+  const [keyStatus, setKeyStatus] = useState<Record<string, "idle" | "checking" | "ok" | "fail">>({});
+  const [keyError, setKeyError] = useState<Record<string, string>>({});
+  const [keyWarning, setKeyWarning] = useState<Record<string, string>>({});
+  const [modelHealthMap, setModelHealthMap] = useState<Record<string, ModelHealthEntry>>({});
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchModelsModalOpen, setFetchModelsModalOpen] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchModelsSearch, setFetchModelsSearch] = useState("");
+  const [fetchModelsError, setFetchModelsError] = useState<string | null>(null);
+  const [fetchModelsWarning, setFetchModelsWarning] = useState<string | null>(null);
+  const [addModelModalOpen, setAddModelModalOpen] = useState(false);
+  const [addModelFormId, setAddModelFormId] = useState("");
+  const [addModelFormName, setAddModelFormName] = useState("");
+  const [addServiceVendorModalOpen, setAddServiceVendorModalOpen] = useState(false);
+  const [addVendorFormName, setAddVendorFormName] = useState("");
+  const [addVendorFormType, setAddVendorFormType] = useState<ProviderInterfaceKind>("openai");
+  const [editModelModalOpen, setEditModelModalOpen] = useState(false);
+  const [editModelOriginalId, setEditModelOriginalId] = useState("");
+  const [editModelFormId, setEditModelFormId] = useState("");
+  const [editModelError, setEditModelError] = useState<string | null>(null);
+  // 按模型的上下文窗口覆盖，键为 `provider/model`；留空表示交给后端按模型名识别。
+  const [modelContextWindows, setModelContextWindows] = useState<Record<string, number>>({});
+  const [editModelWindowDraft, setEditModelWindowDraft] = useState("");
+  // 托管厂商的模型由企业后台统一配置，本机只读；见 model_context_window.local_override_window。
+  const [editModelWindowManaged, setEditModelWindowManaged] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void window.agenticxDesktop
+      .loadRuntimeConfig()
+      .then((result) => {
+        if (cancelled || !result.ok) return;
+        setModelContextWindows(result.model_context_windows ?? {});
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const [inlineRenameProviderId, setInlineRenameProviderId] = useState<string | null>(null);
+  const [inlineRenameValue, setInlineRenameValue] = useState("");
+  const [providerDeleteConfirmId, setProviderDeleteConfirmId] = useState<string | null>(null);
+  const [providerDeleteBusy, setProviderDeleteBusy] = useState(false);
+  const inlineRenameInputRef = useRef<HTMLInputElement>(null);
+  const [providerEnableHint, setProviderEnableHint] = useState<string | null>(null);
+  const [defaultProvHint, setDefaultProvHint] = useState<string | null>(null);
+  /** API 密钥显隐（切换左侧厂商时恢复为隐藏） */
+  const [apiKeyVisible, setApiKeyVisible] = useState(false);
+  const [mcpExtraPaths, setMcpExtraPaths] = useState<string[]>([]);
+  const [mcpPathSaving, setMcpPathSaving] = useState(false);
+  const [mcpServerBusy, setMcpServerBusy] = useState<Record<string, boolean>>({});
+  const mcpServerInFlightRef = useRef<Record<string, boolean>>({});
+  const mcpQueuedToggleRef = useRef<Record<string, boolean>>({});
+  const [mcpOptimisticChecked, setMcpOptimisticChecked] = useState<Record<string, boolean>>({});
+  const [mcpMessage, setMcpMessage] = useState("");
+  const [mcpErrorInspect, setMcpErrorInspect] = useState<{ title: string; body: string } | null>(null);
+  const [mcpDiscoverLoading, setMcpDiscoverLoading] = useState(false);
+  const [mcpDiscoverHits, setMcpDiscoverHits] = useState<MCPDiscoveryHit[]>([]);
+  const [mcpMarketplaceLoading, setMcpMarketplaceLoading] = useState(false);
+  const [mcpMarketplaceItems, setMcpMarketplaceItems] = useState<Array<Record<string, unknown>>>([]);
+  const [mcpMarketplaceSummary, setMcpMarketplaceSummary] = useState("");
+  const [mcpMarketplaceSearch, setMcpMarketplaceSearch] = useState("");
+  const enterpriseMcpItems = useMemo(
+    () => buildEnterpriseMcpMarketplaceItems(
+      userAccount.capabilities,
+      mcpMarketplaceSearch,
+      userAccount.capabilitySyncStatuses,
+    ),
+    [mcpMarketplaceSearch, userAccount.capabilities, userAccount.capabilitySyncStatuses],
+  );
+  const [mcpMarketplaceInstallBusy, setMcpMarketplaceInstallBusy] = useState(false);
+  const [mcpMarketplaceEnvSchema, setMcpMarketplaceEnvSchema] = useState<{ required: string[] }>({ required: [] });
+  const [mcpMarketplaceInstalledIds, setMcpMarketplaceInstalledIds] = useState<Set<string>>(new Set());
+  const [mcpMarketplaceInstallingId, setMcpMarketplaceInstallingId] = useState<string | null>(null);
+  const [mcpMarketplaceStatus, setMcpMarketplaceStatus] = useState<{
+    message: string;
+    kind: "info" | "success" | "error";
+    serverId?: string;
+  } | null>(null);
+  const [mcpMarketplaceIdToNames, setMcpMarketplaceIdToNames] = useState<Record<string, string[]>>(() => {
+    try {
+      const raw = readScopedLocalStorage(MCP_MARKETPLACE_ID_MAP_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") {
+        const out: Record<string, string[]> = {};
+        for (const [k, v] of Object.entries(parsed)) {
+          if (Array.isArray(v)) out[k] = v.filter((x): x is string => typeof x === "string");
+        }
+        return out;
+      }
+    } catch {
+      // ignore
+    }
+    return {};
+  });
+  const mcpMarketplaceDetailInFlightRef = useRef<Set<string>>(new Set());
+  const mcpMarketplaceRequestSeqRef = useRef(0);
+  const [mcpDisabledTools, setMcpDisabledTools] = useState<Record<string, string[]>>({});
+  const [mcpSkipDefaultNames, setMcpSkipDefaultNames] = useState<string[]>([]);
+  const [mcpDefaultEntryNames, setMcpDefaultEntryNames] = useState<string[]>([
+    ...BUNDLED_DEFAULT_MCP_NAMES_FALLBACK,
+  ]);
+  const [mcpDeleteConfirmServerName, setMcpDeleteConfirmServerName] = useState<string | null>(null);
+  const [mcpExpandedServers, setMcpExpandedServers] = useState<Set<string>>(new Set());
+  const [mcpEditorOpen, setMcpEditorOpen] = useState(false);
+  const [mcpEditorPath, setMcpEditorPath] = useState(MCP_PRIMARY_CONFIG_PATH);
+  const [mcpEditorFocusServerName, setMcpEditorFocusServerName] = useState<string | undefined>(undefined);
+  const [mcpEditorFocusToken, setMcpEditorFocusToken] = useState(0);
+  const [mcpRemoteModalOpen, setMcpRemoteModalOpen] = useState(false);
+  const [mcpRemoteModalMode, setMcpRemoteModalMode] = useState<"add" | "edit">("add");
+  const [mcpRemoteEditName, setMcpRemoteEditName] = useState<string | undefined>(undefined);
+  const [mcpRemoteDetailExpanded, setMcpRemoteDetailExpanded] = useState<Set<string>>(new Set());
+  const fetchModelsRequestSeqRef = useRef(0);
+  const authProbeGenerationRef = useRef(0);
+  const [authProbeProgress, setAuthProbeProgress] = useState<{ done: number; total: number } | null>(null);
+  const activeProviderRef = useRef(active);
+  activeProviderRef.current = active;
+
+  const [serverMode, setServerMode] = useState<"local" | "remote">("local");
+  const [serverUrl, setServerUrl] = useState("");
+  const [serverToken, setServerToken] = useState("");
+  const [serverTestStatus, setServerTestStatus] = useState<"idle" | "testing" | "ok" | "fail">("idle");
+  const [serverTestError, setServerTestError] = useState("");
+  const [serverShowToken, setServerShowToken] = useState(false);
+  const [metaSoul, setMetaSoulState] = useState("");
+  const [metaSoulSaved, setMetaSoulSavedState] = useState("");
+  const [metaSoulSaving, setMetaSoulSaving] = useState(false);
+  const [metaIdentity, setMetaIdentityState] = useState("");
+  const [metaIdentitySaved, setMetaIdentitySavedState] = useState("");
+  const [metaIdentitySaving, setMetaIdentitySaving] = useState(false);
+  const [metaWorkspaceMessage, setMetaWorkspaceMessage] = useState("");
+  const [metaExternalHintIdentity, setMetaExternalHintIdentity] = useState(false);
+  const [metaExternalHintSoul, setMetaExternalHintSoul] = useState(false);
+  const [metaHistoryOpen, setMetaHistoryOpen] = useState(false);
+  const [metaHistoryLoading, setMetaHistoryLoading] = useState(false);
+  const [metaHistoryMessage, setMetaHistoryMessage] = useState("");
+  const [metaHistoryIdentityItems, setMetaHistoryIdentityItems] = useState<
+    Array<{ id: string; savedAt: string; preview: string }>
+  >([]);
+  const [metaHistorySoulItems, setMetaHistorySoulItems] = useState<
+    Array<{ id: string; savedAt: string; preview: string }>
+  >([]);
+  const [userNicknameDraft, setUserNicknameDraft] = useState("");
+  const [userPreferenceDraft, setUserPreferenceDraft] = useState("");
+  const [userProfileMessage, setUserProfileMessage] = useState("");
+  const [userAvatarMessage, setUserAvatarMessage] = useState("");
+  const [metaAvatarMessage, setMetaAvatarMessage] = useState("");
+  const [workspaceDirDraft, setWorkspaceDirDraft] = useState(`${AGX_HOME_DISPLAY}/workspace`);
+  const [workspaceDirSaved, setWorkspaceDirSaved] = useState(`${AGX_HOME_DISPLAY}/workspace`);
+  const [workspaceDirResolved, setWorkspaceDirResolved] = useState("");
+  const [workspaceDirMessage, setWorkspaceDirMessage] = useState("");
+  const [workspaceDirSaving, setWorkspaceDirSaving] = useState(false);
+
+  const updateMetaIdentityDraft = useCallback((content: string) => {
+    metaIdentityDraftRef.current = content;
+    setMetaIdentityState(content);
+  }, []);
+  const updateMetaSoulDraft = useCallback((content: string) => {
+    metaSoulDraftRef.current = content;
+    setMetaSoulState(content);
+  }, []);
+  const acceptMetaIdentity = useCallback((content: string) => {
+    metaIdentityDraftRef.current = content;
+    metaIdentitySavedRef.current = content;
+    setMetaIdentityState(content);
+    setMetaIdentitySavedState(content);
+    setMetaExternalHintIdentity(false);
+  }, []);
+  const acceptMetaSoul = useCallback((content: string) => {
+    metaSoulDraftRef.current = content;
+    metaSoulSavedRef.current = content;
+    setMetaSoulState(content);
+    setMetaSoulSavedState(content);
+    setMetaExternalHintSoul(false);
+  }, []);
+  const markMetaIdentitySaved = useCallback((content: string) => {
+    metaIdentitySavedRef.current = content;
+    setMetaIdentitySavedState(content);
+  }, []);
+  const markMetaSoulSaved = useCallback((content: string) => {
+    metaSoulSavedRef.current = content;
+    setMetaSoulSavedState(content);
+  }, []);
+
+  const workspaceDirDirty = workspaceDirDraft.trim() !== workspaceDirSaved.trim();
+  const [gwEnabled, setGwEnabled] = useState(false);
+  const [gwUrl, setGwUrl] = useState("");
+  const [gwDeviceId, setGwDeviceId] = useState("");
+  const [gwToken, setGwToken] = useState("");
+  const [gwStudioBase, setGwStudioBase] = useState("");
+  const [gwShowToken, setGwShowToken] = useState(false);
+  const [gwAdvancedOpen, setGwAdvancedOpen] = useState(false);
+  const [gwQrOpen, setGwQrOpen] = useState(false);
+  // WeChat iLink sidecar
+  const [wechatStatus, setWechatStatus] = useState<"idle" | "binding" | "connected" | "stale" | "recovering" | "expired" | "error">("idle");
+  const [wechatBotId, setWechatBotId] = useState("");
+  const [wechatQrUrl, setWechatQrUrl] = useState("");
+  const [wechatQrFallbackUrl, setWechatQrFallbackUrl] = useState("");
+  const [wechatBindSessionId, setWechatBindSessionId] = useState("");
+  const [wechatBindSidecarPort, setWechatBindSidecarPort] = useState(0);
+  const [wechatBindMsg, setWechatBindMsg] = useState("");
+  // Feishu long-connection
+  const [imTab, setImTab] = useState<"feishu" | "webhook">("feishu");
+  const [feishuEnabled, setFeishuEnabled] = useState(false);
+  const [feishuAppId, setFeishuAppId] = useState("");
+  const [feishuAppSecret, setFeishuAppSecret] = useState("");
+  const [feishuShowSecret, setFeishuShowSecret] = useState(false);
+  const [feishuSaving, setFeishuSaving] = useState(false);
+  const [gwBindings, setGwBindings] = useState<
+    Array<{ platform: string; sender_id: string; device_id: string; bound_at: number }>
+  >([]);
+  const [gwBindingsLoading, setGwBindingsLoading] = useState(false);
+  const [gwBindingsErr, setGwBindingsErr] = useState("");
+
+  const refreshGwBindings = useCallback(async () => {
+    const base = gwUrl.trim().replace(/\/+$/, "");
+    const did = gwDeviceId.trim();
+    const tok = gwToken.trim();
+    if (!base || !did || !tok) {
+      setGwBindings([]);
+      setGwBindingsErr("");
+      return;
+    }
+    setGwBindingsLoading(true);
+    setGwBindingsErr("");
+    try {
+      const r = await fetch(
+        `${base}/api/device/${encodeURIComponent(did)}/bindings?token=${encodeURIComponent(tok)}`,
+      );
+      const text = await r.text();
+      let j: { bindings?: typeof gwBindings; detail?: string | unknown[] };
+      try {
+        j = JSON.parse(text) as { bindings?: typeof gwBindings; detail?: string | unknown[] };
+      } catch {
+        throw new Error(text.slice(0, 160) || `HTTP ${r.status}`);
+      }
+      if (!r.ok) {
+        const d = j.detail;
+        const msg =
+          typeof d === "string" ? d : Array.isArray(d) ? JSON.stringify(d) : text.slice(0, 160);
+        throw new Error(msg || `HTTP ${r.status}`);
+      }
+      setGwBindings(Array.isArray(j.bindings) ? j.bindings : []);
+    } catch (e) {
+      setGwBindingsErr(String(e));
+      setGwBindings([]);
+    } finally {
+      setGwBindingsLoading(false);
+    }
+  }, [gwUrl, gwDeviceId, gwToken]);
+
+  // Refresh wechat sidecar status with 3-source reconciliation (sidecar + binding time + reported age)
+  const refreshWechatStatus = useCallback(async () => {
+    try {
+      const portInfo = await window.agenticxDesktop.wechatSidecarPort();
+      if (!portInfo.running || !portInfo.port) return;
+      const resp = await fetch(`http://127.0.0.1:${portInfo.port}/status`);
+      if (!resp.ok) return;
+      const data: { connected?: boolean; bot_id?: string; status?: string; stale?: boolean; credential_age_hours?: number } = await resp.json();
+      let bindingAgeH = 0;
+      try {
+        const b = await window.agenticxDesktop.loadWechatBinding();
+        const d = (b.bindings as any)?.["_desktop"];
+        if (d?.bound_at) {
+          const bt = Date.parse(String(d.bound_at));
+          if (!Number.isNaN(bt)) bindingAgeH = (Date.now() - bt) / 3600000;
+        }
+      } catch {}
+      const age = data.credential_age_hours ?? bindingAgeH ?? 0;
+
+      const sidecarConnected = !!data.connected;
+      const sidecarStale = !!data.stale;
+
+      // Live connection from sidecar takes precedence.
+      // Age-based staleness only applies when we don't have a positive live connection.
+      const isStale = sidecarStale || (!sidecarConnected && age > 20);
+
+      if (sidecarConnected && !sidecarStale) {
+        setWechatStatus("connected");
+        setWechatBotId(data.bot_id || "");
+      } else if (isStale) {
+        setWechatStatus("stale");
+        setWechatBotId(data.bot_id || "");
+      } else if (data.bot_id) {
+        setWechatStatus("idle");
+        setWechatBotId(data.bot_id);
+      }
+    } catch {
+      // silent; do not overwrite user-visible state on transient error
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open || tab !== "server") return;
+    void refreshGwBindings();
+  }, [open, tab, refreshGwBindings]);
+
+  useEffect(() => {
+    // Reset the guard when dialog is closed.
+    if (!open) {
+      initializedForOpenRef.current = false;
+      metaWorkspaceHydratedRef.current = { identity: false, soul: false };
+      metaWorkspaceLoadGenerationRef.current += 1;
+      metaWorkspaceReloadRef.current = null;
+      fetchModelsRequestSeqRef.current += 1;
+      setFetchingModels(false);
+      setFetchModelsModalOpen(false);
+      setFetchedModels([]);
+      setFetchModelsSearch("");
+      setFetchModelsError(null);
+      setEditModelModalOpen(false);
+      setEditModelOriginalId("");
+      setEditModelFormId("");
+      setEditModelError(null);
+      setAddServiceVendorModalOpen(false);
+      setAddVendorFormName("");
+      return;
+    }
+    // IMPORTANT: only initialize once per open cycle.
+    // Otherwise parent re-renders (or async prop updates) can overwrite
+    // user's in-panel selection and force active provider back to default.
+    if (initializedForOpenRef.current) return;
+    initializedForOpenRef.current = true;
+
+    const merged: Record<string, ProviderEntry> = {};
+    for (const name of ALL_PROVIDERS) {
+      merged[name] = providerEntryFromSaved(providers[name]);
+    }
+    for (const [name, saved] of Object.entries(providers)) {
+      if (!merged[name]) {
+        merged[name] = providerEntryFromSaved(saved);
+      }
+    }
+    setDraft(merged);
+    setProviderSavedSnapshot(cloneProviderDraftMap(merged));
+    setProviderSavedDefProv(defaultProvider || ALL_PROVIDERS[0]);
+    setProviderConfigMessage("");
+    setProviderConfigSaving(false);
+    setGeneralDefaultModelMessage("");
+    setGeneralDefaultModelSaving(false);
+    setProviderEnableHint(null);
+    setDefaultProvHint(null);
+    setDefProv(defaultProvider || ALL_PROVIDERS[0]);
+    setActive(defaultProvider || ALL_PROVIDERS[0]);
+    setKeyStatus({});
+    setKeyError({});
+    setModelHealthMap({});
+    setMcpMessage("");
+    setMetaWorkspaceMessage("");
+    setWorkspaceDirMessage("");
+    setUserNicknameDraft(userNickname);
+    setUserPreferenceDraft(userPreference);
+    setUserProfileMessage("");
+    setServerTestStatus("idle");
+    setServerTestError("");
+    void window.agenticxDesktop.loadRemoteServer().then((rs) => {
+      setServerMode(rs.enabled ? "remote" : "local");
+      setServerUrl(rs.url || "");
+      setServerToken(rs.token || "");
+    });
+    void window.agenticxDesktop.loadGatewayIm().then((gw) => {
+      setGwEnabled(gw.enabled);
+      setGwUrl(gw.url || "");
+      setGwDeviceId(gw.deviceId || "");
+      setGwToken(gw.token || "");
+      setGwStudioBase(gw.studioBaseUrl || "");
+    });
+    void window.agenticxDesktop.loadFeishuConfig().then((lc) => {
+      setFeishuEnabled(lc.enabled);
+      setFeishuAppId(lc.appId || "");
+      setFeishuAppSecret(lc.appSecret || "");
+    });
+    void refreshWechatStatus();
+    void window.agenticxDesktop.loadWorkspaceConfig().then((res) => {
+      if (!res?.ok) return;
+      const dir = String(res.workspaceDir ?? `${AGX_HOME_DISPLAY}/workspace`).trim() || `${AGX_HOME_DISPLAY}/workspace`;
+      setWorkspaceDirDraft(dir);
+      setWorkspaceDirSaved(dir);
+      setWorkspaceDirResolved(String(res.resolvedPath ?? "").trim());
+    });
+    if (sessionId) void onRefreshMcp(sessionId);
+  }, [open, providers, defaultProvider, sessionId, onRefreshMcp, userNickname, userPreference]);
+
+  // Poll for wechat status while settings panel (server tab) is open
+  useEffect(() => {
+    if (!open || tab !== "server") return;
+    // initial refresh already scheduled in prior effect; add recurring
+    const t = setInterval(() => { void refreshWechatStatus(); }, 45000);
+    return () => clearInterval(t);
+  }, [open, tab, refreshWechatStatus]);
+
+  const userProfileDirty =
+    userNicknameDraft !== userNickname || userPreferenceDraft !== userPreference;
+
+  const saveUserProfile = useCallback(() => {
+    setUserNickname(userNicknameDraft);
+    setUserPreference(userPreferenceDraft);
+    // 同步写入 USER.md，供运行时 workspace context 读取
+    const userMdContent = [
+      "# USER.md - About Your User",
+      "",
+      `- Name: ${userNicknameDraft.trim() || "(unknown)"}`,
+      `- Preferred address: ${userNicknameDraft.trim() || "(unknown)"}`,
+      "- Timezone: Asia/Shanghai",
+      "- Preferences:",
+      ...(userPreferenceDraft.trim()
+        ? userPreferenceDraft.trim().split("\n").map((l) => `  ${l}`)
+        : ["  (not set)"]),
+    ].join("\n");
+    void window.agenticxDesktop.saveUserMd({ content: userMdContent });
+    setUserProfileMessage("用户档案已保存。下一轮对话生效。");
+  }, [setUserNickname, setUserPreference, userNicknameDraft, userPreferenceDraft]);
+
+  const metaSoulDirty = metaSoul !== metaSoulSaved;
+  const metaIdentityDirty = metaIdentity !== metaIdentitySaved;
+
+  const loadMetaWorkspaceHistory = useCallback(async () => {
+    setMetaHistoryLoading(true);
+    setMetaHistoryMessage("");
+    try {
+      const [identityRes, soulRes] = await Promise.all([
+        window.agenticxDesktop.listMetaWorkspaceHistory({ kind: "identity" }),
+        window.agenticxDesktop.listMetaWorkspaceHistory({ kind: "soul" }),
+      ]);
+      if (identityRes?.ok) {
+        setMetaHistoryIdentityItems(identityRes.items ?? []);
+      } else {
+        setMetaHistoryMessage(identityRes?.error ?? "无法加载身份历史");
+      }
+      if (soulRes?.ok) {
+        setMetaHistorySoulItems(soulRes.items ?? []);
+      } else if (!identityRes?.ok) {
+        setMetaHistoryMessage(soulRes?.error ?? "无法加载人格历史");
+      }
+    } catch (err) {
+      setMetaHistoryMessage(String(err));
+    } finally {
+      setMetaHistoryLoading(false);
+    }
+  }, []);
+
+  const reloadMetaWorkspaceFromDisk = useCallback((): Promise<void> => {
+    const inFlight = metaWorkspaceReloadRef.current;
+    if (inFlight) return inFlight;
+
+    const generation = metaWorkspaceLoadGenerationRef.current;
+    const task = (async () => {
+      try {
+        const [identityRes, soulRes] = await Promise.all([
+          window.agenticxDesktop.loadMetaIdentity(),
+          window.agenticxDesktop.loadMetaSoul(),
+        ]);
+        if (generation !== metaWorkspaceLoadGenerationRef.current) return;
+
+        const errors: string[] = [];
+        const reconcile = (
+          kind: "identity" | "soul",
+          response: { ok: boolean; content?: string; error?: string } | undefined,
+        ) => {
+          const identity = kind === "identity";
+          const label = identity ? "身份定义" : "全局人格";
+          if (!response?.ok) {
+            errors.push(`${label}读取失败: ${response?.error ?? "未知错误"}`);
+            return;
+          }
+
+          const disk = response.content ?? "";
+          const draft = identity ? metaIdentityDraftRef.current : metaSoulDraftRef.current;
+          const saved = identity ? metaIdentitySavedRef.current : metaSoulSavedRef.current;
+          const decision = decideExternalDraftReload({
+            hydrated: metaWorkspaceHydratedRef.current[kind],
+            draft,
+            saved,
+            disk,
+          });
+          metaWorkspaceHydratedRef.current[kind] = true;
+
+          const accept = identity ? acceptMetaIdentity : acceptMetaSoul;
+          const setExternalHint = identity
+            ? setMetaExternalHintIdentity
+            : setMetaExternalHintSoul;
+
+          if (decision === "accept") {
+            accept(disk);
+            return;
+          }
+          if (decision === "keep-local") {
+            setExternalHint(false);
+            return;
+          }
+          setExternalHint(true);
+        };
+
+        reconcile("identity", identityRes);
+        if (generation !== metaWorkspaceLoadGenerationRef.current) return;
+        reconcile("soul", soulRes);
+        if (errors.length > 0 && generation === metaWorkspaceLoadGenerationRef.current) {
+          setMetaWorkspaceMessage(errors.join("；"));
+        }
+      } catch (err) {
+        if (generation === metaWorkspaceLoadGenerationRef.current) {
+          setMetaWorkspaceMessage(`读取身份配置失败: ${String(err)}`);
+        }
+      }
+    })();
+
+    metaWorkspaceReloadRef.current = task;
+    void task.finally(() => {
+      if (metaWorkspaceReloadRef.current === task) {
+        metaWorkspaceReloadRef.current = null;
+      }
+    });
+    return task;
+  }, [acceptMetaIdentity, acceptMetaSoul]);
+
+  useEffect(() => {
+    if (!open || tab !== "general") return;
+    void reloadMetaWorkspaceFromDisk();
+  }, [open, tab, reloadMetaWorkspaceFromDisk]);
+
+  useEffect(() => {
+    if (!open || tab !== "general" || !metaHistoryOpen) return;
+    void loadMetaWorkspaceHistory();
+  }, [open, tab, metaHistoryOpen, loadMetaWorkspaceHistory]);
+
+  const openMetaWorkspaceInEditor = useCallback(async (kind: "identity" | "soul") => {
+    const res = await window.agenticxDesktop.openMetaWorkspaceFile({ kind });
+    if (!res?.ok) {
+      setMetaWorkspaceMessage(`无法打开文件: ${res?.error ?? "未知错误"}`);
+    }
+  }, []);
+
+  const restoreMetaWorkspaceHistoryItem = useCallback(
+    async (kind: "identity" | "soul", id: string) => {
+      const dlg = await window.agenticxDesktop.confirmDialog({
+        title: "恢复历史版本",
+        message: "将用该历史版本覆盖当前文件与编辑区内容，是否继续？",
+        confirmText: "恢复",
+        cancelText: "取消",
+        destructive: true,
+      });
+      if (!dlg.confirmed) return;
+
+      try {
+        const res = await window.agenticxDesktop.restoreMetaWorkspaceHistory({ kind, id });
+        if (!res?.ok) {
+          setMetaWorkspaceMessage(`恢复失败: ${res?.error ?? "未知错误"}`);
+          return;
+        }
+        const content = res.content ?? "";
+        if (kind === "identity") {
+          acceptMetaIdentity(content);
+        } else {
+          acceptMetaSoul(content);
+        }
+        setMetaWorkspaceMessage("已恢复，下一轮对话生效。");
+        if (metaHistoryOpen) void loadMetaWorkspaceHistory();
+      } catch (err) {
+        setMetaWorkspaceMessage(`恢复失败: ${String(err)}`);
+      }
+    },
+    [acceptMetaIdentity, acceptMetaSoul, loadMetaWorkspaceHistory, metaHistoryOpen],
+  );
+
+  const saveMetaWorkspace = useCallback(async () => {
+    setMetaIdentitySaving(true);
+    setMetaSoulSaving(true);
+    setMetaWorkspaceMessage("");
+    const errors: string[] = [];
+    try {
+      if (metaIdentityDirty) {
+        const res = await window.agenticxDesktop.saveMetaIdentity({ content: metaIdentity });
+        if (res?.ok) {
+          markMetaIdentitySaved(metaIdentity);
+        } else {
+          errors.push(`身份定义: ${res?.error ?? "未知错误"}`);
+        }
+      }
+      if (metaSoulDirty) {
+        const res = await window.agenticxDesktop.saveMetaSoul({ content: metaSoul });
+        if (res?.ok) {
+          markMetaSoulSaved(metaSoul);
+        } else {
+          errors.push(`全局人格: ${res?.error ?? "未知错误"}`);
+        }
+      }
+      if (errors.length > 0) {
+        setMetaWorkspaceMessage(`保存失败: ${errors.join("；")}`);
+      } else if (metaIdentityDirty || metaSoulDirty) {
+        setMetaWorkspaceMessage("已保存，下一轮对话生效。");
+        if (metaHistoryOpen) void loadMetaWorkspaceHistory();
+      }
+    } catch (err) {
+      setMetaWorkspaceMessage(`保存失败: ${String(err)}`);
+    } finally {
+      setMetaIdentitySaving(false);
+      setMetaSoulSaving(false);
+    }
+  }, [
+    metaIdentity,
+    metaIdentityDirty,
+    metaSoul,
+    metaSoulDirty,
+    metaHistoryOpen,
+    loadMetaWorkspaceHistory,
+    markMetaIdentitySaved,
+    markMetaSoulSaved,
+  ]);
+
+  const chooseWorkspaceDirectory = useCallback(async () => {
+    setWorkspaceDirMessage("");
+    try {
+      const res = await window.agenticxDesktop.chooseDirectory();
+      if (res?.canceled) return;
+      if (!res?.ok || !res.path) {
+        setWorkspaceDirMessage(res?.error ? `选择失败: ${res.error}` : "未选择目录");
+        return;
+      }
+      setWorkspaceDirDraft(res.path);
+    } catch (err) {
+      setWorkspaceDirMessage(`选择失败: ${String(err)}`);
+    }
+  }, []);
+
+  const saveWorkspaceDirectory = useCallback(async () => {
+    const trimmed = workspaceDirDraft.trim();
+    if (!trimmed) {
+      setWorkspaceDirMessage("工作区路径不能为空");
+      return;
+    }
+    setWorkspaceDirSaving(true);
+    setWorkspaceDirMessage("");
+    try {
+      const res = await window.agenticxDesktop.saveWorkspaceConfig({ workspaceDir: trimmed });
+      if (!res?.ok) {
+        setWorkspaceDirMessage(`保存失败: ${res?.error ?? "未知错误"}`);
+        return;
+      }
+      const saved = String(res.workspaceDir ?? trimmed).trim() || trimmed;
+      setWorkspaceDirDraft(saved);
+      setWorkspaceDirSaved(saved);
+      setWorkspaceDirResolved(String(res.resolvedPath ?? "").trim());
+      if (res.changed) {
+        void reloadMetaWorkspaceFromDisk();
+        const restartDlg = await window.agenticxDesktop.confirmDialog({
+          title: "工作区已更新",
+          message: "新建元智能体对话将使用新目录；已有会话仍保留原工作区。",
+          detail:
+            `建议完全退出${APP_DISPLAY_NAME}（⌘Q）后重新打开，以确保${APP_DISPLAY_NAME}人格文件、用户档案与记忆索引路径一致。`,
+          confirmText: "立即重启",
+          cancelText: "稍后手动重启",
+        });
+        if (restartDlg.confirmed) {
+          await window.agenticxDesktop.appRelaunch();
+          return;
+        }
+        setWorkspaceDirMessage(`已保存。请新建对话使新路径生效；建议稍后重启${APP_DISPLAY_NAME}。`);
+      } else {
+        setWorkspaceDirMessage("已保存，路径未变更。");
+      }
+    } catch (err) {
+      setWorkspaceDirMessage(`保存失败: ${String(err)}`);
+    } finally {
+      setWorkspaceDirSaving(false);
+    }
+  }, [reloadMetaWorkspaceFromDisk, workspaceDirDraft]);
+
+  const callAiAssist = useCallback(
+    async (kind: "identity" | "soul" | "preference") => {
+      const setMsg = kind === "preference" ? setUserProfileMessage : setMetaWorkspaceMessage;
+      const currentContent =
+        kind === "identity" ? metaIdentity : kind === "soul" ? metaSoul : userPreferenceDraft;
+
+      const prompts: Record<typeof kind, { system: string; user: string }> = {
+        identity: {
+          system:
+            "你是一个帮助用户配置 AI 助理身份定义的助手。直接输出可填入 IDENTITY.md 的 Markdown 内容，不要加任何解释或前缀。",
+          user: currentContent.trim()
+            ? `请对以下身份定义进行润色，让它更清晰、更有个性，保留 Markdown 格式：\n\n${currentContent}`
+            : `请为一个名为${META_AGENT_DISPLAY_NAME}的企业 AI 助理生成一份简洁的身份定义（IDENTITY.md），Markdown 格式，包含 Name、Role、Persona 字段。`,
+        },
+        soul: {
+          system:
+            "你是一个帮助用户配置 AI 助理人格原则的助手。直接输出可填入 SOUL.md 的 Markdown 内容，不要加任何解释或前缀。",
+          user: currentContent.trim()
+            ? `请对以下全局人格进行润色，让原则更清晰、更有可操作性，保留 Markdown 格式：\n\n${currentContent}`
+            : "请为一个个人 AI 助理生成一份全局人格文档（SOUL.md），Markdown 格式，包含行为准则和沟通风格。",
+        },
+        preference: {
+          system:
+            "你是一个帮助用户描述自己使用 AI 时偏好的助手。输出简洁的纯文本偏好描述（非 Markdown），不超过 200 字，直接输出内容，不要加任何前缀。",
+          user: currentContent.trim()
+            ? `请润色以下用户偏好描述，让它更自然、更清晰：\n\n${currentContent}`
+            : "请生成一段示例用户偏好描述，内容包含：回复风格、格式偏好、沟通习惯等，字数在 100 字以内。",
+        },
+      };
+      const { system, user } = prompts[kind];
+
+      // 从当前激活的 provider 取 API 配置
+      const store = await import("../store").then((m) => m.useAppStore.getState());
+      const activeProvider = store.activeProvider || defaultProvider || "";
+      const providerEntry = providers[activeProvider];
+      const apiKey = providerEntry?.apiKey ?? "";
+      const baseUrl = providerEntry?.baseUrl ?? "";
+      const model = providerEntry?.model ?? store.activeModel ?? "";
+
+      setAiAssistLoading(kind);
+      setMsg("");
+      try {
+        const res = await window.agenticxDesktop.aiAssistComplete({
+          systemPrompt: system,
+          userPrompt: user,
+          provider: activeProvider,
+          apiKey,
+          baseUrl,
+          model,
+        });
+        if (!res?.ok) {
+          setMsg(`AI 辅助失败: ${res?.error ?? "未知错误"}`);
+          return;
+        }
+        const result = (res.content ?? "").trim();
+        if (!result) {
+          setMsg("AI 未返回有效内容，请重试。");
+          return;
+        }
+        if (kind === "identity") {
+          updateMetaIdentityDraft(result);
+          setMetaWorkspaceMessage("AI 已生成身份定义，请检查后保存。");
+        } else if (kind === "soul") {
+          updateMetaSoulDraft(result);
+          setMetaWorkspaceMessage("AI 已生成全局人格，请检查后保存。");
+        } else {
+          setUserPreferenceDraft(result);
+          setUserProfileMessage("AI 已生成偏好描述，请检查后保存。");
+        }
+      } catch (err) {
+        setMsg(`AI 辅助失败: ${String(err)}`);
+      } finally {
+        setAiAssistLoading(null);
+      }
+    },
+    [
+      metaIdentity,
+      metaSoul,
+      userPreferenceDraft,
+      defaultProvider,
+      providers,
+      updateMetaIdentityDraft,
+      updateMetaSoulDraft,
+    ],
+  );
+
+  const handleProfileAvatarUpload = useCallback(
+    (file: File, target: "user" | "meta") => {
+      const maxBytes = 1.8 * 1024 * 1024;
+      if (!file.type.startsWith("image/")) {
+        (target === "user" ? setUserAvatarMessage : setMetaAvatarMessage)(
+          "请选择图片文件（PNG/JPG/WebP/GIF）。"
+        );
+        return;
+      }
+      if (file.size > maxBytes) {
+        (target === "user" ? setUserAvatarMessage : setMetaAvatarMessage)(
+          "图片过大，请选择小于 1.8MB 的文件。"
+        );
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const result = typeof reader.result === "string" ? reader.result : "";
+        if (!result) {
+          (target === "user" ? setUserAvatarMessage : setMetaAvatarMessage)("读取图片失败，请重试。");
+          return;
+        }
+        if (target === "user") {
+          setUserAvatarUrl(result);
+          setUserAvatarMessage("已更新我的头像。");
+        } else {
+          setMetaAvatarUrl(result);
+          setMetaAvatarMessage(`已更新${META_AGENT_DISPLAY_NAME}头像。`);
+        }
+      };
+      reader.onerror = () => {
+        (target === "user" ? setUserAvatarMessage : setMetaAvatarMessage)("读取图片失败，请重试。");
+      };
+      reader.readAsDataURL(file);
+    },
+    [setMetaAvatarUrl, setUserAvatarUrl]
+  );
+
+  useEffect(() => {
+    if (!open || tab !== "mcp") return;
+    void window.agenticxDesktop.getMcpSettings().then((r) => {
+      if (r.ok && Array.isArray(r.extra_search_paths)) {
+        setMcpExtraPaths([...r.extra_search_paths]);
+      }
+      if (r.ok && r.disabled_tools && typeof r.disabled_tools === "object") {
+        setMcpDisabledTools(r.disabled_tools as Record<string, string[]>);
+      }
+      if (r.ok && Array.isArray(r.skip_default_names)) {
+        setMcpSkipDefaultNames(r.skip_default_names.map((x) => String(x).trim()).filter(Boolean));
+      }
+      if (r.ok && Array.isArray(r.default_entry_names)) {
+        setMcpDefaultEntryNames(r.default_entry_names.map((x) => String(x).trim()).filter(Boolean));
+      }
+    });
+  }, [open, tab]);
+
+  const persistMcpExtraPaths = useCallback(
+    async (next: string[]) => {
+      const cleaned = next.map((x) => x.trim()).filter(Boolean);
+      setMcpPathSaving(true);
+      setMcpMessage("");
+      try {
+        const r = await window.agenticxDesktop.putMcpSettings({ extraSearchPaths: cleaned });
+        if (r.ok) {
+          setMcpExtraPaths(cleaned);
+          setMcpMessage("已保存 MCP 配置路径");
+          if (sessionId) await onRefreshMcp(sessionId);
+        } else {
+          setMcpMessage(`保存路径失败: ${r.error ?? "未知错误"}`);
+        }
+      } catch (err) {
+        setMcpMessage(`保存路径失败: ${String(err)}`);
+      } finally {
+        setMcpPathSaving(false);
+      }
+    },
+    [sessionId, onRefreshMcp]
+  );
+
+  const current = useMemo((): ProviderEntry => {
+    const empty: ProviderEntry = {
+      apiKey: "",
+      baseUrl: "",
+      model: "",
+      models: [],
+      enabled: false,
+      dropParams: false,
+    };
+    const raw = draft[active];
+    if (!raw || typeof raw !== "object") {
+      return empty;
+    }
+    return {
+      ...empty,
+      ...raw,
+      apiKey: String(raw.apiKey ?? ""),
+      baseUrl: String(raw.baseUrl ?? ""),
+      model: String(raw.model ?? ""),
+      models: Array.isArray(raw.models) ? raw.models.map((m) => String(m)) : [],
+      enabled: raw.enabled !== false,
+      dropParams: raw.dropParams === true,
+      displayName: raw.displayName != null && String(raw.displayName).trim() ? String(raw.displayName).trim() : undefined,
+      interface:
+        raw.interface === "openai" || raw.interface === "ollama" ? raw.interface : undefined,
+      managed: raw.managed === true,
+    };
+  }, [draft, active]);
+
+  const filteredFetchedModels = useMemo(() => {
+    const keyword = fetchModelsSearch.trim().toLowerCase();
+    if (!keyword) return fetchedModels;
+    return fetchedModels.filter((model) => model.toLowerCase().includes(keyword));
+  }, [fetchedModels, fetchModelsSearch]);
+
+  useEffect(() => {
+    setApiKeyVisible(false);
+  }, [active]);
+
+  useEffect(() => {
+    if (!inlineRenameProviderId) return;
+    const t = window.setTimeout(() => {
+      inlineRenameInputRef.current?.focus();
+      inlineRenameInputRef.current?.select();
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [inlineRenameProviderId]);
+
+  useEffect(() => {
+    setFetchModelsModalOpen(false);
+    setFetchedModels([]);
+    setFetchModelsSearch("");
+    setFetchModelsError(null);
+    setFetchingModels(false);
+    authProbeGenerationRef.current += 1;
+    setAuthProbeProgress(null);
+    activeProviderRef.current = active;
+    fetchModelsRequestSeqRef.current += 1;
+  }, [active]);
+
+  const currentEffectiveOn = useMemo(() => providerEffectiveOn(draft[active]), [draft, active]);
+
+  const updateField = useCallback(
+    (field: keyof ProviderEntry, value: string | string[] | boolean) => {
+      setDraft((prev) => {
+        const prevEntry = prev[active] ?? {
+          apiKey: "",
+          baseUrl: "",
+          model: "",
+          models: [],
+          enabled: false,
+          dropParams: false,
+        };
+        const next: ProviderEntry = { ...prevEntry, [field]: value as never };
+        if (field === "apiKey" || field === "baseUrl") {
+          const k = (field === "apiKey" ? String(value) : next.apiKey).trim();
+          const u = (field === "baseUrl" ? String(value) : next.baseUrl).trim();
+          if (!k && !u) next.enabled = false;
+        }
+        return { ...prev, [active]: next };
+      });
+      if (field === "apiKey" || field === "baseUrl") {
+        setProviderEnableHint(null);
+        setDefaultProvHint(null);
+      }
+    },
+    [active]
+  );
+
+  const enterpriseStrict = useMemo(
+    () => Object.values(draft).some((e) => e?.managed === true),
+    [draft],
+  );
+  const enterpriseModelManagementLocked =
+    isEnterpriseModelManagementLocked(userAccount) && !enterpriseStrict;
+
+  const providerNames = useMemo(() => {
+    if (enterpriseStrict) {
+      return Object.keys(draft).filter((name) => draft[name]?.managed === true);
+    }
+    const set = new Set<string>([...ALL_PROVIDERS, ...Object.keys(draft)]);
+    return Array.from(set);
+  }, [draft, enterpriseStrict]);
+
+  const reloadProvidersAfterEnterpriseChange = useCallback(async () => {
+    try {
+      const cfg = await window.agenticxDesktop.loadConfig();
+      const raw = cfg.providers ?? {};
+      const mapped: Record<string, ProviderEntry> = {};
+      for (const [name, p] of Object.entries(raw)) {
+        const row = p as {
+          api_key?: string;
+          base_url?: string;
+          model?: string;
+          models?: string[];
+          display_name?: string;
+          drop_params?: boolean;
+          managed?: boolean;
+          interface?: "openai" | "ollama";
+          enabled?: boolean;
+        };
+        mapped[name] = normalizeProviderEntry({
+          apiKey: row.api_key ?? "",
+          baseUrl: row.base_url ?? "",
+          model: row.model ?? "",
+          models: row.models ?? [],
+          enabled: row.enabled !== false,
+          dropParams: row.drop_params === true,
+          displayName: row.display_name,
+          interface: row.interface,
+          managed: row.managed === true,
+          modelCatalog:
+            name === "enterprise" ? cfg.enterprise?.modelCatalog ?? [] : undefined,
+        });
+      }
+      const managedOnly = cfg.enterprise?.enabled === true && cfg.enterprise?.strict !== false;
+      const visible = managedOnly
+        ? Object.fromEntries(Object.entries(mapped).filter(([, e]) => e.managed === true))
+        : mapped;
+      const defP = managedOnly
+        ? (visible.enterprise ? "enterprise" : Object.keys(visible)[0] ?? "")
+        : (cfg.defaultProvider ?? "");
+      updateSettingsSlice({
+        defaultProvider: defP,
+        providers: visible,
+        provider: defP,
+        model: visible[defP]?.model ?? "",
+        apiKey: visible[defP]?.apiKey ?? "",
+      });
+      setDraft(cloneProviderDraftMap(visible));
+      setDefProv(defP);
+      setProviderSavedSnapshot(cloneProviderDraftMap(visible));
+      setProviderSavedDefProv(defP);
+      if (visible[defP]) setActive(defP);
+      else {
+        const first = Object.keys(visible)[0];
+        if (first) setActive(first);
+      }
+    } catch (err) {
+      console.warn("[SettingsPanel] reload after enterprise change failed:", err);
+    }
+  }, [updateSettingsSlice]);
+
+  const providerConfigDirty = useMemo(() => {
+    if (defProv !== providerSavedDefProv) return true;
+    const normalizedDraft = normalizeProviderDraftForCompare(draft);
+    const normalizedSaved = normalizeProviderDraftForCompare(providerSavedSnapshot);
+    return !providerDraftMapsEqual(normalizedDraft, normalizedSaved);
+  }, [defProv, draft, providerSavedDefProv, providerSavedSnapshot]);
+
+  const saveProviderConfig = useCallback(async () => {
+    if (!providerConfigDirty || providerConfigSaving) return;
+    setProviderConfigSaving(true);
+    setProviderConfigMessage("");
+    try {
+      const normalized: Record<string, ProviderEntry> = {};
+      for (const [name, entry] of Object.entries(draft)) {
+        normalized[name] = normalizeProviderEntry({
+          ...entry,
+          baseUrl: normalizeProviderBaseUrlForSave(name, entry.baseUrl, entry),
+        });
+      }
+      await onSave({ defaultProvider: defProv, providers: normalized });
+      setProviderSavedSnapshot(cloneProviderDraftMap(normalized));
+      setProviderSavedDefProv(defProv);
+      setProviderConfigMessage("已保存");
+    } catch (err) {
+      setProviderConfigMessage(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setProviderConfigSaving(false);
+    }
+  }, [defProv, draft, onSave, providerConfigDirty, providerConfigSaving]);
+
+  const saveGeneralDefaultModel = useCallback(async (
+    nextProvider: string,
+    nextModel: string,
+  ) => {
+    if (generalDefaultModelSaving) return;
+    // Deliberately start from the last saved snapshot. `draft` may contain API
+    // keys, URLs, or catalog edits that still await the Provider tab's Save.
+    const savedBase = Object.keys(providerSavedSnapshot).length > 0
+      ? providerSavedSnapshot
+      : providers;
+    const update = applyGlobalDefaultModelChoice(savedBase, nextProvider, nextModel);
+    if (!update) {
+      setGeneralDefaultModelMessage("该模型不在已保存的可用列表中，请先到模型服务保存配置。");
+      return;
+    }
+
+    setGeneralDefaultModelSaving(true);
+    setGeneralDefaultModelMessage("");
+    try {
+      await onSave(update);
+      const nextSaved = cloneProviderDraftMap(update.providers);
+      setProviderSavedSnapshot(nextSaved);
+      setProviderSavedDefProv(update.defaultProvider);
+      setDefProv(update.defaultProvider);
+      // Preserve every unrelated unsaved draft field while aligning the one
+      // model choice the user explicitly committed from General Preferences.
+      setDraft((currentDraft) => ({
+        ...currentDraft,
+        [update.defaultProvider]: {
+          ...(currentDraft[update.defaultProvider] ?? nextSaved[update.defaultProvider]),
+          model: nextModel.trim(),
+        },
+      }));
+      setGeneralDefaultModelMessage("已保存");
+    } catch (err) {
+      setGeneralDefaultModelMessage(`保存失败：${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setGeneralDefaultModelSaving(false);
+    }
+  }, [generalDefaultModelSaving, onSave, providerSavedSnapshot, providers]);
+
+  const onValidateKey = async () => {
+    if (!providerCredentialed(current)) return;
+    setKeyStatus((p) => ({ ...p, [active]: "checking" }));
+    setKeyError((p) => ({ ...p, [active]: "" }));
+    setKeyWarning((p) => ({ ...p, [active]: "" }));
+    const res = await window.agenticxDesktop.validateKey({ provider: active, apiKey: current.apiKey, baseUrl: current.baseUrl || undefined });
+    setKeyStatus((p) => ({ ...p, [active]: res.ok ? "ok" : "fail" }));
+    if (res.ok && res.warning) {
+      setKeyWarning((p) => ({ ...p, [active]: res.warning ?? "" }));
+    }
+    if (!res.ok) setKeyError((p) => ({ ...p, [active]: res.error ?? "未知错误" }));
+  };
+
+  const onFetchModels = async () => {
+    if (!providerCredentialed(current)) return;
+    const requestProvider = active;
+    const requestEntry: ProviderEntry = {
+      ...current,
+      models: [...current.models],
+    };
+    const requestId = fetchModelsRequestSeqRef.current + 1;
+    fetchModelsRequestSeqRef.current = requestId;
+    const requestApiKey = requestEntry.apiKey;
+    const requestBaseUrl = requestEntry.baseUrl || undefined;
+    setFetchModelsError(null);
+    setFetchModelsWarning(null);
+    setFetchingModels(true);
+    try {
+      const res = await window.agenticxDesktop.fetchModels({
+        provider: requestProvider,
+        apiKey: requestApiKey,
+        baseUrl: requestBaseUrl,
+      });
+      const isLatestRequest = fetchModelsRequestSeqRef.current === requestId;
+      const providerUnchanged = activeProviderRef.current === requestProvider;
+      if (!isLatestRequest || !providerUnchanged) return;
+      if (!res.ok) {
+        setFetchModelsError(res.error ?? "拉取模型失败");
+        return;
+      }
+      if (res.warning) {
+        setFetchModelsWarning(res.warning);
+      }
+      if (res.models.length === 0) return;
+      const normalized = Array.from(
+        new Set(
+          [...requestEntry.models, ...res.models].map((m) => String(m).trim()).filter(Boolean),
+        ),
+      );
+      setFetchedModels(normalized);
+      setFetchModelsSearch("");
+      setFetchModelsModalOpen(true);
+      // Probe the full catalog (incl. already-visible): mark unauthorized, and
+      // auto-purge historically "+" models the key can no longer call.
+      if (normalized.length > 0) {
+        void runAuthProbeQueue(
+          requestProvider,
+          normalized,
+          requestApiKey,
+          requestBaseUrl,
+          {
+            purgeVisibleUnauthorized: true,
+            visibleModels: [...requestEntry.models],
+            visibleEntry: requestEntry,
+          },
+        );
+      }
+    } catch (err) {
+      if (
+        fetchModelsRequestSeqRef.current === requestId &&
+        activeProviderRef.current === requestProvider
+      ) {
+        setFetchModelsError(`拉取模型失败: ${String(err)}`);
+      }
+    } finally {
+      if (
+        fetchModelsRequestSeqRef.current === requestId &&
+        activeProviderRef.current === requestProvider
+      ) {
+        setFetchingModels(false);
+      }
+    }
+  };
+
+  const closeFetchModelsModal = () => {
+    authProbeGenerationRef.current += 1;
+    setAuthProbeProgress(null);
+    setFetchModelsModalOpen(false);
+    setFetchModelsSearch("");
+  };
+
+  const makeModelVisible = (model: string) => {
+    if (enterpriseModelManagementLocked || !model || current.models.includes(model)) return;
+    updateField("models", [...current.models, model]);
+  };
+
+  const onRemoveModel = (model: string) => {
+    if (enterpriseModelManagementLocked) return;
+    setDraft((prev) => {
+      const prevEntry = prev[active] ?? {
+        apiKey: "",
+        baseUrl: "",
+        model: "",
+        models: [],
+        enabled: false,
+        dropParams: false,
+      };
+      const nextModels = prevEntry.models.filter((m) => m !== model);
+      let nextModel = prevEntry.model;
+      if (nextModel === model || (nextModels.length > 0 && !nextModels.includes(nextModel))) {
+        nextModel = nextModels[0] ?? "";
+      }
+      return {
+        ...prev,
+        [active]: normalizeProviderEntry({ ...prevEntry, models: nextModels, model: nextModel }),
+      };
+    });
+  };
+
+  /**
+   * Drop an unauthorized model from the visible list and persist immediately so
+   * chat pickers cannot keep selecting it if the user closes settings without Save.
+   */
+  const purgeUnauthorizedVisibleModel = useCallback(async (
+    model: string,
+    provider: string,
+    entrySnapshot: ProviderEntry,
+    expectedGeneration: number,
+  ) => {
+    if (!shouldApplyProviderHealthCheck(
+      provider,
+      activeProviderRef.current,
+      expectedGeneration,
+      authProbeGenerationRef.current,
+    )) return;
+    if (!entrySnapshot.models.includes(model)) return;
+    const nextModels = entrySnapshot.models.filter((m) => m !== model);
+    let nextModel = entrySnapshot.model;
+    if (nextModel === model || (nextModels.length > 0 && !nextModels.includes(nextModel))) {
+      nextModel = nextModels[0] ?? "";
+    }
+    const nextEntry = normalizeProviderEntry({ ...entrySnapshot, models: nextModels, model: nextModel });
+    setDraft((prev) => {
+      if (!shouldApplyProviderHealthCheck(
+        provider,
+        activeProviderRef.current,
+        expectedGeneration,
+        authProbeGenerationRef.current,
+      )) return prev;
+      return { ...prev, [provider]: nextEntry };
+    });
+    try {
+      await window.agenticxDesktop.saveProvider({
+        name: provider,
+        apiKey: nextEntry.apiKey || undefined,
+        baseUrl: nextEntry.baseUrl || undefined,
+        model: nextEntry.model || undefined,
+        models: nextEntry.models,
+        enabled: nextEntry.enabled,
+        dropParams: nextEntry.dropParams,
+        ...(nextEntry.displayName !== undefined
+          ? { displayName: nextEntry.displayName.trim() }
+          : {}),
+        ...(nextEntry.interface === "openai" || nextEntry.interface === "ollama"
+          ? { interface: nextEntry.interface }
+          : {}),
+      });
+      if (!shouldApplyProviderHealthCheck(
+        provider,
+        activeProviderRef.current,
+        expectedGeneration,
+        authProbeGenerationRef.current,
+      )) return;
+      const store = useAppStore.getState();
+      store.updateSettings({
+        providers: {
+          ...store.settings.providers,
+          [provider]: nextEntry,
+        },
+      });
+      setProviderSavedSnapshot((prev) => {
+        if (!shouldApplyProviderHealthCheck(
+          provider,
+          activeProviderRef.current,
+          expectedGeneration,
+          authProbeGenerationRef.current,
+        )) return prev;
+        return {
+          ...prev,
+          [provider]: { ...nextEntry },
+        };
+      });
+    } catch (err) {
+      console.warn("[SettingsPanel] persist unauthorized model purge failed:", err);
+    }
+  }, []);
+
+  /**
+   * Sequentially probes auth for catalog models. Marks "未授权" for add-blocking;
+   * optionally purges models that were already visible but fail Model Auth.
+   * Skips models already present in modelHealthMap. Cancellable via generation ref.
+   */
+  const runAuthProbeQueue = useCallback(
+    async (
+      provider: string,
+      models: string[],
+      apiKey: string,
+      baseUrl: string | undefined,
+      options?: {
+        purgeVisibleUnauthorized?: boolean;
+        visibleModels?: string[];
+        visibleEntry?: ProviderEntry;
+      },
+    ) => {
+      const generation = ++authProbeGenerationRef.current;
+      if (!shouldApplyProviderHealthCheck(
+        provider,
+        activeProviderRef.current,
+        generation,
+        authProbeGenerationRef.current,
+      )) return;
+      const pending = models.filter((m) => !modelHealthMap[`${provider}:${m}`]);
+      if (pending.length === 0) {
+        setAuthProbeProgress(null);
+        return;
+      }
+      const visibleSet = new Set(options?.visibleModels ?? []);
+      setAuthProbeProgress({ done: 0, total: pending.length });
+      for (let i = 0; i < pending.length; i += 1) {
+        if (!shouldApplyProviderHealthCheck(
+          provider,
+          activeProviderRef.current,
+          generation,
+          authProbeGenerationRef.current,
+        )) return;
+        const model = pending[i];
+        const key = `${provider}:${model}`;
+        setModelHealthMap((p) => (p[key] ? p : { ...p, [key]: { phase: "checking" } }));
+        // Sequential avoids hammering the same endpoint in parallel.
+        // eslint-disable-next-line no-await-in-loop
+        const res = await window.agenticxDesktop.healthCheckModel({ provider, apiKey, baseUrl, model });
+        if (!shouldApplyProviderHealthCheck(
+          provider,
+          activeProviderRef.current,
+          generation,
+          authProbeGenerationRef.current,
+        )) return;
+        const health = healthEntryFromCheckResult(res);
+        setModelHealthMap((p) => ({ ...p, [key]: health }));
+        if (
+          options?.purgeVisibleUnauthorized
+          && health.phase === "unauthorized"
+          && visibleSet.has(model)
+          && options?.visibleEntry
+        ) {
+          // eslint-disable-next-line no-await-in-loop
+          await purgeUnauthorizedVisibleModel(
+            model,
+            provider,
+            options.visibleEntry,
+            generation,
+          );
+        }
+        if (!shouldApplyProviderHealthCheck(
+          provider,
+          activeProviderRef.current,
+          generation,
+          authProbeGenerationRef.current,
+        )) return;
+        setAuthProbeProgress({ done: i + 1, total: pending.length });
+      }
+      if (shouldApplyProviderHealthCheck(
+        provider,
+        activeProviderRef.current,
+        generation,
+        authProbeGenerationRef.current,
+      )) setAuthProbeProgress(null);
+    },
+    [modelHealthMap, purgeUnauthorizedVisibleModel],
+  );
+
+  const onHealthCheck = async (model: string) => {
+    const requestProvider = active;
+    const requestEntry: ProviderEntry = {
+      ...current,
+      models: [...current.models],
+    };
+    const expectedGeneration = authProbeGenerationRef.current + 1;
+    authProbeGenerationRef.current = expectedGeneration;
+    const key = `${requestProvider}:${model}`;
+    setModelHealthMap((p) => ({ ...p, [key]: { phase: "checking" } }));
+    const res = await window.agenticxDesktop.healthCheckModel({
+      provider: requestProvider,
+      apiKey: requestEntry.apiKey,
+      baseUrl: requestEntry.baseUrl || undefined,
+      model,
+    });
+    if (!shouldApplyProviderHealthCheck(
+      requestProvider,
+      activeProviderRef.current,
+      expectedGeneration,
+      authProbeGenerationRef.current,
+    )) return;
+    const health = healthEntryFromCheckResult(res);
+    setModelHealthMap((p) => ({
+      ...p,
+      [key]: health,
+    }));
+    // Historically "+" visible models may lose key permission later; drop them
+    // from the visible list as soon as Model Auth denies the probe.
+    if (health.phase === "unauthorized" && requestEntry.models.includes(model)) {
+      await purgeUnauthorizedVisibleModel(
+        model,
+        requestProvider,
+        requestEntry,
+        expectedGeneration,
+      );
+    }
+  };
+
+  const onBatchHealthCheck = async () => {
+    const requestProvider = active;
+    const requestEntry: ProviderEntry = {
+      ...current,
+      models: [...current.models],
+    };
+    if (!providerCredentialed(requestEntry) || requestEntry.models.length === 0) return;
+    const expectedGeneration = authProbeGenerationRef.current + 1;
+    authProbeGenerationRef.current = expectedGeneration;
+    // Snapshot: purge mutates draft.models mid-loop.
+    const modelsSnapshot = [...requestEntry.models];
+    for (const m of modelsSnapshot) {
+      if (!shouldApplyProviderHealthCheck(
+        requestProvider,
+        activeProviderRef.current,
+        expectedGeneration,
+        authProbeGenerationRef.current,
+      )) return;
+      const key = `${requestProvider}:${m}`;
+      setModelHealthMap((p) => ({ ...p, [key]: { phase: "checking" } }));
+      // Sequential avoids hammering the same endpoint in parallel.
+      // eslint-disable-next-line no-await-in-loop
+      const res = await window.agenticxDesktop.healthCheckModel({
+        provider: requestProvider,
+        apiKey: requestEntry.apiKey,
+        baseUrl: requestEntry.baseUrl || undefined,
+        model: m,
+      });
+      if (!shouldApplyProviderHealthCheck(
+        requestProvider,
+        activeProviderRef.current,
+        expectedGeneration,
+        authProbeGenerationRef.current,
+      )) return;
+      const health = healthEntryFromCheckResult(res);
+      setModelHealthMap((p) => ({
+        ...p,
+        [key]: health,
+      }));
+      if (health.phase === "unauthorized") {
+        // eslint-disable-next-line no-await-in-loop
+        await purgeUnauthorizedVisibleModel(
+          m,
+          requestProvider,
+          requestEntry,
+          expectedGeneration,
+        );
+      }
+    }
+  };
+
+  const closeAddModelModal = () => {
+    setAddModelModalOpen(false);
+    setAddModelFormId("");
+    setAddModelFormName("");
+  };
+
+  const submitAddModelFromModal = () => {
+    if (enterpriseModelManagementLocked) {
+      closeAddModelModal();
+      setTab("account");
+      return;
+    }
+    const id = addModelFormId.trim();
+    if (!id || current.models.includes(id)) return;
+    updateField("models", [...current.models, id]);
+    closeAddModelModal();
+  };
+
+  const closeAddServiceVendorModal = () => {
+    setAddServiceVendorModalOpen(false);
+    setAddVendorFormName("");
+    setAddVendorFormType("openai");
+  };
+
+  const submitAddServiceVendorFromModal = () => {
+    if (enterpriseModelManagementLocked) {
+      closeAddServiceVendorModal();
+      setTab("account");
+      return;
+    }
+    const name = addVendorFormName.trim();
+    if (!name) return;
+    const isOllama = addVendorFormType === "ollama";
+    const id = isOllama
+      ? makeCustomOllamaProviderId(name, Object.keys(draft))
+      : makeCustomOpenAIProviderId(name, Object.keys(draft));
+    setDraft((prev) => ({
+      ...prev,
+      [id]: {
+        apiKey: "",
+        baseUrl: "",
+        model: "",
+        models: [],
+        enabled: false,
+        dropParams: false,
+        displayName: name,
+        interface: addVendorFormType,
+      },
+    }));
+    setActive(id);
+    setAddServiceVendorModalOpen(false);
+    setAddVendorFormName("");
+    setProviderEnableHint(null);
+    setDefaultProvHint(null);
+  };
+
+  const closeEditModelModal = () => {
+    setEditModelModalOpen(false);
+    setEditModelOriginalId("");
+    setEditModelFormId("");
+    setEditModelWindowDraft("");
+    setEditModelWindowManaged(false);
+    setEditModelError(null);
+  };
+
+  const openEditModelModal = (modelId: string) => {
+    setEditModelOriginalId(modelId);
+    setEditModelFormId(modelId);
+    const managed = current?.managed === true;
+    setEditModelWindowManaged(managed);
+    if (managed) {
+      const declared = resolveManagedContextWindow(draft, active, modelId);
+      setEditModelWindowDraft(declared ? String(declared) : "");
+    } else {
+      const stored = modelContextWindows[`${active}/${modelId}`];
+      setEditModelWindowDraft(stored ? String(stored) : "");
+    }
+    setEditModelError(null);
+    setEditModelModalOpen(true);
+  };
+
+  /** 把模型改名落到厂商草稿上（窗口配置与之无关，单独处理）。 */
+  const applyModelRenameFromModal = (newId: string, oldId: string) => {
+    setDraft((prev) => {
+      const prevEntry = prev[active];
+      if (!prevEntry) return prev;
+      const nextModels = prevEntry.models.map((m) => (m === oldId ? newId : m));
+      const next: ProviderEntry = {
+        ...prevEntry,
+        models: nextModels,
+        model: prevEntry.model === oldId ? newId : prevEntry.model,
+      };
+      return { ...prev, [active]: next };
+    });
+    setModelHealthMap((p) => {
+      const next = { ...p };
+      delete next[`${active}:${oldId}`];
+      delete next[`${active}:${newId}`];
+      return next;
+    });
+    closeEditModelModal();
+  };
+
+  const submitEditModelFromModal = () => {
+    const newId = editModelFormId.trim();
+    const oldId = editModelOriginalId;
+    if (!newId || !oldId) return;
+    if (newId !== oldId && current.models.includes(newId)) {
+      setEditModelError("列表中已有相同的模型 ID");
+      return;
+    }
+
+    // 托管模型的窗口只在企业后台改，这里不写本机配置。
+    if (editModelWindowManaged) {
+      if (newId === oldId) {
+        closeEditModelModal();
+        return;
+      }
+      setEditModelError(null);
+      applyModelRenameFromModal(newId, oldId);
+      return;
+    }
+
+    // 上下文窗口存在 runtime 配置里（不随厂商草稿走），键跟随模型 ID 改名。
+    const rawWindow = editModelWindowDraft.trim();
+    let declaredWindow: number | null = null;
+    if (rawWindow) {
+      const parsed = Number(rawWindow);
+      if (!Number.isFinite(parsed) || Math.floor(parsed) < 4_000 || Math.floor(parsed) > 10_000_000) {
+        setEditModelError("上下文窗口须在 4,000–10,000,000 之间，留空表示自动识别");
+        return;
+      }
+      declaredWindow = Math.floor(parsed);
+    }
+    const oldKey = `${active}/${oldId}`;
+    const newKey = `${active}/${newId}`;
+    if (declaredWindow !== (modelContextWindows[oldKey] ?? null) || newKey !== oldKey) {
+      const nextWindows = { ...modelContextWindows };
+      delete nextWindows[oldKey];
+      if (declaredWindow !== null) nextWindows[newKey] = declaredWindow;
+      setModelContextWindows(nextWindows);
+      void window.agenticxDesktop.saveRuntimeConfig({ model_context_windows: nextWindows });
+    }
+
+    if (newId === oldId) {
+      closeEditModelModal();
+      return;
+    }
+    setEditModelError(null);
+    applyModelRenameFromModal(newId, oldId);
+  };
+
+  const beginInlineProviderRename = useCallback(
+    (providerId: string) => {
+      const entry = draft[providerId];
+      if (!isProviderDisplayNameEditable(providerId, entry)) return;
+      setActive(providerId);
+      setInlineRenameProviderId(providerId);
+      setInlineRenameValue(getProviderDisplayName(providerId, entry));
+      setProviderEnableHint(null);
+      setDefaultProvHint(null);
+    },
+    [draft],
+  );
+
+  const cancelInlineProviderRename = useCallback(() => {
+    setInlineRenameProviderId(null);
+    setInlineRenameValue("");
+  }, []);
+
+  const commitInlineProviderRename = useCallback(() => {
+    const providerId = inlineRenameProviderId;
+    if (!providerId) return;
+    const trimmed = inlineRenameValue.trim();
+    if (!trimmed) {
+      cancelInlineProviderRename();
+      return;
+    }
+    setDraft((prev) => {
+      const prevEntry = prev[providerId];
+      if (!prevEntry) return prev;
+      return {
+        ...prev,
+        [providerId]: { ...prevEntry, displayName: trimmed },
+      };
+    });
+    cancelInlineProviderRename();
+  }, [inlineRenameProviderId, inlineRenameValue, cancelInlineProviderRename]);
+
+  const confirmDeleteProvider = useCallback(async () => {
+    const providerId = providerDeleteConfirmId?.trim();
+    if (!providerId || providerDeleteBusy) return;
+    setProviderDeleteBusy(true);
+    try {
+      await window.agenticxDesktop.deleteProvider(providerId);
+      const remainingNames = providerNames.filter((n) => n !== providerId);
+      const fallbackActive =
+        remainingNames.find((n) => n !== providerId && providerCredentialed(draft[n])) ??
+        remainingNames.find((n) => n !== providerId) ??
+        ALL_PROVIDERS[0];
+      let nextDefault = defProv;
+      if (defProv === providerId) {
+        nextDefault = fallbackActive;
+        await window.agenticxDesktop.setDefaultProvider(nextDefault);
+        setDefProv(nextDefault);
+      }
+      setDraft((prev) => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+      setKeyStatus((prev) => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+      setKeyError((prev) => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+      setKeyWarning((prev) => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+      setModelHealthMap((prev) => {
+        const next = { ...prev };
+        for (const key of Object.keys(next)) {
+          if (key.startsWith(`${providerId}:`)) delete next[key];
+        }
+        return next;
+      });
+      cancelInlineProviderRename();
+      setActive(fallbackActive);
+      setProviderEnableHint(null);
+      setDefaultProvHint(null);
+      setProviderDeleteConfirmId(null);
+      const nextProviders = { ...providers, ...draft };
+      delete nextProviders[providerId];
+      updateSettingsSlice({
+        providers: nextProviders,
+        ...(defProv === providerId ? { defaultProvider: nextDefault } : {}),
+      });
+    } catch {
+      window.alert("删除服务厂商失败，请稍后重试。");
+    } finally {
+      setProviderDeleteBusy(false);
+    }
+  }, [
+    cancelInlineProviderRename,
+    defProv,
+    draft,
+    providerDeleteBusy,
+    providerDeleteConfirmId,
+    providerNames,
+    providers,
+    updateSettingsSlice,
+  ]);
+
+  const handleSave = async () => {
+    try {
+    const permRes = await permissionsPanelRef.current?.flushPermissions?.();
+    if (permRes && !permRes.ok) {
+      const msg =
+        permRes.error ||
+        "请确认「设置 → 服务器连接」中 Studio 后端已连接且 token 正确。";
+      const still = window.confirm(
+        `权限（路径/命令/工具拒绝）未能写入 Studio：\n${msg}\n\n是否仍继续保存 Provider、远程连接等其他设置？`,
+      );
+      if (!still) return;
+    }
+    // ToolsTab stays mounted (hidden when inactive); always flush so tool_search /
+    // runtime knobs persist even if the user left the Tools tab before Exit.
+    {
+      const toolsRes = await toolsTabRef.current?.saveAll();
+      if (toolsRes && !toolsRes.ok) {
+        window.alert(toolsRes.error || "工具页保存失败");
+        return;
+      }
+    }
+    const kbRes = LOCAL_KNOWLEDGE_ENABLED
+      ? await knowledgeRef.current?.flushIfDirty()
+      : undefined;
+    if (kbRes && !kbRes.ok) {
+      const cont = window.confirm(
+        `知识库配置保存失败：\n${kbRes.error ?? "未知错误"}\n\n是否仍继续保存其它设置？`,
+      );
+      if (!cont) return;
+    }
+    const voiceRes = await voiceSettingsRef.current?.persist();
+    if (voiceRes && !voiceRes.ok) {
+      window.alert(voiceRes.error || "语音设置保存失败");
+      return;
+    }
+    const normalized: Record<string, ProviderEntry> = {};
+    for (const [name, entry] of Object.entries(draft)) {
+      normalized[name] = normalizeProviderEntry({
+        ...entry,
+        baseUrl: normalizeProviderBaseUrlForSave(name, entry.baseUrl, entry),
+      });
+    }
+    await onSave({ defaultProvider: defProv, providers: normalized });
+    const remoteSave = await window.agenticxDesktop.saveRemoteServer({
+      enabled: serverMode === "remote",
+      url: serverUrl.trim().replace(/\/+$/, ""),
+      token: serverToken.trim(),
+    });
+    await window.agenticxDesktop.saveGatewayIm({
+      enabled: gwEnabled,
+      url: gwUrl.trim().replace(/\/+$/, ""),
+      deviceId: gwDeviceId.trim(),
+      token: gwToken.trim(),
+      studioBaseUrl: gwStudioBase.trim().replace(/\/+$/, ""),
+    });
+    await window.agenticxDesktop.saveFeishuConfig({
+      enabled: feishuEnabled,
+      appId: feishuAppId.trim(),
+      appSecret: feishuAppSecret.trim(),
+    });
+    if (remoteSave.mode_changed) {
+      const restartDlg = await window.agenticxDesktop.confirmDialog({
+        title: `需要重启${APP_DISPLAY_NAME}`,
+        message: `连接模式已切换，需要重启${APP_DISPLAY_NAME}以加载新后端工作区。`,
+        detail:
+          "会话、窗格、专家与 MCP 状态将按新后端隔离，不会与上一套后端混用。",
+        confirmText: "立即重启",
+        cancelText: "稍后手动重启",
+      });
+      if (restartDlg.confirmed) {
+        await window.agenticxDesktop.appRelaunch();
+        return;
+      }
+      await window.agenticxDesktop.confirmDialog({
+        title: "请稍后重启",
+        message: "重启后连接模式切换才会生效。",
+        confirmText: "知道了",
+      });
+      onClose();
+      return;
+    }
+    onClose();
+    } catch (err) {
+      window.alert(`保存设置失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const runMcpToggleRequest = useCallback(async (name: string, next: boolean) => {
+    if (!sessionId) return;
+    setMcpMessage("");
+    const actionLabel = next ? "连接" : "断开";
+    try {
+      const result = next
+        ? await window.agenticxDesktop.connectMcp({ sessionId, name })
+        : await window.agenticxDesktop.disconnectMcp({ sessionId, name });
+      if (result.ok) {
+        await onRefreshMcp(sessionId);
+        setMcpMessage(next ? `已连接 ${name}；下次启动${APP_DISPLAY_NAME}将自动重连此项。` : `已断开 ${name}，且不再自动连接。`);
+      } else {
+        const detail = String(result.error ?? "未知错误");
+        if (detail.includes("连接已取消")) return;
+        try {
+          await onRefreshMcp(sessionId);
+        } catch {
+          // best-effort refresh
+        }
+        setMcpMessage(`${actionLabel}失败: ${detail}`);
+      }
+    } catch (err) {
+      const detail = String(err);
+      if (detail.includes("连接已取消")) return;
+      try {
+        await onRefreshMcp(sessionId);
+      } catch {
+        // best-effort refresh
+      }
+      setMcpMessage(`${actionLabel}失败: ${detail}`);
+    }
+  }, [onRefreshMcp, sessionId]);
+
+  const handleToggleMcpTool = useCallback(
+    (serverName: string, toolName: string, currentlyDisabled: boolean) => {
+      setMcpDisabledTools((prev) => {
+        const current = new Set(prev[serverName] ?? []);
+        if (currentlyDisabled) {
+          current.delete(toolName);
+        } else {
+          current.add(toolName);
+        }
+        const nextMap = { ...prev };
+        if (current.size === 0) {
+          delete nextMap[serverName];
+        } else {
+          nextMap[serverName] = Array.from(current);
+        }
+        void window.agenticxDesktop
+          .putMcpSettings({ extraSearchPaths: mcpExtraPaths, disabledTools: nextMap })
+          .catch(() => {
+            // best-effort persist
+          });
+        return nextMap;
+      });
+    },
+    [mcpExtraPaths],
+  );
+
+  const handleToggleMcp = useCallback((name: string, next: boolean) => {
+    if (!sessionId) return;
+    setMcpOptimisticChecked((prev) => ({ ...prev, [name]: next }));
+    if (mcpServerInFlightRef.current[name]) {
+      mcpQueuedToggleRef.current[name] = next;
+      if (!next) {
+        // 连接中立即关闭：立刻发起断开，触发后端对 in-flight connect 的取消。
+        void window.agenticxDesktop
+          .disconnectMcp({ sessionId, name })
+          .then(async (result) => {
+            if (!result?.ok) return;
+            try {
+              await onRefreshMcp(sessionId);
+            } catch {
+              // best-effort refresh
+            }
+          })
+          .catch(() => {
+            // best-effort cancel
+          });
+      }
+      return;
+    }
+    mcpServerInFlightRef.current[name] = true;
+    setMcpServerBusy((prev) => ({ ...prev, [name]: true }));
+    const runLoop = async () => {
+      let desired = next;
+      while (true) {
+        delete mcpQueuedToggleRef.current[name];
+        await runMcpToggleRequest(name, desired);
+        const queued = mcpQueuedToggleRef.current[name];
+        if (typeof queued !== "boolean" || queued === desired) break;
+        desired = queued;
+        setMcpOptimisticChecked((prev) => ({ ...prev, [name]: desired }));
+      }
+    };
+    void runLoop().finally(() => {
+      mcpServerInFlightRef.current[name] = false;
+      delete mcpQueuedToggleRef.current[name];
+      setMcpServerBusy((prev) => ({ ...prev, [name]: false }));
+      setMcpOptimisticChecked((prev) => {
+        const nextState = { ...prev };
+        delete nextState[name];
+        return nextState;
+      });
+    });
+  }, [runMcpToggleRequest, sessionId]);
+
+  const refreshMcpDiscover = useCallback(async () => {
+    setMcpDiscoverLoading(true);
+    setMcpMessage("");
+    const start = Date.now();
+    try {
+      const res = await window.agenticxDesktop.mcpDiscover();
+      if (res?.ok && Array.isArray(res.hits)) {
+        setMcpDiscoverHits(res.hits as MCPDiscoveryHit[]);
+      } else {
+        setMcpMessage(`扫描失败: ${res?.error ?? "未知错误"}`);
+      }
+    } catch (err) {
+      setMcpMessage(`扫描失败: ${String(err)}`);
+    } finally {
+      const elapsed = Date.now() - start;
+      const MIN_MS = 800;
+      if (elapsed < MIN_MS) {
+        await new Promise((r) => setTimeout(r, MIN_MS - elapsed));
+      }
+      setMcpDiscoverLoading(false);
+    }
+  }, []);
+
+  const extractMarketplaceMcpServerNames = useCallback((item: Record<string, unknown> | undefined): string[] => {
+    const serverConfig = item?.server_config as unknown;
+    if (!Array.isArray(serverConfig) || serverConfig.length === 0) return [];
+    const names: string[] = [];
+    for (const cfg of serverConfig) {
+      if (!cfg || typeof cfg !== "object") continue;
+      const mcpServers = (cfg as { mcpServers?: unknown }).mcpServers;
+      if (!mcpServers || typeof mcpServers !== "object") continue;
+      for (const key of Object.keys(mcpServers as Record<string, unknown>)) {
+        if (key.trim()) names.push(key.trim());
+      }
+    }
+    return Array.from(new Set(names));
+  }, []);
+
+  const updateMarketplaceIdMapping = useCallback((serverId: string, names: string[]) => {
+    if (!serverId || names.length === 0) return;
+    setMcpMarketplaceIdToNames((prev) => {
+      const existing = prev[serverId] ?? [];
+      const merged = Array.from(new Set([...existing, ...names]));
+      if (
+        merged.length === existing.length &&
+        merged.every((n, i) => n === existing[i])
+      ) {
+        return prev;
+      }
+      return { ...prev, [serverId]: merged };
+    });
+  }, []);
+
+  const refreshMcpMarketplace = useCallback(async () => {
+    const requestSeq = ++mcpMarketplaceRequestSeqRef.current;
+    const isStale = () => requestSeq !== mcpMarketplaceRequestSeqRef.current;
+    setMcpMarketplaceLoading(true);
+    setMcpMessage("");
+    setMcpMarketplaceSummary("");
+    try {
+      const keyword = mcpMarketplaceSearch.trim();
+      const hasKeyword = keyword.length > 0;
+      const pageSize = hasKeyword ? 100 : 20;
+      const res = await window.agenticxDesktop.mcpMarketplaceList({
+        search: keyword,
+        page: 1,
+        pageSize,
+      });
+      if (isStale()) return;
+      if (res?.ok && Array.isArray(res.items)) {
+        let rawItems = res.items as Array<Record<string, unknown>>;
+        const totalCount = Number(res.total_count ?? rawItems.length);
+        if (hasKeyword && totalCount > rawItems.length) {
+          const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
+          const pagePromises: Array<Promise<{ ok: boolean; items?: Array<Record<string, unknown>> }>> = [];
+          for (let page = 2; page <= totalPages; page += 1) {
+            pagePromises.push(
+              window.agenticxDesktop.mcpMarketplaceList({
+                search: keyword,
+                page,
+                pageSize,
+              }),
+            );
+          }
+          const pageResults = await Promise.all(pagePromises);
+          if (isStale()) return;
+          for (const pageRes of pageResults) {
+            if (pageRes?.ok && Array.isArray(pageRes.items)) {
+              rawItems = rawItems.concat(pageRes.items as Array<Record<string, unknown>>);
+            }
+          }
+        }
+        const dedupedMap = new Map<string, Record<string, unknown>>();
+        for (const item of rawItems) {
+          const id = String((item as { id?: unknown }).id ?? "").trim();
+          if (!id) continue;
+          if (!dedupedMap.has(id)) dedupedMap.set(id, item);
+        }
+        const dedupedItems = Array.from(dedupedMap.values());
+        const enriched = await Promise.all(
+          dedupedItems.map(async (raw) => {
+            const id = String((raw as { id?: unknown }).id ?? "").trim();
+            if (!id) return raw;
+            try {
+              const detail = await window.agenticxDesktop.mcpMarketplaceDetail({ serverId: id });
+              const detailItem = (detail?.item as Record<string, unknown> | undefined) ?? undefined;
+              const names = extractMarketplaceMcpServerNames(detailItem);
+              if (names.length > 0) updateMarketplaceIdMapping(id, names);
+              return {
+                ...raw,
+                ...(detailItem ?? {}),
+              } as Record<string, unknown>;
+            } catch {
+              return raw;
+            }
+          }),
+        );
+        if (isStale()) return;
+        if (hasKeyword) {
+          setMcpMarketplaceItems(enriched);
+          setMcpMarketplaceSummary(`检索到 ${totalCount} 个，已全部展示`);
+          return;
+        }
+        let filtered = enriched.filter((item) => {
+          const isVerified = Boolean(item.is_verified);
+          const isHosted = Boolean(item.is_hosted);
+          const names = extractMarketplaceMcpServerNames(item);
+          return isVerified && isHosted && names.length > 0;
+        });
+
+        if (filtered.length < DEFAULT_MCP_MARKETPLACE_PREVIEW_LIMIT) {
+          const knownIds = new Set(
+            enriched
+              .map((item) => String((item as { id?: unknown }).id ?? "").trim())
+              .filter(Boolean),
+          );
+          const curatedItems = await Promise.all(
+            CURATED_DEFAULT_MCP_SERVER_IDS
+              .filter((id) => !knownIds.has(id))
+              .map(async (id) => {
+                try {
+                  const detail = await window.agenticxDesktop.mcpMarketplaceDetail({ serverId: id });
+                  const item = (detail?.item as Record<string, unknown> | undefined) ?? undefined;
+                  if (!item) return null;
+                  const names = extractMarketplaceMcpServerNames(item);
+                  if (names.length > 0) updateMarketplaceIdMapping(id, names);
+                  return item;
+                } catch {
+                  return null;
+                }
+              }),
+          );
+          const curatedEligible = curatedItems.filter((item): item is Record<string, unknown> => {
+            if (!item) return false;
+            return Boolean(item.is_verified) && Boolean(item.is_hosted) && extractMarketplaceMcpServerNames(item).length > 0;
+          });
+          filtered = filtered.concat(curatedEligible).slice(0, DEFAULT_MCP_MARKETPLACE_PREVIEW_LIMIT);
+        }
+        setMcpMarketplaceItems(filtered);
+        setMcpMarketplaceSummary(
+          `精选 ${filtered.length} 个可直接添加的服务`,
+        );
+      } else {
+        setMcpMessage(`市场加载失败: ${res?.error ?? "未知错误"}`);
+      }
+    } catch (err) {
+      setMcpMessage(`市场加载失败: ${String(err)}`);
+    } finally {
+      if (!isStale()) {
+        setMcpMarketplaceLoading(false);
+      }
+    }
+  }, [extractMarketplaceMcpServerNames, mcpMarketplaceSearch, updateMarketplaceIdMapping]);
+
+  const refreshEnterpriseMcpMarketplace = useCallback(async () => {
+    setMcpMarketplaceLoading(true);
+    setMcpMessage("");
+    try {
+      const refreshed = await window.agenticxDesktop.enterpriseRefresh();
+      if (!refreshed.ok && refreshed.unauthorized) {
+        setMcpMessage(
+          "企业登录已失效，请重新登录",
+        );
+        return;
+      }
+      // enterpriseRefresh may persist failed per-capability receipts while
+      // returning ok=false. Reload them before refreshing the local MCP view;
+      // otherwise an endpoint/download failure remains invisible in the card.
+      const syncError = !refreshed.ok
+        ? `企业能力同步失败：${refreshed.error ?? "未知错误"}`
+        : "";
+      const snapshot = await window.agenticxDesktop.loadUserAccount();
+      if (!snapshot.ok) {
+        await onRefreshMcp(sessionId);
+        setMcpMessage(syncError || "已请求同步，但未能重新读取企业配置。");
+        return;
+      }
+      setUserAccount({
+        loggedIn: Boolean(snapshot.loggedIn),
+        email: String(snapshot.email ?? ""),
+        displayName: String(snapshot.displayName ?? ""),
+        baseUrl: String(snapshot.baseUrl ?? ""),
+        feedbackScopeId: snapshot.scope_id ?? null,
+        feedbackAuthGeneration:
+          typeof snapshot.auth_generation === "number" ? snapshot.auth_generation : null,
+        capabilities: Array.isArray(snapshot.capabilities) ? snapshot.capabilities : [],
+        capabilitySyncStatuses: normalizeEnterpriseCapabilitySyncStatuses(
+          (snapshot as { capabilitySyncStatuses?: unknown }).capabilitySyncStatuses,
+        ),
+        capabilityLocks: readCapabilityLocks(snapshot.capabilityPolicy),
+        attachmentRouting: readAttachmentRoutingPolicy(snapshot.attachmentRouting),
+      });
+      await onRefreshMcp(sessionId);
+      setMcpMessage(syncError || "已同步管理员最新分配。");
+    } catch (error) {
+      setMcpMessage(`企业能力同步失败：${String(error)}`);
+    } finally {
+      setMcpMarketplaceLoading(false);
+    }
+  }, [onRefreshMcp, sessionId, setUserAccount]);
+
+  const handleInstallMarketplaceMcp = useCallback(
+    async (serverId: string, env: Record<string, string>) => {
+      setMcpMarketplaceInstallBusy(true);
+      setMcpMarketplaceInstallingId(serverId);
+      setMcpMarketplaceStatus({ message: `正在安装 ${serverId} ...`, kind: "info", serverId });
+      setMcpMessage("");
+      try {
+        const detail = await window.agenticxDesktop.mcpMarketplaceDetail({ serverId });
+        const requiredRaw = (detail?.item as { env_schema?: { required?: unknown } } | undefined)?.env_schema?.required;
+        const required = (Array.isArray(requiredRaw) ? requiredRaw : []).filter(
+          (x): x is string => typeof x === "string",
+        );
+        setMcpMarketplaceEnvSchema({ required });
+
+        const res = await window.agenticxDesktop.mcpMarketplaceInstall({ serverId, env });
+        if (!res.ok) {
+          const errMsg = `安装失败：${res.error ?? "未知错误"}`;
+          setMcpMessage(errMsg);
+          setMcpMarketplaceStatus({ message: errMsg, kind: "error", serverId });
+          return;
+        }
+        const installedNames = [...(res.installed ?? []), ...(res.updated ?? [])];
+        const installedLabel = installedNames.join("、") || serverId;
+        const okMsg = `安装成功：${installedLabel}`;
+        setMcpMessage(okMsg);
+        setMcpMarketplaceStatus({ message: okMsg, kind: "success", serverId });
+        setMcpMarketplaceInstalledIds((prev) => new Set([...prev, serverId]));
+        if (installedNames.length > 0) {
+          updateMarketplaceIdMapping(serverId, installedNames);
+        }
+        if (sessionId) await onRefreshMcp(sessionId);
+        await refreshMcpDiscover();
+      } catch (err) {
+        const errMsg = `安装失败：${String(err)}`;
+        setMcpMessage(errMsg);
+        setMcpMarketplaceStatus({ message: errMsg, kind: "error", serverId });
+      } finally {
+        setMcpMarketplaceInstallBusy(false);
+        setMcpMarketplaceInstallingId(null);
+      }
+    },
+    [onRefreshMcp, refreshMcpDiscover, sessionId, updateMarketplaceIdMapping],
+  );
+
+  useEffect(() => {
+    if (!mcpMarketplaceStatus || mcpMarketplaceStatus.kind !== "success") return;
+    const timer = window.setTimeout(() => setMcpMarketplaceStatus(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [mcpMarketplaceStatus]);
+
+  useEffect(() => {
+    writeScopedLocalStorage(MCP_MARKETPLACE_ID_MAP_KEY, JSON.stringify(mcpMarketplaceIdToNames));
+  }, [mcpMarketplaceIdToNames]);
+
+  useEffect(() => {
+    if (!open || tab !== "mcp") return;
+    if (mcpMarketplaceItems.length === 0) return;
+    const installedServerNames = new Set(mcpServers.map((s) => s.name));
+    if (installedServerNames.size === 0) return;
+    const resolveDetail = async (serverId: string) => {
+      if (!serverId) return;
+      if (mcpMarketplaceIdToNames[serverId]) return;
+      if (mcpMarketplaceDetailInFlightRef.current.has(serverId)) return;
+      mcpMarketplaceDetailInFlightRef.current.add(serverId);
+      try {
+        const detail = await window.agenticxDesktop.mcpMarketplaceDetail({ serverId });
+        const names = extractMarketplaceMcpServerNames(detail?.item as Record<string, unknown> | undefined);
+        if (names.length === 0) return;
+        updateMarketplaceIdMapping(serverId, names);
+      } catch {
+        // best-effort; skip this item
+      } finally {
+        mcpMarketplaceDetailInFlightRef.current.delete(serverId);
+      }
+    };
+    for (const raw of mcpMarketplaceItems) {
+      const id = String((raw as { id?: unknown }).id ?? "").trim();
+      if (!id) continue;
+      if (mcpMarketplaceIdToNames[id]) continue;
+      void resolveDetail(id);
+    }
+  }, [open, tab, mcpMarketplaceItems, mcpServers, mcpMarketplaceIdToNames, extractMarketplaceMcpServerNames, updateMarketplaceIdMapping]);
+
+  const mcpEditorFilePaths = useMemo(
+    () => [MCP_PRIMARY_CONFIG_PATH, ...mcpExtraPaths.filter(Boolean)],
+    [mcpExtraPaths],
+  );
+
+  const locateMcpServerPath = useCallback(async (serverName: string): Promise<string> => {
+    for (const path of mcpEditorFilePaths) {
+      try {
+        const result = await window.agenticxDesktop.mcpGetRaw({ path });
+        if (!result?.ok || typeof result.text !== "string") continue;
+        const text = result.text;
+        try {
+          const parsed = JSON.parse(text) as Record<string, unknown>;
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+          const nested = parsed.mcpServers;
+          if (
+            nested &&
+            typeof nested === "object" &&
+            !Array.isArray(nested) &&
+            Object.prototype.hasOwnProperty.call(nested, serverName)
+          ) {
+            return path;
+          }
+          if (Object.prototype.hasOwnProperty.call(parsed, serverName)) {
+            return path;
+          }
+        } catch {
+          if (text.includes(`"${serverName}"`)) return path;
+        }
+      } catch {
+        // keep scanning
+      }
+    }
+    return MCP_PRIMARY_CONFIG_PATH;
+  }, [mcpEditorFilePaths]);
+
+  const openMcpEditor = useCallback((path: string, focusServerName?: string) => {
+    setMcpEditorPath(path);
+    setMcpEditorFocusServerName(focusServerName);
+    setMcpEditorFocusToken((prev) => prev + 1);
+    setMcpEditorOpen(true);
+  }, []);
+
+  const openMcpEditorForServer = useCallback(async (serverName: string) => {
+    const path = await locateMcpServerPath(serverName);
+    openMcpEditor(path, serverName);
+  }, [locateMcpServerPath, openMcpEditor]);
+
+  const handleDeleteMcpServer = useCallback(async (serverName: string) => {
+    const name = serverName.trim();
+    if (!name) return;
+    setMcpServerBusy((prev) => ({ ...prev, [name]: true }));
+    setMcpMessage("");
+    try {
+      const path = await locateMcpServerPath(name);
+      const raw = await window.agenticxDesktop.mcpGetRaw({ path });
+      if (!raw?.ok || typeof raw.text !== "string") {
+        setMcpMessage(`删除失败：无法读取配置文件 ${path}`);
+        return;
+      }
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = JSON.parse(raw.text) as Record<string, unknown>;
+      } catch (err) {
+        setMcpMessage(`删除失败：配置文件不是有效 JSON（${String(err)}）`);
+        return;
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        setMcpMessage(`删除失败：配置文件结构无效（${path}）`);
+        return;
+      }
+      let changed = false;
+      const nested = parsed.mcpServers;
+      if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+        const mcpServersObj = nested as Record<string, unknown>;
+        if (Object.prototype.hasOwnProperty.call(mcpServersObj, name)) {
+          delete mcpServersObj[name];
+          changed = true;
+        }
+      }
+      if (
+        !changed &&
+        name !== "mcpServers" &&
+        Object.prototype.hasOwnProperty.call(parsed, name)
+      ) {
+        delete parsed[name];
+        changed = true;
+      }
+      if (!changed) {
+        setMcpMessage(`未在 ${path} 中找到服务「${name}」`);
+        return;
+      }
+      const isDefaultEntry = new Set(mcpDefaultEntryNames).has(name);
+      let skipAddedForThisDelete = false;
+      let rollbackSkipNames = [...mcpSkipDefaultNames];
+      if (isDefaultEntry) {
+        let baseSkipNames = [...mcpSkipDefaultNames];
+        const latestSettings = await window.agenticxDesktop.getMcpSettings().catch(() => null);
+        if (latestSettings?.ok && Array.isArray(latestSettings.skip_default_names)) {
+          baseSkipNames = latestSettings.skip_default_names.map((x) => String(x).trim()).filter(Boolean);
+          setMcpSkipDefaultNames(baseSkipNames);
+        }
+        const baseSkipSet = new Set(baseSkipNames);
+        const hadSkipAlready = baseSkipSet.has(name);
+        const nextSkipNames = hadSkipAlready ? [...baseSkipNames] : [...baseSkipNames, name];
+        rollbackSkipNames = [...baseSkipNames];
+        const skipPersist = await window.agenticxDesktop.putMcpSettings({
+          extraSearchPaths: mcpExtraPaths,
+          skipDefaultNames: nextSkipNames,
+        });
+        if (!skipPersist?.ok) {
+          setMcpMessage(`删除失败：无法更新默认服务跳过列表（${skipPersist?.error ?? "未知错误"}）`);
+          return;
+        }
+        setMcpSkipDefaultNames(nextSkipNames);
+        skipAddedForThisDelete = !hadSkipAlready;
+      }
+      const save = await window.agenticxDesktop.mcpPutRaw({
+        path,
+        text: `${JSON.stringify(parsed, null, 2)}\n`,
+      });
+      if (!save?.ok) {
+        if (skipAddedForThisDelete) {
+          const rollback = await window.agenticxDesktop.putMcpSettings({
+            extraSearchPaths: mcpExtraPaths,
+            skipDefaultNames: rollbackSkipNames,
+          });
+          if (rollback?.ok) {
+            setMcpSkipDefaultNames(rollbackSkipNames);
+          }
+        }
+        setMcpMessage(`删除失败：${save?.error ?? "保存失败"}`);
+        return;
+      }
+      setMcpMessage(`已删除 ${name}`);
+      setMcpExpandedServers((prev) => {
+        const next = new Set(prev);
+        next.delete(name);
+        return next;
+      });
+      if (sessionId) await onRefreshMcp(sessionId);
+      await refreshMcpDiscover();
+    } catch (err) {
+      setMcpMessage(`删除失败：${String(err)}`);
+    } finally {
+      setMcpServerBusy((prev) => ({ ...prev, [name]: false }));
+    }
+  }, [locateMcpServerPath, mcpDefaultEntryNames, mcpExtraPaths, mcpSkipDefaultNames, onRefreshMcp, refreshMcpDiscover, sessionId]);
+
+  const confirmDeleteMcpServer = useCallback(() => {
+    const name = mcpDeleteConfirmServerName?.trim();
+    if (!name) return;
+    setMcpDeleteConfirmServerName(null);
+    void handleDeleteMcpServer(name);
+  }, [handleDeleteMcpServer, mcpDeleteConfirmServerName]);
+
+  const mcpMarketplaceAllInstalledIds = useMemo(() => {
+    const serverNames = new Set(mcpServers.map((s) => s.name));
+    const normalize = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const normalizedServerNames = new Set<string>();
+    for (const n of serverNames) {
+      const nn = normalize(n);
+      if (nn) normalizedServerNames.add(nn);
+    }
+    const installed = new Set<string>(mcpMarketplaceInstalledIds);
+    for (const raw of mcpMarketplaceItems) {
+      const id = String((raw as { id?: unknown }).id ?? "").trim();
+      if (!id || installed.has(id)) continue;
+      const mapped = mcpMarketplaceIdToNames[id];
+      if (mapped && mapped.some((n) => serverNames.has(n))) {
+        installed.add(id);
+        continue;
+      }
+      const candidates = [
+        id,
+        id.split("/").pop() ?? "",
+        String((raw as { name?: unknown }).name ?? ""),
+        String((raw as { chinese_name?: unknown }).chinese_name ?? ""),
+      ]
+        .map(normalize)
+        .filter(Boolean);
+      if (candidates.some((c) => normalizedServerNames.has(c))) {
+        installed.add(id);
+      }
+    }
+    return installed;
+  }, [mcpServers, mcpMarketplaceInstalledIds, mcpMarketplaceItems, mcpMarketplaceIdToNames]);
+
+  useEffect(() => {
+    if (!open || tab !== "mcp") return;
+    // 打开 MCP 页会自动扫一次本机其它 AI 工具的配置。企业关掉这项时连扫都不能扫——
+    // 客户要的是本机不被读，不是「扫了但不显示」。
+    if (capabilityLocks.allowMcpAutoDiscovery && mcpDiscoverHits.length === 0) {
+      void refreshMcpDiscover();
+    }
+    if (
+      !userAccount.loggedIn &&
+      capabilityLocks.allowLocalMcpInstall &&
+      mcpMarketplaceItems.length === 0
+    ) {
+      void refreshMcpMarketplace();
+    }
+  }, [
+    open,
+    tab,
+    capabilityLocks.allowMcpAutoDiscovery,
+    capabilityLocks.allowLocalMcpInstall,
+    userAccount.loggedIn,
+    mcpDiscoverHits.length,
+    mcpMarketplaceItems.length,
+    refreshMcpDiscover,
+    refreshMcpMarketplace,
+  ]);
+
+  useEffect(() => {
+    if (!open || tab !== "mcp") return;
+    // sessionId may be empty (no session yet); backend falls back to
+    // process-level configs in that case, so we still poll.
+    void onRefreshMcp(sessionId);
+    const timer = window.setInterval(() => {
+      void onRefreshMcp(sessionId);
+    }, 1500);
+    return () => window.clearInterval(timer);
+  }, [onRefreshMcp, open, sessionId, tab]);
+
+  if (!open) return null;
+
+  const ks = keyStatus[active] ?? "idle";
+  const renderTabButton = (item: (typeof ALL_TABS)[number]) => {
+    const Icon = item.icon;
+    const isActive = tab === item.id;
+    return (
+      <button
+        key={item.id}
+        className={`flex w-full min-w-0 items-center gap-2.5 rounded-[10px] border px-2.5 py-2 text-left text-[13px] font-semibold transition-all ${
+          isActive
+            ? "border-transparent bg-btnPrimary text-btnPrimary-text"
+            : "border-transparent text-text-subtle hover:border-border-strong hover:bg-surface-card hover:text-text-strong"
+        }`}
+        onClick={() => setTab(item.id)}
+        title={item.label}
+      >
+        <Icon className="h-4 w-4 shrink-0" aria-hidden />
+        <span className="min-w-0 truncate">{item.label}</span>
+      </button>
+    );
+  };
+
+  return (
+    <>
+    <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4 backdrop-blur-none">
+      {/* 默认更宽；右下角可拖拽调整尺寸并持久化，切换 tab 时尺寸不变 */}
+      <div
+        className="agx-settings-panel relative flex shrink-0 overflow-hidden rounded-2xl border border-border shadow-2xl"
+        style={{
+          width: panelSize.width,
+          height: panelSize.height,
+          backgroundColor: "var(--surface-base-fallback, var(--surface-panel))",
+        }}
+      >
+        {/* Left: tab navigation */}
+        <div
+          className="relative flex h-full min-h-0 shrink-0 flex-col bg-surface-sidebar py-4 pl-4 pr-0"
+          style={{ width: navWidth }}
+        >
+          <div className="mb-4 pr-2 text-[15px] font-semibold text-text-strong">设置</div>
+          <nav className="agx-settings-nav-scroll flex flex-1 flex-col gap-1 overflow-y-auto">
+            {TABS.map(renderTabButton)}
+            <div className="mt-3 border-t border-border pt-3">
+              {renderTabButton(DEVELOPER_TAB)}
+            </div>
+          </nav>
+          <div
+            className="group absolute right-0 top-0 z-20 h-full w-3 cursor-col-resize"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整导航栏宽度"
+            title="拖拽调整导航栏宽度"
+            onMouseDown={onNavResizeMouseDown}
+          >
+            <div className="absolute inset-y-0 right-0 w-px bg-[var(--ui-accent-divider)] transition-all duration-200 group-hover:w-[2px] group-hover:bg-[var(--ui-btn-primary-bg)]" />
+          </div>
+        </div>
+
+        {/* Right: content */}
+        <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="relative z-20 flex shrink-0 items-center justify-between gap-3 border-b border-border bg-surface-panel pl-5 pr-5 py-3">
+            <h3 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-text-strong">
+              {ALL_TABS.find((t) => t.id === tab)?.label ?? "设置"}
+            </h3>
+            <button
+              type="button"
+              aria-label="关闭"
+              className="no-drag inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-transparent text-text-faint transition hover:border-border-strong hover:bg-surface-card hover:text-text-strong"
+              onClick={onClose}
+            >
+              <X className="h-4 w-4" strokeWidth={2} aria-hidden />
+            </button>
+          </div>
+
+          <div
+            className={`min-h-0 flex-1 pl-5 pr-4 ${
+              tab === "provider"
+                ? "flex flex-col overflow-hidden pt-4 pb-3"
+                : tab === "knowledge" && LOCAL_KNOWLEDGE_ENABLED
+                  ? "flex flex-col overflow-hidden py-3"
+                  : "overflow-y-auto py-3"
+            }`}
+          >
+            {tab === "account" && (
+              <AccountTab onChanged={reloadProvidersAfterEnterpriseChange} />
+            )}
+
+            {/* === GENERAL TAB ===（保持挂载以便底部「保存」能刷入权限 API，避免仅失焦写入） */}
+            <div className={tab === "general" ? "space-y-4" : "hidden"}>
+                <Panel title="显示">
+                  <div className="flex flex-col">
+                    <div className="flex min-h-14 items-center justify-between gap-6 py-1">
+                      <div>
+                        <div className="text-sm font-medium text-text-primary">外观</div>
+                        <div className="mt-0.5 text-[11px] text-text-faint">选择界面的明暗层级</div>
+                      </div>
+                      {(() => {
+                        const options = [
+                          { value: "light", label: "浅色" },
+                          { value: "dim", label: "暗灰" },
+                          { value: "dark", label: "深色" },
+                        ] as const;
+                        return (
+                          <SettingsDropdown
+                            value={theme}
+                            displayLabel={options.find((option) => option.value === theme)?.label ?? theme}
+                            options={options}
+                            onChange={(next) => onThemeChange(next as "dark" | "light" | "dim")}
+                            className="w-40 shrink-0"
+                            size="compact"
+                            menuPortal
+                          />
+                        );
+                      })()}
+                    </div>
+
+                    <div className="h-px bg-[var(--border-muted)]" aria-hidden="true" />
+
+                    <div className="flex min-h-14 items-center justify-between gap-6 py-1">
+                      <div>
+                        <div className="text-sm font-medium text-text-primary">消息布局</div>
+                        <div className="mt-0.5 text-[11px] text-text-faint">决定聊天内容的呈现方式</div>
+                      </div>
+                      {(() => {
+                        const options = [
+                          { value: "im", label: "IM 风格" },
+                          { value: "terminal", label: "终端风格" },
+                          { value: "clean", label: "简洁风格" },
+                        ] as const;
+                        return (
+                          <SettingsDropdown
+                            value={chatStyle}
+                            displayLabel={options.find((option) => option.value === chatStyle)?.label ?? chatStyle}
+                            options={options}
+                            onChange={(next) => onChatStyleChange(next as ChatStyle)}
+                            className="w-40 shrink-0"
+                            size="compact"
+                            menuPortal
+                          />
+                        );
+                      })()}
+                    </div>
+
+                    <div className="h-px bg-[var(--border-muted)]" aria-hidden="true" />
+
+                    <div className="flex min-h-14 items-center justify-between gap-6 py-1">
+                      <div>
+                        <div className="text-sm font-medium text-text-primary">强调色</div>
+                        <div className="mt-0.5 text-[11px] text-text-faint">用于按钮、选中状态与焦点提示</div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        {[
+                          { id: "blue", color: "bg-blue-500", label: "蓝色" },
+                          { id: "white", color: "bg-white border border-border", label: "白色" },
+                          { id: "black", color: "bg-black border border-border", label: "黑色" },
+                        ].map((color) => {
+                          const selected = themeColor === color.id;
+                          return (
+                            <button
+                              key={color.id}
+                              type="button"
+                              className={`flex h-7 w-7 items-center justify-center rounded-full border transition-transform active:scale-95 ${
+                                selected
+                                  ? "border-text-primary bg-surface-panel shadow-sm"
+                                  : "border-transparent hover:bg-surface-hover"
+                              }`}
+                              onClick={() => setThemeColor(color.id as "blue" | "white" | "black")}
+                              aria-label={color.label}
+                              aria-pressed={selected}
+                            >
+                              <span className={`h-4 w-4 rounded-full ${color.color}`} />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  </div>
+                </Panel>
+                <Panel title="模型">
+                  <div className="flex items-center justify-between gap-6">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-text-primary">默认模型</div>
+                      <p className="mt-0.5 text-[11px] leading-5 text-text-faint">
+                        用于没有单独指定模型的新对话；已有对话和数字专家的专属模型不会被覆盖。
+                      </p>
+                      {generalDefaultModelMessage ? (
+                        <p
+                          className={`mt-1 text-[11px] ${
+                            generalDefaultModelMessage === "已保存"
+                              ? "text-text-subtle"
+                              : "text-rose-400"
+                          }`}
+                        >
+                          {generalDefaultModelMessage}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className={`w-[min(20rem,48%)] shrink-0 ${generalDefaultModelSaving ? "pointer-events-none opacity-60" : ""}`}>
+                      <DefaultModelSelect
+                        provider={providerSavedDefProv || defaultProvider}
+                        model={
+                          providerSavedSnapshot[providerSavedDefProv]?.model
+                          ?? providers[defaultProvider]?.model
+                          ?? ""
+                        }
+                        providersSnapshot={
+                          Object.keys(providerSavedSnapshot).length > 0
+                            ? providerSavedSnapshot
+                            : providers
+                        }
+                        inheritLabel="请选择默认模型"
+                        allowInherit={false}
+                        onChange={(providerId, modelId) => {
+                          void saveGeneralDefaultModel(providerId, modelId);
+                        }}
+                      />
+                      {generalDefaultModelSaving ? (
+                        <div className="mt-1 text-right text-[11px] text-text-faint">保存中…</div>
+                      ) : null}
+                    </div>
+                  </div>
+                </Panel>
+                <Panel title="用户档案">
+                  <div className="flex items-center gap-3">
+                    <div className="relative shrink-0">
+                      {userAvatarUrl ? (
+                        <img
+                          src={userAvatarUrl}
+                          alt="我的头像"
+                          className="h-12 w-12 rounded-full border border-border object-cover"
+                        />
+                      ) : (
+                        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[rgba(var(--theme-color-rgb),0.9)] text-base font-semibold text-[var(--theme-color-text)]">
+                          {(userNicknameDraft.trim().slice(0, 1) || "我").toUpperCase()}
+                        </div>
+                      )}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-medium text-text-primary">
+                        {userNicknameDraft.trim() || "我"}
+                      </div>
+                      <p className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-text-faint">
+                        {userPreferenceDraft.trim() || "尚未设置回答偏好与沟通风格"}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface-panel px-3 text-xs text-text-muted transition-colors hover:bg-surface-hover hover:text-text-primary active:scale-[0.98]"
+                      onClick={() => setUserProfileEditing((editing) => !editing)}
+                    >
+                      <SquarePen className="h-3.5 w-3.5" />
+                      {userProfileEditing ? "收起" : "编辑"}
+                    </button>
+                  </div>
+
+                  {userProfileEditing ? (
+                    <div className="mt-4 border-t border-[var(--border-muted)] pt-4">
+                      <div className="mb-4 flex items-center gap-3">
+                        <label className="inline-flex h-8 cursor-pointer items-center rounded-md border border-border bg-surface-panel px-3 text-xs text-text-muted transition-colors hover:bg-surface-hover hover:text-text-primary">
+                          更换头像
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(event) => {
+                              const file = event.target.files?.[0];
+                              if (file) handleProfileAvatarUpload(file, "user");
+                              event.currentTarget.value = "";
+                            }}
+                          />
+                        </label>
+                        {userAvatarUrl ? (
+                          <button
+                            type="button"
+                            className="text-xs text-text-faint transition-colors hover:text-text-muted"
+                            onClick={() => {
+                              setUserAvatarUrl("");
+                              setUserAvatarMessage("已恢复默认。");
+                            }}
+                          >
+                            恢复默认
+                          </button>
+                        ) : null}
+                        {userAvatarMessage ? (
+                          <span className="text-[11px] text-text-faint">{userAvatarMessage}</span>
+                        ) : null}
+                      </div>
+
+                    <div className="space-y-4">
+                      <div>
+                        <div className="mb-1.5 text-xs font-medium text-text-muted">我的称呼</div>
+                        <input
+                          type="text"
+                          className="w-full rounded-md border border-border bg-surface-panel px-3 py-2 text-sm text-text-primary placeholder:text-text-faint focus:border-[rgba(var(--theme-color-rgb),0.5)] focus:outline-none focus:ring-1 focus:ring-[rgba(var(--theme-color-rgb),0.5)] transition-shadow"
+                          value={userNicknameDraft}
+                          onChange={(e) => {
+                            setUserNicknameDraft(e.target.value);
+                            setUserProfileMessage("");
+                          }}
+                          placeholder="留空则显示「我」"
+                          maxLength={48}
+                        />
+                      </div>
+
+                      <div>
+                        <div className="mb-1.5 text-xs font-medium text-text-muted">回答偏好与沟通风格</div>
+                        <textarea
+                          className="w-full resize-none rounded-md border border-border bg-surface-panel px-3 py-2 text-sm text-text-primary placeholder:text-text-faint focus:border-[rgba(var(--theme-color-rgb),0.5)] focus:outline-none focus:ring-1 focus:ring-[rgba(var(--theme-color-rgb),0.5)] transition-shadow"
+                          rows={3}
+                          value={userPreferenceDraft}
+                          onChange={(e) => {
+                            setUserPreferenceDraft(e.target.value);
+                            setUserProfileMessage("");
+                          }}
+                          placeholder="例：我不喜欢绕弯子，请直接给结论；偏好表格而非长段落；遇到歧义先问我再执行。"
+                          maxLength={500}
+                        />
+                        <div className="mt-1.5 flex items-start justify-between gap-3">
+                          <span className="text-[11px] text-text-faint">{userPreferenceDraft.length}/500</span>
+                          <div className="flex shrink-0 items-center gap-2">
+                            {userProfileMessage ? (
+                              <span
+                                className={`max-w-[180px] text-right text-[11px] leading-snug ${
+                                  userProfileMessage.startsWith("用户档案已保存") || userProfileMessage.startsWith("AI 已")
+                                    ? "text-text-subtle"
+                                    : "text-rose-400"
+                                }`}
+                              >
+                                {userProfileMessage}
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              disabled={aiAssistLoading === "preference"}
+                              className="flex items-center gap-1 text-xs text-[rgba(var(--theme-color-fg-rgb),0.85)] transition-opacity hover:opacity-80 disabled:opacity-40"
+                              onClick={() => void callAiAssist("preference")}
+                            >
+                              {aiAssistLoading === "preference" ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Sparkles className="h-3 w-3" />
+                              )}
+                              {aiAssistLoading === "preference" ? "生成中…" : (userPreferenceDraft.trim() ? "AI 润色" : "AI 生成")}
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md bg-btnPrimary px-4 py-1.5 text-xs font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-50"
+                              disabled={!userProfileDirty}
+                              onClick={saveUserProfile}
+                            >
+                              保存
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  ) : null}
+                </Panel>
+                <Panel title={`元智能体（${META_AGENT_DISPLAY_NAME}）`}>
+                  <div>
+                    <div className="flex items-center gap-3">
+                      <img
+                        src={effectiveMetaAvatarUrl}
+                        alt={`${META_AGENT_DISPLAY_NAME} 头像`}
+                        className="h-12 w-12 shrink-0 rounded-full border border-border object-cover"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-sm font-medium text-text-primary">
+                          {META_AGENT_DISPLAY_NAME}
+                        </div>
+                        <p className="mt-0.5 text-[11px] leading-4 text-text-faint">
+                          管理元智能体的身份与行为原则
+                        </p>
+                      </div>
+                      <div className="flex shrink-0 flex-col items-end gap-1">
+                        <div className="flex items-center gap-2">
+                          <label className="inline-flex h-8 cursor-pointer items-center rounded-md border border-border bg-surface-panel px-3 text-xs text-text-muted transition-colors hover:bg-surface-hover hover:text-text-primary">
+                          更换头像
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (file) handleProfileAvatarUpload(file, "meta");
+                              e.currentTarget.value = "";
+                            }}
+                          />
+                          </label>
+                          {metaAvatarUrl && (
+                            <button
+                              type="button"
+                              className="text-xs text-text-faint transition-colors hover:text-text-muted"
+                              onClick={() => {
+                                setMetaAvatarUrl("");
+                                setMetaAvatarMessage("已恢复默认。");
+                              }}
+                            >
+                              恢复默认
+                            </button>
+                          )}
+                        </div>
+                        {metaAvatarMessage ? (
+                          <div className="text-[10px] text-text-subtle">{metaAvatarMessage}</div>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="mt-4">
+                      <div className="overflow-hidden rounded-lg border border-[var(--border-subtle)]">
+                        {[
+                          {
+                            kind: "identity" as const,
+                            title: "身份定义",
+                            description: `${META_AGENT_DISPLAY_NAME} 是谁，以及它在对话中的角色`,
+                            preview: metaIdentity,
+                          },
+                          {
+                            kind: "soul" as const,
+                            title: "人格与原则",
+                            description: `${META_AGENT_DISPLAY_NAME} 如何思考、表达和执行任务`,
+                            preview: metaSoul,
+                          },
+                        ].map((item, index) => {
+                          const editorOpen = metaEditorKind === item.kind;
+                          const preview =
+                            item.preview
+                              .split("\n")
+                              .map((line) => line.replace(/^#+\s*/, "").trim())
+                              .find(Boolean) || "尚未设置";
+                          return (
+                            <div
+                              key={item.kind}
+                              className={index > 0 ? "border-t border-[var(--border-muted)]" : ""}
+                            >
+                              <button
+                                type="button"
+                                className={`flex w-full items-center gap-3 px-3 py-3 text-left transition-colors ${
+                                  editorOpen
+                                    ? "bg-surface-hover/80"
+                                    : "bg-surface-panel/45 hover:bg-surface-hover"
+                                }`}
+                                onClick={() => setMetaEditorKind(editorOpen ? null : item.kind)}
+                                aria-expanded={editorOpen}
+                              >
+                                <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-surface-hover text-text-muted">
+                                  {item.kind === "identity" ? (
+                                    <User className="h-4 w-4" />
+                                  ) : (
+                                    <Compass className="h-4 w-4" />
+                                  )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                  <div className="text-xs font-medium text-text-primary">{item.title}</div>
+                                  <div className="mt-0.5 truncate text-[11px] text-text-faint" title={preview}>
+                                    {item.description}
+                                  </div>
+                                </div>
+                                <span className="hidden max-w-[32%] truncate text-[11px] text-text-faint md:block">
+                                  {preview}
+                                </span>
+                                <ChevronRight
+                                  className={`h-4 w-4 shrink-0 text-text-faint transition-transform ${
+                                    editorOpen ? "rotate-90" : ""
+                                  }`}
+                                />
+                              </button>
+
+                              {editorOpen ? (
+                                <div className="border-t border-[var(--border-muted)] bg-surface-hover/30 px-3 pb-3 pt-2.5">
+                                  {item.kind === "identity" ? (
+                                    <MetaMarkdownField
+                                      label="身份定义"
+                                      showLabel={false}
+                                      value={metaIdentity}
+                                      rows={5}
+                                      externalHint={metaExternalHintIdentity}
+                                      externalHintText="磁盘上的身份定义可能已在外部修改。"
+                                      placeholder={`例如：\n- Name: ${META_AGENT_DISPLAY_NAME}\n- Role: 你的企业 AI 助理\n- Vibe: 务实、简洁、执行优先`}
+                                      onAiAssist={() => void callAiAssist("identity")}
+                                      aiAssistLoading={aiAssistLoading === "identity"}
+                                      onOpenInEditor={() => void openMetaWorkspaceInEditor("identity")}
+                                      onChange={(value) => {
+                                        updateMetaIdentityDraft(value);
+                                        setMetaWorkspaceMessage("");
+                                        setMetaExternalHintIdentity(false);
+                                      }}
+                                    />
+                                  ) : (
+                                    <MetaMarkdownField
+                                      label="人格与原则"
+                                      showLabel={false}
+                                      value={metaSoul}
+                                      rows={7}
+                                      externalHint={metaExternalHintSoul}
+                                      externalHintText="磁盘上的全局人格可能已在外部修改。"
+                                      placeholder={"例如：\n- 回答先给结论\n- 不做过度客套\n- 任务进度要可见"}
+                                      onAiAssist={() => void callAiAssist("soul")}
+                                      aiAssistLoading={aiAssistLoading === "soul"}
+                                      onOpenInEditor={() => void openMetaWorkspaceInEditor("soul")}
+                                      onChange={(value) => {
+                                        updateMetaSoulDraft(value);
+                                        setMetaWorkspaceMessage("");
+                                        setMetaExternalHintSoul(false);
+                                      }}
+                                    />
+                                  )}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      <div className="mt-3">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            className="flex items-center gap-1 rounded-md px-2 py-1.5 text-xs text-text-subtle transition-colors hover:bg-surface-hover hover:text-text-muted"
+                            onClick={() => setMetaHistoryOpen((open) => !open)}
+                          >
+                            <History className="h-3.5 w-3.5" />
+                            历史记录
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-md bg-btnPrimary px-4 py-1.5 text-xs font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-50"
+                            disabled={
+                              (metaSoulSaving || metaIdentitySaving) ||
+                              (!metaSoulDirty && !metaIdentityDirty)
+                            }
+                            onClick={() => void saveMetaWorkspace()}
+                          >
+                            {(metaSoulSaving || metaIdentitySaving) ? "保存中…" : "保存"}
+                          </button>
+                        </div>
+
+                        {metaWorkspaceMessage ? (
+                          <div className="mt-2 text-right text-[11px] text-text-subtle">
+                            {metaWorkspaceMessage}
+                          </div>
+                        ) : null}
+
+                        {metaHistoryOpen ? (
+                          <div className="mt-3 border-t border-[var(--border-muted)] pt-3">
+                            <div className="space-y-3 rounded-md border border-[var(--border-muted)] bg-surface-panel/50 p-2">
+                            {metaHistoryLoading ? (
+                              <div className="text-[11px] text-text-faint">加载中…</div>
+                            ) : null}
+                            {metaHistoryMessage ? (
+                              <div className="text-[11px] text-red-400">{metaHistoryMessage}</div>
+                            ) : null}
+                            <div>
+                              <div className="mb-1 text-[11px] font-medium text-text-muted">身份定义</div>
+                              {metaHistoryIdentityItems.length === 0 ? (
+                                <div className="text-[10px] text-text-faint">暂无历史版本</div>
+                              ) : (
+                                <ul className="space-y-1">
+                                  {metaHistoryIdentityItems.map((item) => (
+                                    <li key={item.id} className="flex items-start gap-2 text-[11px]">
+                                      <span className="shrink-0 text-text-faint">
+                                        {formatMetaWorkspaceHistoryTime(item.id, item.savedAt)}
+                                      </span>
+                                      <span className="min-w-0 flex-1 truncate text-text-subtle">
+                                        {item.preview || "（空）"}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        className="shrink-0 text-theme hover:underline"
+                                        onClick={() =>
+                                          void restoreMetaWorkspaceHistoryItem("identity", item.id)
+                                        }
+                                      >
+                                        恢复
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                            <div>
+                              <div className="mb-1 text-[11px] font-medium text-text-muted">人格与原则</div>
+                              {metaHistorySoulItems.length === 0 ? (
+                                <div className="text-[10px] text-text-faint">暂无历史版本</div>
+                              ) : (
+                                <ul className="space-y-1">
+                                  {metaHistorySoulItems.map((item) => (
+                                    <li key={item.id} className="flex items-start gap-2 text-[11px]">
+                                      <span className="shrink-0 text-text-faint">
+                                        {formatMetaWorkspaceHistoryTime(item.id, item.savedAt)}
+                                      </span>
+                                      <span className="min-w-0 flex-1 truncate text-text-subtle">
+                                        {item.preview || "（空）"}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        className="shrink-0 text-theme hover:underline"
+                                        onClick={() =>
+                                          void restoreMetaWorkspaceHistoryItem("soul", item.id)
+                                        }
+                                      >
+                                        恢复
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                </Panel>
+                <SuggestedQuestionsSettingsPanel />
+                {SHOW_DESKTOP_GENERAL_EXPERT_CONTROLS ? (
+                  <>
+                <Panel title="权限">
+                  <div className="flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary">默认运行模式</div>
+                      <p className="mt-0.5 text-xs leading-5 text-text-faint">
+                        新会话默认使用；当前会话可在对话框中单独设置
+                      </p>
+                    </div>
+                    <RunModeDropdown
+                      value={runMode}
+                      onChange={(next) => void applyRunMode(next)}
+                    />
+                  </div>
+                  {runModeError ? (
+                    <div role="alert" className="mt-2 text-xs leading-5 text-status-error">
+                      切换失败：{runModeError}（已按后端实际值显示）
+                    </div>
+                  ) : null}
+                  <RunModeNotice mode={runMode} />
+                  <div className="mt-4 border-t border-[var(--border-muted)] pt-3">
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0">
+                        <div className="text-xs font-medium text-text-muted">凭据安全</div>
+                        <p className="mt-1 text-[11px] leading-5 text-text-faint">
+                          请勿在对话中发送 API Key、Token 或密码；请前往对应服务设置中配置。
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+                </Panel>
+                <PermissionsAdvancedPanel ref={permissionsPanelRef} />
+                <WebSearchSettingsPanel />
+                  </>
+                ) : null}
+                <div className="rounded-md border border-border bg-surface-card px-3 py-2.5 text-xs text-text-subtle">
+                  当前版本：{APP_DISPLAY_NAME} {APP_VERSION}
+                </div>
+            </div>
+
+            {tab === "permissions" && (
+              <div className="space-y-4">
+                <Panel title="运行模式">
+                  <div className="flex items-center justify-between gap-6">
+                    <div className="min-w-0">
+                      <div className="text-sm font-medium text-text-primary">默认运行模式</div>
+                      <p className="mt-0.5 text-xs leading-5 text-text-faint">
+                        只影响新会话；已有会话保持各自设置
+                      </p>
+                    </div>
+                    <RunModeDropdown
+                      value={runMode}
+                      onChange={(next) => void applyRunMode(next)}
+                    />
+                  </div>
+                  {runModeError ? (
+                    <div role="alert" className="mt-2 text-xs leading-5 text-status-error">
+                      切换失败：{runModeError}（已按后端实际值显示）
+                    </div>
+                  ) : null}
+                  <RunModeNotice mode={runMode} />
+                </Panel>
+                <Panel title="始终保留的安全保护">
+                  <div className="space-y-2 text-xs leading-5 text-text-muted">
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" aria-hidden />
+                      <span>文件操作仍受当前会话工作区边界约束。</span>
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-status-success" aria-hidden />
+                      <span>受保护路径和被管理员禁用的工具仍会被拒绝。</span>
+                    </div>
+                    <p className="border-t border-[var(--border-muted)] pt-2 text-text-faint">
+                      请勿在对话中发送 API Key、Token 或密码；需要授权时请使用对应服务的登录或连接页面。
+                    </p>
+                  </div>
+                </Panel>
+              </div>
+            )}
+
+            {tab === "developer" && (
+              <div className="space-y-4">
+                {selfManagedServiceSettingsAvailable ? (
+                  <>
+                    <section className="rounded-xl border border-border bg-surface-card px-4 py-3.5">
+                      <div className="flex items-center justify-between gap-4">
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-text-strong">模型供应商</div>
+                          <p className="mt-1 text-xs leading-5 text-text-faint">
+                            未登录企业账号时，可在本机添加模型服务、API 地址和密钥。
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-surface-panel px-3 py-1.5 text-xs font-medium text-text-muted transition hover:bg-surface-hover hover:text-text-primary"
+                          onClick={() => setTab("provider")}
+                        >
+                          配置
+                          <ChevronRight className="h-3.5 w-3.5" aria-hidden />
+                        </button>
+                      </div>
+                    </section>
+
+                    <WebSearchSettingsPanel />
+                  </>
+                ) : null}
+
+                <SessionMemoryPanel />
+
+                <SettingsToggleCard
+                  title="显示工具调用详情"
+                  description="默认关闭。关闭时隐藏工具名称、参数和返回内容，仅保留动态工作进度与必要的确认、安全提示。"
+                  checked={showToolCalls}
+                  onChange={setShowToolCalls}
+                />
+
+                <DeveloperTokenBudgetPanel />
+
+                <Panel title="会话工作区">
+                  <label className="block text-sm text-text-muted">
+                    默认会话工作目录
+                    <div className="mt-1 flex gap-2">
+                      <input
+                        className="min-w-0 flex-1 rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                        value={workspaceDirDraft}
+                        onChange={(event) => {
+                          setWorkspaceDirDraft(event.target.value);
+                          setWorkspaceDirMessage("");
+                        }}
+                        placeholder={`${AGX_HOME_DISPLAY}/workspace`}
+                        spellCheck={false}
+                      />
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-md border border-border bg-surface-card px-2.5 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+                        onClick={() => void chooseWorkspaceDirectory()}
+                      >
+                        选择…
+                      </button>
+                    </div>
+                    {workspaceDirResolved ? (
+                      <span className="mt-1 block break-all text-[11px] text-text-faint">
+                        当前路径：{workspaceDirResolved}
+                      </span>
+                    ) : null}
+                    <span className="mt-1 block text-xs leading-5 text-text-faint">
+                      完整路径仅在这里配置；新建元智能体对话默认使用该目录，已有对话仍保留原工作目录。
+                    </span>
+                  </label>
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md bg-btnPrimary px-3 py-1.5 text-xs font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!workspaceDirDirty || workspaceDirSaving}
+                      onClick={() => void saveWorkspaceDirectory()}
+                    >
+                      {workspaceDirSaving ? "保存中…" : "保存工作目录"}
+                    </button>
+                    {workspaceDirDirty ? (
+                      <button
+                        type="button"
+                        className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover"
+                        onClick={() => {
+                          setWorkspaceDirDraft(workspaceDirSaved);
+                          setWorkspaceDirMessage("");
+                        }}
+                      >
+                        撤销
+                      </button>
+                    ) : null}
+                  </div>
+                  {workspaceDirMessage ? (
+                    <p className="mt-2 text-xs text-text-muted">{workspaceDirMessage}</p>
+                  ) : null}
+                  <div className="mt-3 rounded-md border border-border bg-surface-card px-3 py-2.5 text-xs leading-5 text-text-subtle">
+                    专家仍使用各自独立的工作目录，不会与这里的元智能体目录混用。
+                  </div>
+                </Panel>
+              </div>
+            )}
+
+            {/* === PROVIDER TAB === */}
+            {tab === "provider" && (
+              <div className="flex min-h-0 flex-1 flex-col gap-3">
+                <RemoteBackendHintBanner kind="synced" />
+                {(enterpriseStrict || enterpriseModelManagementLocked) && (
+                  <div className="rounded-lg border border-[color-mix(in_srgb,var(--status-warning)_40%,transparent)] bg-[color-mix(in_srgb,var(--status-warning)_12%,transparent)] px-3 py-2 text-xs font-medium leading-relaxed text-[var(--status-warning)]">
+                    {enterpriseStrict
+                      ? "模型由企业管理员统一配置。可在「用户账号」刷新列表或退出登录以恢复自配服务商。"
+                      : "请先完成企业账号登录，登录前不可创建或添加本地模型。"}
+                    {enterpriseModelManagementLocked && !enterpriseStrict ? (
+                      <button
+                        type="button"
+                        className="ml-2 underline underline-offset-2 hover:text-text-primary"
+                        onClick={() => setTab("account")}
+                      >
+                        去登录
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+              <div className="flex min-h-0 flex-1 gap-4">
+                {/* Provider sub-list */}
+                <div className="flex w-[176px] shrink-0 flex-col self-stretch rounded-xl border border-border bg-surface-card">
+                  <div
+                    ref={providerListScrollRef}
+                    className="agx-scrollbar-on-scroll min-h-0 flex-1 space-y-0.5 overflow-y-auto px-1.5 pb-1.5 pt-2.5"
+                  >
+                    {providerNames.map((name) => {
+                      const entry = draft[name];
+                      const isOn = providerEffectiveOn(entry);
+                      const isSelected = active === name;
+                      return (
+                        <button
+                          key={name}
+                          className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition ${
+                            isSelected
+                              ? "bg-[var(--settings-accent-row-bg)]"
+                              : "hover:bg-surface-hover"
+                          }`}
+                          onClick={() => {
+                            if (name !== active) cancelInlineProviderRename();
+                            setActive(name);
+                            setProviderEnableHint(null);
+                            setDefaultProvHint(null);
+                            setAddModelModalOpen(false);
+                            setAddModelFormId("");
+                            setAddModelFormName("");
+                            setAddServiceVendorModalOpen(false);
+                            setAddVendorFormName("");
+                            setEditModelModalOpen(false);
+                            setEditModelOriginalId("");
+                            setEditModelFormId("");
+                            setEditModelError(null);
+                          }}
+                        >
+                          <ProviderAvatar providerId={name} size={28} entry={entry} />
+                          <span className="min-w-0 flex-1">
+                            <span className={`block truncate text-xs font-medium ${isSelected ? "text-[var(--settings-accent-fg)]" : "text-text-primary"}`}>
+                              {getProviderDisplayName(name, entry)}
+                            </span>
+                            <span className={`block text-[10px] ${isOn ? "text-emerald-500" : "text-text-faint"}`}>
+                              {isOn ? "已启用" : "未启用"}
+                            </span>
+                          </span>
+                          {name === defProv && (
+                            <span className="shrink-0 rounded bg-[var(--settings-accent-badge-bg)] px-1 py-0.5 text-[9px] font-medium text-[var(--settings-accent-fg)]">
+                              默认
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!enterpriseStrict && !enterpriseModelManagementLocked && (
+                  <div className="border-t border-border p-1.5">
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+                      onClick={() => {
+                        setAddVendorFormName("");
+                        setAddVendorFormType("openai");
+                        setAddServiceVendorModalOpen(true);
+                      }}
+                    >
+                      <Plus className="h-3.5 w-3.5 shrink-0" aria-hidden />
+                      添加
+                    </button>
+                  </div>
+                  )}
+                </div>
+
+                {/* Provider detail */}
+                <div className="min-h-0 flex-1 min-w-0 space-y-3 overflow-y-auto pr-0.5">
+                  {/* ── Header: logo + name + toggles ── */}
+                  <div className="flex items-center gap-3 pt-1">
+                    <ProviderAvatar providerId={active} size={40} entry={current} />
+                    <div className="min-w-0 flex-1">
+                      {inlineRenameProviderId === active && isProviderDisplayNameEditable(active, current) ? (
+                        <input
+                          ref={inlineRenameInputRef}
+                          className="w-full rounded-md border border-[var(--settings-accent-badge-bg)] bg-surface-panel px-2 py-1 text-base font-semibold text-text-primary outline-none ring-1 ring-[var(--settings-accent-badge-bg)]"
+                          value={inlineRenameValue}
+                          onChange={(e) => setInlineRenameValue(e.target.value)}
+                          onBlur={commitInlineProviderRename}
+                          onKeyDown={(e) => {
+                            if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
+                            if (e.key === "Enter") { e.preventDefault(); commitInlineProviderRename(); }
+                            if (e.key === "Escape") { e.preventDefault(); cancelInlineProviderRename(); }
+                          }}
+                          aria-label="服务厂商显示名"
+                        />
+                      ) : (
+                        <h2
+                          className={`flex items-center gap-1.5 text-base font-semibold leading-snug text-text-primary ${
+                            isProviderDisplayNameEditable(active, current)
+                              ? "cursor-text rounded px-0.5 transition hover:bg-surface-hover"
+                              : ""
+                          }`}
+                          onClick={() => {
+                            if (isProviderDisplayNameEditable(active, current)) beginInlineProviderRename(active);
+                          }}
+                          title={isProviderDisplayNameEditable(active, current) ? "点击重命名" : undefined}
+                        >
+                          {getProviderDisplayName(active, current)}
+                          {isProviderDisplayNameEditable(active, current) && (
+                            <SquarePen className="h-3.5 w-3.5 shrink-0 text-text-faint" aria-hidden />
+                          )}
+                        </h2>
+                      )}
+                    </div>
+                    {/* 启用 / 设为默认 toggles */}
+                    <div className="flex shrink-0 items-center gap-4">
+                      <label className="flex cursor-pointer flex-col items-center gap-1">
+                        <span className="text-[10px] text-text-faint">启用</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={currentEffectiveOn}
+                          aria-label={currentEffectiveOn ? `关闭 ${getProviderDisplayName(active, current)}` : `启用 ${getProviderDisplayName(active, current)}`}
+                          className={`relative inline-flex h-[22px] w-[38px] shrink-0 cursor-pointer rounded-full transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--settings-accent-badge-bg)] focus-visible:ring-offset-2 ${
+                            currentEffectiveOn ? "bg-btnPrimary" : "bg-surface-card-strong"
+                          }`}
+                          onClick={() => {
+                            if (currentEffectiveOn) {
+                              updateField("enabled", false);
+                              setProviderEnableHint(null);
+                            } else if (!providerCredentialed(current)) {
+                              setProviderEnableHint("请先填写 API 密钥或 API 地址后再启用");
+                            } else {
+                              updateField("enabled", true);
+                              setProviderEnableHint(null);
+                            }
+                          }}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-[18px] w-[18px] rounded-full shadow-md ring-0 transition-transform duration-200 ${
+                              currentEffectiveOn ? "bg-[var(--ui-btn-primary-text)]" : "bg-white"
+                            } ${currentEffectiveOn ? "translate-x-[18px]" : "translate-x-[2px]"} mt-[2px]`}
+                          />
+                        </button>
+                      </label>
+                      <label className="flex cursor-pointer flex-col items-center gap-1">
+                        <span className="text-[10px] text-text-faint">设为默认</span>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={defProv === active}
+                          aria-label={defProv === active ? `取消默认 ${getProviderDisplayName(active, current)}` : `设为默认 ${getProviderDisplayName(active, current)}`}
+                          className={`relative inline-flex h-[22px] w-[38px] shrink-0 cursor-pointer rounded-full transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--settings-accent-badge-bg)] focus-visible:ring-offset-2 ${
+                            defProv === active ? "bg-btnPrimary" : "bg-surface-card-strong"
+                          }`}
+                          onClick={() => {
+                            if (defProv === active) {
+                              const fallback =
+                                providerNames.find((n) => n !== active && providerCredentialed(draft[n])) ??
+                                providerNames.find((n) => n !== active) ??
+                                ALL_PROVIDERS.find((n) => n !== active);
+                              if (fallback && fallback !== active) {
+                                setDefaultProvHint(null);
+                                setDefProv(fallback);
+                              } else {
+                                setDefaultProvHint("至少要保留一个默认 Provider；请先在左侧选择其它厂商后再取消默认。");
+                              }
+                            } else if (!providerCredentialed(current)) {
+                              setDefaultProvHint("请先填写 API 密钥或 API 地址后再设为默认 Provider");
+                            } else {
+                              setDefaultProvHint(null);
+                              setDefProv(active);
+                            }
+                          }}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-[18px] w-[18px] rounded-full shadow-md ring-0 transition-transform duration-200 ${
+                              defProv === active ? "bg-[var(--ui-btn-primary-text)]" : "bg-white"
+                            } ${defProv === active ? "translate-x-[18px]" : "translate-x-[2px]"} mt-[2px]`}
+                          />
+                        </button>
+                      </label>
+                      {isProviderDeletable(active) && (
+                        <button
+                          type="button"
+                          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-rose-500/30 text-rose-400/70 transition hover:border-rose-500/60 hover:bg-rose-500/10 hover:text-rose-400"
+                          onClick={() => setProviderDeleteConfirmId(active)}
+                          aria-label="删除厂商"
+                        >
+                          <Trash2 className="h-4 w-4" aria-hidden />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  {(providerEnableHint || defaultProvHint) && (
+                    <div className="text-xs text-rose-400">{providerEnableHint || defaultProvHint}</div>
+                  )}
+                      <label className="block text-sm text-text-muted">
+                        API 密钥
+                        <div className="mt-1 flex gap-2">
+                          <div className="relative min-w-0 flex-1">
+                            <input
+                              type={apiKeyVisible ? "text" : "password"}
+                              autoComplete="off"
+                              className="w-full rounded-md border border-border bg-surface-panel py-1.5 pl-2 pr-11 text-sm disabled:opacity-60"
+                              value={current.apiKey}
+                              disabled={current.managed === true}
+                              onChange={(e) => updateField("apiKey", e.target.value)}
+                              placeholder="sk-..."
+                            />
+                            <button
+                              type="button"
+                              tabIndex={-1}
+                              aria-label={apiKeyVisible ? "隐藏密钥" : "显示密钥"}
+                              className="absolute right-1.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-text-faint transition hover:bg-surface-hover hover:text-text-subtle"
+                              onClick={() => setApiKeyVisible((v) => !v)}
+                            >
+                              {apiKeyVisible ? (
+                                <EyeOff className="h-4 w-4 shrink-0" aria-hidden />
+                              ) : (
+                                <Eye className="h-4 w-4 shrink-0" aria-hidden />
+                              )}
+                            </button>
+                          </div>
+                          <button
+                            className={`shrink-0 rounded-md border px-3 py-1.5 text-xs font-medium transition ${
+                              ks === "checking" ? "border-amber-500/50 text-amber-400"
+                                : ks === "ok" ? "border-emerald-500/50 text-emerald-400"
+                                : ks === "fail" ? "border-rose-500/50 text-rose-400"
+                                : "border-border text-text-subtle hover:text-text-strong"
+                            }`}
+                            disabled={ks === "checking" || !providerCredentialed(current)}
+                            onClick={onValidateKey}
+                          >
+                            {ks === "checking" ? "检测中..." : ks === "ok" ? "有效 ✓" : ks === "fail" ? "失败 ✗" : "检 测"}
+                          </button>
+                        </div>
+                        {ks === "fail" && keyError[active] && <div className="mt-1 text-xs text-rose-400">{keyError[active]}</div>}
+                        {ks === "ok" && keyWarning[active] && (
+                          <div className="mt-1 text-xs text-amber-400/90">{keyWarning[active]}</div>
+                        )}
+                        {!current.apiKey.trim() && current.baseUrl.trim() && (
+                          <div className="mt-1 text-xs text-text-faint">内网 OpenAI 兼容网关可不填密钥；若输入框仍是 sk-... 占位符请清空后再检测。</div>
+                        )}
+                      </label>
+                      <label className="block text-sm text-text-muted">
+                        API 地址 <span className="text-xs text-text-faint">(留空使用默认)</span>
+                        <input
+                          className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm disabled:opacity-60"
+                          value={current.baseUrl}
+                          disabled={current.managed === true}
+                          onChange={(e) => updateField("baseUrl", e.target.value)}
+                          placeholder={
+                            isOllamaLikeProvider(active, current)
+                              ? "http://192.168.x.x:11434"
+                              : "https://..."
+                          }
+                        />
+                        {isOllamaLikeProvider(active, current) && (
+                          <div className="mt-1 text-xs text-text-faint">
+                            Ollama 使用原生 API，<strong className="font-medium text-text-subtle">不要</strong>填写 <code className="text-[10px]">/v1</code>；留空密钥，仅填可访问的地址即可。
+                          </div>
+                        )}
+                        {current.baseUrl.trim() && (
+                          <div className="mt-1 text-xs text-text-faint">
+                            预览：<span className="text-text-subtle">
+                              {previewProviderApiEndpoint(active, current.baseUrl, current)}
+                            </span>
+                          </div>
+                        )}
+                      </label>
+                      
+                      <div className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="text-sm font-medium text-text-primary">模型列表</span>
+                          <span className="truncate text-[10px] text-text-faint">星标设为该渠道默认模型</span>
+                          <span className="rounded-full bg-surface-hover px-2 py-0.5 text-[10px] font-medium tabular-nums text-text-subtle">
+                            {current.models.length}
+                          </span>
+                        </div>
+                        <div />
+                        <div className="flex shrink-0 items-center gap-1">
+                          <HoverTip label="批量健康检查">
+                            <button
+                              type="button"
+                              aria-label="批量健康检查"
+                              className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-subtle transition hover:bg-surface-hover hover:text-text-strong disabled:pointer-events-none disabled:opacity-40"
+                              disabled={
+                                current.managed === true
+                                || !providerCredentialed(current)
+                                || current.models.length === 0
+                              }
+                              onClick={() => void onBatchHealthCheck()}
+                            >
+                              <Activity className="h-4 w-4" aria-hidden />
+                            </button>
+                          </HoverTip>
+                          <HoverTip label="从 API 获取模型">
+                            <button
+                              type="button"
+                              aria-label="从 API 获取模型"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border text-text-subtle transition hover:bg-surface-hover hover:text-text-strong disabled:pointer-events-none disabled:opacity-40"
+                              disabled={
+                                current.managed === true
+                                || enterpriseModelManagementLocked
+                                || fetchingModels
+                                || !providerCredentialed(current)
+                              }
+                              onClick={() => void onFetchModels()}
+                            >
+                              {fetchingModels ? (
+                                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                              ) : (
+                                <RefreshCw className="h-4 w-4" aria-hidden />
+                              )}
+                            </button>
+                          </HoverTip>
+                          {!current.managed && !enterpriseModelManagementLocked && (
+                          <HoverTip label="添加模型">
+                            <button
+                              type="button"
+                              aria-label="添加模型"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                              onClick={() => {
+                                setAddModelFormId("");
+                                setAddModelFormName("");
+                                setAddModelModalOpen(true);
+                              }}
+                            >
+                              <Plus className="h-4 w-4" aria-hidden />
+                            </button>
+                          </HoverTip>
+                          )}
+                        </div>
+                      </div>
+                      {fetchModelsError ? (
+                        <div className="text-xs text-rose-400">{fetchModelsError}</div>
+                      ) : fetchModelsWarning ? (
+                        <div className="text-xs text-amber-400/90">{fetchModelsWarning}</div>
+                      ) : null}
+                      <div className="space-y-1.5">
+                        {current.models.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-border px-3 py-8 text-center text-sm text-text-faint">
+                            {enterpriseModelManagementLocked
+                              ? "请先完成企业账号登录后管理模型"
+                              : "暂无模型，可从 API 拉取或点击 + 手动添加"}
+                          </div>
+                        ) : null}
+                        {current.models.map((model) => {
+                          const hk = `${active}:${model}`;
+                          const entry = modelHealthMap[hk];
+                          const checking = entry?.phase === "checking";
+                          const unauthorized = entry?.phase === "unauthorized";
+                          const defaultModelId = (current.model || current.models[0] || "").trim();
+                          const isDefaultModel = model === defaultModelId;
+                          return (
+                            <div
+                              key={model}
+                              className={`grid grid-cols-[2rem_minmax(0,1fr)_minmax(6.5rem,auto)_2rem_2rem] items-center gap-2 rounded-lg border border-border bg-surface-panel px-3 py-2.5 transition hover:border-[var(--settings-accent-border-muted)]${unauthorized ? " opacity-80" : ""}`}
+                            >
+                              <HoverTip label={isDefaultModel ? "当前默认模型" : "设为默认模型"}>
+                                <button
+                                  type="button"
+                                  aria-label={isDefaultModel ? "当前默认模型" : `设为默认 ${model}`}
+                                  aria-pressed={isDefaultModel}
+                                  className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition ${
+                                    isDefaultModel
+                                      ? "text-amber-400"
+                                      : "text-text-faint hover:bg-surface-hover hover:text-text-primary"
+                                  }`}
+                                  onClick={() => {
+                                    if (!isDefaultModel) updateField("model", model);
+                                  }}
+                                >
+                                  <Star
+                                    className={`h-4 w-4 ${isDefaultModel ? "fill-current" : ""}`}
+                                    aria-hidden
+                                  />
+                                </button>
+                              </HoverTip>
+                              <div className="min-w-0">
+                                <div className="flex min-w-0 items-center gap-1.5">
+                                  <span className="truncate text-sm text-text-primary">
+                                    {formatModelOptionLabel(active, model, current)}
+                                  </span>
+                                  {isDefaultModel ? (
+                                    <span className="shrink-0 rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-400/90">
+                                      默认
+                                    </span>
+                                  ) : null}
+                                </div>
+                              </div>
+                              <div className="flex min-w-0 items-center justify-end gap-2">
+                                <ModelCapabilityBadges provider={active} model={model} />
+                                {entry?.phase === "ok" ? (
+                                  <>
+                                    <span className="tabular-nums text-xs text-text-subtle">{formatHealthLatencyMs(entry.ms)}</span>
+                                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-400" aria-hidden />
+                                  </>
+                                ) : entry?.phase === "unauthorized" ? (
+                                  <HoverTip label={unauthorizedHoverLabel(entry.error)}>
+                                    <span className="shrink-0 rounded px-1.5 py-0.5 text-xs text-amber-400/90">
+                                      未授权
+                                    </span>
+                                  </HoverTip>
+                                ) : entry?.phase === "error" ? (
+                                  <span className="text-xs text-rose-400/90">失败</span>
+                                ) : checking ? (
+                                  <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-faint" aria-hidden />
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="shrink-0 text-xs text-text-faint transition hover:text-[var(--settings-accent-fg)] disabled:opacity-40"
+                                    disabled={checking || !providerCredentialed(current)}
+                                    onClick={() => void onHealthCheck(model)}
+                                  >
+                                    检测
+                                  </button>
+                                )}
+                              </div>
+                              <HoverTip label="编辑模型">
+                                <button
+                                  type="button"
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-text-faint transition hover:bg-surface-hover hover:text-text-primary"
+                                  aria-label="编辑模型"
+                                  onClick={() => openEditModelModal(model)}
+                                >
+                                  <SquarePen className="h-4 w-4" aria-hidden />
+                                </button>
+                              </HoverTip>
+                              <HoverTip label="移除模型">
+                                <button
+                                  type="button"
+                                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border text-rose-400/70 transition hover:border-rose-400/50 hover:bg-rose-500/5 hover:text-rose-400"
+                                  aria-label="移除模型"
+                                  onClick={() => onRemoveModel(model)}
+                                >
+                                  <CircleMinus className="h-4 w-4" aria-hidden />
+                                </button>
+                              </HoverTip>
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <Modal
+                        open={fetchModelsModalOpen}
+                        title="获取模型列表"
+                        onClose={closeFetchModelsModal}
+                        backdropClassName="bg-black/78"
+                        panelClassName="w-full max-w-[min(90vw,720px)] bg-[var(--surface-base-fallback)]"
+                        footer={(
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="text-xs text-text-faint">
+                              共 {fetchedModels.length} 个，可见 {current.models.length} 个
+                              {authProbeProgress
+                                ? `，自动检测中 ${authProbeProgress.done}/${authProbeProgress.total}`
+                                : ""}
+                            </span>
+                            <button
+                              type="button"
+                              className="rounded-md bg-[var(--settings-accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--settings-accent-solid-text)] transition hover:bg-[var(--settings-accent-solid-hover)]"
+                              onClick={closeFetchModelsModal}
+                            >
+                              完成
+                            </button>
+                          </div>
+                        )}
+                      >
+                        <div className="space-y-3">
+                          <input
+                            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                            value={fetchModelsSearch}
+                            onChange={(e) => setFetchModelsSearch(e.target.value)}
+                            placeholder="搜索模型 ID 或名称"
+                          />
+                          <div className="max-h-[min(56vh,460px)] space-y-1 overflow-y-auto pr-1">
+                            {filteredFetchedModels.length === 0 ? (
+                              <div className="rounded-md border border-dashed border-border px-3 py-5 text-center text-sm text-text-faint">
+                                {fetchedModels.length === 0 ? "未从 API 返回可用模型" : "没有匹配的模型"}
+                              </div>
+                            ) : (
+                              filteredFetchedModels.map((model) => {
+                                const isVisible = current.models.includes(model);
+                                const authEntry = modelHealthMap[`${active}:${model}`];
+                                const unauthorized = authEntry?.phase === "unauthorized";
+                                const checkingAuth = authEntry?.phase === "checking";
+                                const addDisabled = isVisible || unauthorized;
+                                return (
+                                  <div
+                                    key={model}
+                                    className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-2 rounded-md border border-border bg-surface-panel/60 px-3 py-2"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="truncate text-sm text-text-muted">{model}</div>
+                                      <div className="mt-0.5 flex items-center gap-1.5">
+                                        <span className="text-[11px] text-text-faint">
+                                          {isVisible ? "当前状态：可见" : "当前状态：不可见"}
+                                        </span>
+                                        {unauthorized ? (
+                                          <HoverTip label={unauthorizedHoverLabel(authEntry?.error)}>
+                                            <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[11px] font-semibold text-amber-400">
+                                              <TriangleAlert className="h-3 w-3" aria-hidden />
+                                              未授权
+                                            </span>
+                                          </HoverTip>
+                                        ) : checkingAuth ? (
+                                          <span className="text-[11px] text-text-faint">检测中…</span>
+                                        ) : null}
+                                      </div>
+                                    </div>
+                                    <ModelCapabilityBadges className="justify-end" provider={active} model={model} />
+                                    <div className="flex items-center gap-1.5">
+                                      <HoverTip
+                                        label={
+                                          unauthorized
+                                            ? unauthorizedHoverLabel(authEntry?.error)
+                                            : isVisible
+                                              ? "已可见"
+                                              : "设为可见"
+                                        }
+                                      >
+                                        <button
+                                          type="button"
+                                          aria-label={`设为可见：${model}`}
+                                          className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition ${
+                                            isVisible
+                                              ? "border-emerald-500/40 text-emerald-400/80"
+                                              : unauthorized
+                                                ? "border-border text-text-faint opacity-40"
+                                                : "border-border text-text-subtle hover:bg-surface-hover hover:text-emerald-400"
+                                          }`}
+                                          disabled={addDisabled}
+                                          onClick={() => makeModelVisible(model)}
+                                        >
+                                          <Plus className="h-4 w-4" aria-hidden />
+                                        </button>
+                                      </HoverTip>
+                                      <button
+                                        type="button"
+                                        aria-label={`设为不可见：${model}`}
+                                        className={`inline-flex h-8 w-8 items-center justify-center rounded-md border transition ${
+                                          isVisible
+                                            ? "border-border text-text-subtle hover:bg-surface-hover hover:text-rose-400"
+                                            : "border-rose-500/40 text-rose-400/65"
+                                        }`}
+                                        disabled={!isVisible}
+                                        onClick={() => onRemoveModel(model)}
+                                      >
+                                        <CircleMinus className="h-4 w-4" aria-hidden />
+                                      </button>
+                                    </div>
+                                  </div>
+                                );
+                              })
+                            )}
+                          </div>
+                        </div>
+                      </Modal>
+                      <Modal
+                        open={addServiceVendorModalOpen}
+                        title="添加服务厂商"
+                        onClose={closeAddServiceVendorModal}
+                        backdropClassName="bg-black/75"
+                        panelClassName="w-full max-w-[min(92vw,400px)] bg-[var(--surface-base-fallback)]"
+                        footer={(
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                              onClick={closeAddServiceVendorModal}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md bg-[var(--settings-accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--settings-accent-solid-text)] transition hover:bg-[var(--settings-accent-solid-hover)] disabled:opacity-40"
+                              disabled={!addVendorFormName.trim()}
+                              onClick={submitAddServiceVendorFromModal}
+                            >
+                              确定
+                            </button>
+                          </div>
+                        )}
+                      >
+                        <div className="space-y-4">
+                          <div className="flex justify-center">
+                            <div className="flex h-14 w-14 items-center justify-center rounded-full border border-border bg-surface-card-strong text-lg font-semibold text-text-muted">
+                              {(addVendorFormName.trim().charAt(0) || "P").toUpperCase()}
+                            </div>
+                          </div>
+                          <label className="block text-sm text-text-muted">
+                            服务厂商名称
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-card-strong px-2 py-1.5 text-sm"
+                              value={addVendorFormName}
+                              onChange={(e) => setAddVendorFormName(e.target.value)}
+                              placeholder="例如 OpenAI"
+                              onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
+                                if (e.key === "Enter" && addVendorFormName.trim()) submitAddServiceVendorFromModal();
+                              }}
+                            />
+                          </label>
+                          <label className="block text-sm text-text-muted">
+                            服务厂商类型
+                            <select
+                              className="mt-1 w-full rounded-md border border-border bg-surface-card-strong px-2 py-1.5 text-sm"
+                              value={addVendorFormType}
+                              aria-label="服务厂商类型"
+                              onChange={(e) => setAddVendorFormType(e.target.value as ProviderInterfaceKind)}
+                            >
+                              <option value="openai">OpenAI 兼容</option>
+                              <option value="ollama">Ollama</option>
+                            </select>
+                            <p className="mt-1 text-[11px] leading-relaxed text-text-faint">
+                              {addVendorFormType === "ollama"
+                                ? "Ollama 直连（如局域网 11434）；API 地址勿带 /v1。侧栏已有内置「Ollama」时可改那边，此处用于第二实例或自定义名称。"
+                                : "OpenAI 兼容接口（含多数中转 / 网关）；保存设置后写入配置。"}
+                            </p>
+                          </label>
+                        </div>
+                      </Modal>
+                      <Modal
+                        open={addModelModalOpen}
+                        title="添加模型"
+                        onClose={closeAddModelModal}
+                        footer={(
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                              onClick={closeAddModelModal}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md bg-[var(--settings-accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--settings-accent-solid-text)] transition hover:bg-[var(--settings-accent-solid-hover)] disabled:opacity-40"
+                              disabled={!addModelFormId.trim()}
+                              onClick={submitAddModelFromModal}
+                            >
+                              添加模型
+                            </button>
+                          </div>
+                        )}
+                      >
+                        <div className="space-y-3">
+                          <label className="block text-sm text-text-muted">
+                            <span className="text-rose-400">*</span> 模型 ID
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                              value={addModelFormId}
+                              onChange={(e) => setAddModelFormId(e.target.value)}
+                              placeholder="必填，例如 gpt-4o-mini"
+                              onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
+                                if (e.key === "Enter" && addModelFormId.trim()) submitAddModelFromModal();
+                              }}
+                            />
+                          </label>
+                          <label className="block text-sm text-text-muted">
+                            模型名称
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                              value={addModelFormName}
+                              onChange={(e) => setAddModelFormName(e.target.value)}
+                              placeholder="可选，例如 GPT-4"
+                            />
+                          </label>
+                          <p className="text-[11px] leading-relaxed text-text-faint">
+                            保存到列表时仅使用「模型 ID」；模型名称便于你对照 Cherry Studio 习惯填写，当前版本不参与路由。
+                          </p>
+                        </div>
+                      </Modal>
+                      <Modal
+                        open={editModelModalOpen}
+                        title="编辑模型"
+                        onClose={closeEditModelModal}
+                        footer={(
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+                              onClick={closeEditModelModal}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md bg-[var(--settings-accent-solid)] px-3 py-1.5 text-xs font-medium text-[var(--settings-accent-solid-text)] transition hover:bg-[var(--settings-accent-solid-hover)] disabled:opacity-40"
+                              disabled={!editModelFormId.trim()}
+                              onClick={submitEditModelFromModal}
+                            >
+                              保存
+                            </button>
+                          </div>
+                        )}
+                      >
+                        <div className="space-y-3">
+                          <label className="block text-sm text-text-muted">
+                            <span className="text-rose-400">*</span> 模型 ID
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                              value={editModelFormId}
+                              onChange={(e) => {
+                                setEditModelFormId(e.target.value);
+                                setEditModelError(null);
+                              }}
+                              placeholder="例如 gpt-4o-mini"
+                              onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
+                                if (e.key === "Enter" && editModelFormId.trim()) submitEditModelFromModal();
+                              }}
+                            />
+                          </label>
+                          <label className="block text-sm text-text-muted">
+                            上下文窗口（端点上限）
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                              type="number"
+                              min={4000}
+                              max={10000000}
+                              step={1000}
+                              value={editModelWindowDraft}
+                              disabled={editModelWindowManaged}
+                              onChange={(e) => {
+                                setEditModelWindowDraft(e.target.value);
+                                setEditModelError(null);
+                              }}
+                              placeholder={
+                                editModelWindowManaged
+                                  ? "由企业管理员统一配置"
+                                  : `自动识别为 ${formatContextWindowShort(
+                                      resolveHeuristicCapability(editModelFormId.trim() || editModelOriginalId),
+                                    )}`
+                              }
+                              onKeyDown={(e) => {
+                                if (e.nativeEvent.isComposing || e.key === "Process" || e.keyCode === 229) return;
+                                if (e.key === "Enter" && editModelFormId.trim()) submitEditModelFromModal();
+                              }}
+                            />
+                          </label>
+                          {editModelError ? <div className="text-[11px] text-rose-400">{editModelError}</div> : null}
+                          <p className="text-[11px] leading-relaxed text-text-faint">
+                            列表项即请求时使用的模型 ID；保存设置后才会写入配置。
+                          </p>
+                          {(() => {
+                            const raw = editModelWindowDraft.trim();
+                            const parsed = raw ? Math.floor(Number(raw)) : Number.NaN;
+                            const capability = Number.isFinite(parsed) && parsed > 0
+                              ? parsed
+                              : resolveHeuristicCapability(editModelFormId.trim() || editModelOriginalId);
+                            return (
+                              <p className="text-[11px] leading-relaxed text-text-faint">
+                                端点上限 {formatContextWindowShort(capability)} → 实际驱动{" "}
+                                <span className="text-text-subtle">
+                                  {formatContextWindowShort(harnessWindowForCapability(capability))}
+                                </span>
+                                。模型能吃多少不等于每轮就该塞多少，所以按上限的四分之一驱动，
+                                不低于 128K（端点本身低于 128K 时以端点为准）。
+                              </p>
+                            );
+                          })()}
+                          {editModelWindowManaged ? (
+                            <p className="text-[11px] leading-relaxed text-text-faint">
+                              该模型由企业统一下发，上下文窗口在企业后台配置，本机的设置不会生效。
+                            </p>
+                          ) : (
+                            <p className="text-[11px] leading-relaxed text-text-faint">
+                              这里填端点实际能接受的 token 数，留空则按模型名识别。自部署端点的真实上限由 vLLM 的
+                              --max-model-len 等参数决定，常低于模型架构支持的值；填低了只是提前整理上下文，
+                              填高了会让整理触发得太晚、直接被上游拒绝。该项立即生效，无需保存设置。
+                            </p>
+                          )}
+                        </div>
+                      </Modal>
+                      <Modal
+                        open={Boolean(providerDeleteConfirmId)}
+                        title="删除服务厂商"
+                        onClose={() => {
+                          if (providerDeleteBusy) return;
+                          setProviderDeleteConfirmId(null);
+                        }}
+                        backdropClassName="bg-black/75"
+                        panelClassName="w-full max-w-[min(92vw,400px)] bg-[var(--surface-base-fallback)]"
+                        footer={(
+                          <div className="flex justify-end gap-2">
+                            <button
+                              type="button"
+                              className="rounded-md border border-border px-3 py-1.5 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-strong disabled:opacity-40"
+                              disabled={providerDeleteBusy}
+                              onClick={() => setProviderDeleteConfirmId(null)}
+                            >
+                              取消
+                            </button>
+                            <button
+                              type="button"
+                              className="rounded-md bg-rose-600 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-rose-500 disabled:opacity-40"
+                              disabled={providerDeleteBusy}
+                              onClick={() => void confirmDeleteProvider()}
+                            >
+                              {providerDeleteBusy ? "删除中…" : "删除"}
+                            </button>
+                          </div>
+                        )}
+                      >
+                        <p className="text-sm leading-relaxed text-text-muted">
+                          确认删除服务厂商「
+                          {providerDeleteConfirmId
+                            ? getProviderDisplayName(providerDeleteConfirmId, draft[providerDeleteConfirmId])
+                            : ""}
+                          」？删除后立即生效，该厂商下的模型配置也会一并移除。
+                        </p>
+                      </Modal>
+                </div>
+              </div>
+              <div className="flex shrink-0 items-center justify-end gap-2 pt-2">
+                {providerConfigMessage ? (
+                  <span
+                    className={`mr-auto text-xs ${
+                      providerConfigMessage.startsWith("已保存") ? "text-text-muted" : "text-rose-400"
+                    }`}
+                  >
+                    {providerConfigMessage}
+                  </span>
+                ) : providerConfigDirty ? (
+                  <span className="mr-auto text-xs text-text-subtle">有未保存的模型服务改动</span>
+                ) : null}
+                <button
+                  type="button"
+                  className="rounded-md px-4 py-1.5 text-sm font-medium transition disabled:cursor-not-allowed disabled:border disabled:border-border disabled:bg-transparent disabled:text-text-faint bg-btnPrimary text-btnPrimary-text hover:bg-btnPrimary-hover disabled:opacity-100"
+                  disabled={!providerConfigDirty || providerConfigSaving}
+                  onClick={() => void saveProviderConfig()}
+                >
+                  {providerConfigSaving ? "保存中…" : "保存"}
+                </button>
+              </div>
+              </div>
+            )}
+
+            {/* === MCP TAB === */}
+            {tab === "mcp" && (() => {
+              return (
+              <div className="space-y-5">
+                <RemoteBackendHintBanner />
+                {userAccount.loggedIn ? (
+                  <MCPMarketplacePanel
+                    enterpriseManaged
+                    loading={mcpMarketplaceLoading}
+                    items={enterpriseMcpItems}
+                    summary={`能力包已分配 ${enterpriseMcpItems.length} 个服务`}
+                    search={mcpMarketplaceSearch}
+                    onSearchChange={setMcpMarketplaceSearch}
+                    onRefresh={refreshEnterpriseMcpMarketplace}
+                    onInstall={async () => undefined}
+                    onRetrySync={() => refreshEnterpriseMcpMarketplace()}
+                  />
+                ) : capabilityLocks.allowLocalMcpInstall ? (
+                  <MCPMarketplacePanel
+                    loading={mcpMarketplaceLoading}
+                    items={mcpMarketplaceItems as Array<Record<string, unknown> & { id: string }>}
+                    summary={mcpMarketplaceSummary}
+                    search={mcpMarketplaceSearch}
+                    onSearchChange={setMcpMarketplaceSearch}
+                    onRefresh={refreshMcpMarketplace}
+                    onInstall={handleInstallMarketplaceMcp}
+                    resolving={mcpMarketplaceInstallBusy}
+                    envSchema={mcpMarketplaceEnvSchema}
+                    installedIds={mcpMarketplaceAllInstalledIds}
+                    installingId={mcpMarketplaceInstallingId}
+                    statusMessage={mcpMarketplaceStatus?.message}
+                    statusKind={mcpMarketplaceStatus?.kind}
+                    statusTargetId={mcpMarketplaceStatus?.serverId}
+                  />
+                ) : null}
+
+                {mcpMessage && <div className="text-xs text-text-subtle">{mcpMessage}</div>}
+
+                {/* —— 配置文件路径 —— 企业禁止自助添加 MCP 时整段隐藏：
+                    这些路径就是本机自行挂 MCP 的方式，留着等于开了后门。 */}
+                {capabilityLocks.allowLocalMcpInstall ? (
+                <div className="space-y-2">
+                  <div className="text-xs text-text-faint">
+                    配置文件路径（按顺序合并；同名服务以先出现的为准）。点右侧铅笔图标直接编辑 JSON。
+                  </div>
+                  <div className="flex gap-2">
+                    <input
+                      readOnly
+                      className="flex-1 cursor-not-allowed rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-muted"
+                      value={MCP_PRIMARY_CONFIG_PATH}
+                      aria-label="主 MCP 配置路径"
+                    />
+                    <span className="shrink-0 self-center text-[10px] text-text-faint">主配置</span>
+                    <button
+                      type="button"
+                      className="shrink-0 rounded-md border border-border p-2 text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                      title="编辑此配置文件"
+                      onClick={() => openMcpEditor(MCP_PRIMARY_CONFIG_PATH)}
+                    >
+                      <SquarePen className="h-4 w-4" aria-hidden />
+                    </button>
+                  </div>
+                  {mcpExtraPaths.map((row, idx) => (
+                    <div key={`mcp-path-${idx}`} className="flex gap-2">
+                      <input
+                        className="flex-1 rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm"
+                        value={row}
+                        placeholder="例如 ~/.cursor/mcp.json"
+                        disabled={mcpPathSaving}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setMcpExtraPaths((prev) => prev.map((p, i) => (i === idx ? v : p)));
+                        }}
+                        onBlur={(e) => {
+                          const v = e.target.value;
+                          const next = mcpExtraPaths.map((p, i) => (i === idx ? v : p));
+                          void persistMcpExtraPaths(next);
+                        }}
+                      />
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-md border border-border p-2 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                        title="移除此路径"
+                        disabled={mcpPathSaving}
+                        onClick={() => {
+                          const next = mcpExtraPaths.filter((_, i) => i !== idx);
+                          setMcpExtraPaths(next);
+                          void persistMcpExtraPaths(next);
+                        }}
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden />
+                      </button>
+                      <button
+                        type="button"
+                        className="shrink-0 rounded-md border border-border p-2 text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                        title="编辑此配置文件"
+                        disabled={!row.trim()}
+                        onClick={() => openMcpEditor(row.trim())}
+                      >
+                        <SquarePen className="h-4 w-4" aria-hidden />
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                    disabled={mcpPathSaving}
+                    onClick={() => setMcpExtraPaths((prev) => [...prev, ""])}
+                  >
+                    <Plus className="h-3.5 w-3.5" aria-hidden />
+                    添加配置路径
+                  </button>
+                </div>
+                ) : null}
+
+                {/* —— MCP 服务列表 —— */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm font-medium text-text-muted">MCP 服务</div>
+                    {capabilityLocks.allowMcpAutoDiscovery ? (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-text-subtle transition hover:bg-surface-hover disabled:opacity-40"
+                      onClick={() => void refreshMcpDiscover()}
+                      disabled={mcpDiscoverLoading}
+                      title="扫描本地已安装的 AI 工具的 MCP 配置"
+                    >
+                      <RefreshCw
+                        className="h-3.5 w-3.5"
+                        style={{ animation: mcpDiscoverLoading ? "spin 1s linear infinite" : "none" }}
+                        aria-hidden
+                      />
+                      {mcpDiscoverLoading ? "扫描中…" : "扫描发现"}
+                    </button>
+                    ) : null}
+                  </div>
+                  <div className="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-text-faint">
+                    <span className="text-text-faint">注：</span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-green-500" />
+                      已连接且已注册工具
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-red-500" />
+                      异常，请先查看详情再重连
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-[#6b7280]" />
+                      未连接
+                    </span>
+                  </div>
+
+                  <div className="space-y-1.5">
+                    {mcpServers.length === 0 ? (
+                      <div className="py-6 text-center text-sm text-text-faint">
+                        {capabilityLocks.allowLocalMcpInstall ? (
+                          <>
+                            尚未发现 MCP 服务。点上方主配置右侧的编辑图标，在{" "}
+                            <code>{MCP_PRIMARY_CONFIG_PATH}</code> 中添加。
+                          </>
+                        ) : (
+                          "管理员尚未向你分配可用的 MCP 服务。"
+                        )}
+                      </div>
+                    ) : null}
+                    {mcpServers.map((server) => {
+                      const pres = resolveMcpRowPresentation(server);
+                      const isRemote = Boolean(server.url?.trim());
+                      const optimisticChecked = mcpOptimisticChecked[server.name];
+                      const switchChecked = typeof optimisticChecked === "boolean" ? optimisticChecked : server.connected;
+                      const forceDisconnectedMessage = Boolean(mcpServerBusy[server.name]) && !switchChecked;
+                      const latestOpMessage = forceDisconnectedMessage
+                        ? "未连接"
+                        : server.op_message?.trim() || `状态：${pres.statusLine}`;
+                      const toolNames = server.tool_names ?? [];
+                      const disabledForServer = mcpDisabledTools[server.name] ?? [];
+                      const isToolsExpanded = mcpExpandedServers.has(server.name);
+                      const isRemoteDetailExpanded = mcpRemoteDetailExpanded.has(server.name);
+                      const canExpandTools = toolNames.length > 0;
+                      const canExpandRemoteDetail = isRemote;
+                      return (
+                        <div
+                          key={server.name}
+                          className="rounded-md border border-border bg-surface-card"
+                        >
+                          {/* 主行 */}
+                          <div className="flex flex-col gap-1 px-3 py-2 sm:flex-row sm:items-center sm:gap-2">
+                            <div className="flex min-w-0 flex-1 items-start gap-2">
+                              <span
+                                className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${pres.dotClass}`}
+                                title={pres.statusLine}
+                              />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-1">
+                                  <span className="truncate text-sm font-medium text-text-muted">{server.name}</span>
+                                  {isRemote ? (
+                                    <>
+                                      <span
+                                        className="shrink-0 text-[10px] text-text-faint"
+                                        title={server.url}
+                                      >
+                                        🌐 {mcpRemoteHostLabel(server.url)}
+                                      </span>
+                                      <span className="shrink-0 rounded border border-border bg-surface-panel px-1 py-0 text-[9px] uppercase tracking-wide text-text-muted">
+                                        {mcpTransportBadgeLabel(server.transport)}
+                                      </span>
+                                    </>
+                                  ) : null}
+                                  {canExpandTools ? (
+                                    <button
+                                      type="button"
+                                      className="shrink-0 rounded p-0.5 text-text-faint transition hover:bg-surface-hover hover:text-text-subtle"
+                                      title={isToolsExpanded ? "收起工具列表" : `展开工具列表（${toolNames.length} 个）`}
+                                      onClick={() =>
+                                        setMcpExpandedServers((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(server.name)) next.delete(server.name);
+                                          else next.add(server.name);
+                                          return next;
+                                        })
+                                      }
+                                    >
+                                      <ChevronRight
+                                        className={`h-3.5 w-3.5 transition-transform ${isToolsExpanded ? "rotate-90" : ""}`}
+                                        aria-hidden
+                                      />
+                                    </button>
+                                  ) : null}
+                                  {canExpandTools ? (
+                                    <span className="shrink-0 text-[10px] text-text-faint">
+                                      {toolNames.length - disabledForServer.length}/{toolNames.length} 启用
+                                    </span>
+                                  ) : null}
+                                  {canExpandRemoteDetail ? (
+                                    <button
+                                      type="button"
+                                      className="shrink-0 rounded px-1 py-0.5 text-[10px] text-text-faint transition hover:bg-surface-hover hover:text-text-subtle"
+                                      title={isRemoteDetailExpanded ? "收起远程详情" : "展开 URL / Headers"}
+                                      onClick={() =>
+                                        setMcpRemoteDetailExpanded((prev) => {
+                                          const next = new Set(prev);
+                                          if (next.has(server.name)) next.delete(server.name);
+                                          else next.add(server.name);
+                                          return next;
+                                        })
+                                      }
+                                    >
+                                      {isRemoteDetailExpanded ? "收起" : "详情"}
+                                    </button>
+                                  ) : null}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                                  <span className="text-[11px] text-text-subtle">{pres.statusLine}</span>
+                                  {pres.detail ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="text-[11px] text-rose-400 underline decoration-dotted hover:text-rose-300"
+                                        onClick={() =>
+                                          setMcpErrorInspect({ title: `${server.name} — 异常说明`, body: pres.detail! })
+                                        }
+                                      >
+                                        查看详情
+                                      </button>
+                                      {capabilityLocks.allowLocalMcpInstall ? (
+                                        <button
+                                          type="button"
+                                          className="text-[11px] text-[var(--settings-accent-text)] underline decoration-dotted"
+                                          onClick={() => openMcpEditor(MCP_PRIMARY_CONFIG_PATH)}
+                                        >
+                                          用编辑器修复
+                                        </button>
+                                      ) : null}
+                                    </>
+                                  ) : null}
+                                </div>
+                                {server.command && !isRemote ? (
+                                  <div className="truncate text-[10px] text-text-faint">{server.command}</div>
+                                ) : isRemote && server.url && !isRemoteDetailExpanded ? (
+                                  <div className="truncate text-[10px] text-text-faint" title={server.url}>
+                                    remote: {server.url}
+                                  </div>
+                                ) : null}
+                                {latestOpMessage ? (
+                                  <div
+                                    className={`truncate text-[11px] ${
+                                      server.op_phase === "failed" ? "text-rose-400" : "text-text-faint"
+                                    }`}
+                                    title={latestOpMessage}
+                                  >
+                                    {latestOpMessage}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                            <div className="flex shrink-0 items-center justify-end gap-1 sm:pl-2">
+                              {capabilityLocks.allowLocalMcpInstall ? (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-text-primary disabled:opacity-40"
+                                    title={`编辑 ${server.name} 配置`}
+                                    disabled={Boolean(mcpServerBusy[server.name])}
+                                    onClick={() => {
+                                      if (isRemote) {
+                                        setMcpRemoteModalMode("edit");
+                                        setMcpRemoteEditName(server.name);
+                                        setMcpRemoteModalOpen(true);
+                                        return;
+                                      }
+                                      void openMcpEditorForServer(server.name);
+                                    }}
+                                  >
+                                    <SquarePen className="h-3.5 w-3.5" aria-hidden />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="rounded-md border border-border p-1.5 text-text-subtle transition hover:bg-surface-hover hover:text-rose-400 disabled:opacity-40"
+                                    title={`删除 ${server.name}`}
+                                    disabled={Boolean(mcpServerBusy[server.name])}
+                                    onClick={() => {
+                                      setMcpDeleteConfirmServerName(server.name);
+                                    }}
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" aria-hidden />
+                                  </button>
+                                </>
+                              ) : null}
+                              <SettingsSwitch
+                                checked={switchChecked}
+                                disabled={shouldDisableMcpToggle({
+                                  hasSession: Boolean(sessionId),
+                                  isBusy: Boolean(mcpServerBusy[server.name]),
+                                })}
+                                onChange={(next) => {
+                                  handleToggleMcp(server.name, next);
+                                }}
+                                aria-label={
+                                  switchChecked ? `已连接 ${server.name}，关闭以断开` : `连接 ${server.name}`
+                                }
+                              />
+                            </div>
+                          </div>
+
+                          {isRemoteDetailExpanded && isRemote ? (
+                            <McpRemoteServerDetail
+                              serverName={server.name}
+                              url={server.url}
+                              transport={server.transport}
+                              locateServerPath={locateMcpServerPath}
+                            />
+                          ) : null}
+
+                          {/* 展开的工具列表 */}
+                          {isToolsExpanded && canExpandTools ? (
+                            <div className="border-t border-border px-3 pb-2.5 pt-2">
+                              <div className="flex flex-wrap gap-1.5">
+                                {toolNames.map((tool) => {
+                                  const isDisabled = disabledForServer.includes(tool);
+                                  return (
+                                    <button
+                                      key={tool}
+                                      type="button"
+                                      title={isDisabled ? `启用 ${tool}` : `禁用 ${tool}`}
+                                      onClick={() => handleToggleMcpTool(server.name, tool, isDisabled)}
+                                      className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                                        isDisabled
+                                          ? "border-border bg-surface-panel text-text-faint line-through opacity-50"
+                                          : "border-border bg-surface-hover text-text-subtle hover:border-[var(--settings-accent-text)] hover:text-text-primary"
+                                      }`}
+                                    >
+                                      {tool}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ) : null}
+                        </div>
+                      );
+                    })}
+
+                    {/* 自助添加通道。企业锁住时，远程添加、JSON 编辑和网关导入都消失。 */}
+                    {capabilityLocks.allowLocalMcpInstall ? (
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 rounded-md border border-dashed border-border bg-surface-panel px-3 py-2 text-left text-sm text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+                        onClick={() => {
+                          setMcpRemoteModalMode("add");
+                          setMcpRemoteEditName(undefined);
+                          setMcpRemoteModalOpen(true);
+                        }}
+                      >
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border">
+                          <Plus className="h-3.5 w-3.5" aria-hidden />
+                        </span>
+                        <span className="flex flex-col">
+                          <span className="font-medium text-text-muted">添加远程 MCP</span>
+                          <span className="text-[11px] text-text-faint">URL + Headers（Tushare / Gateway）</span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="flex items-center gap-2 rounded-md border border-dashed border-border bg-surface-panel px-3 py-2 text-left text-sm text-text-subtle transition hover:bg-surface-hover hover:text-text-primary"
+                        onClick={() => openMcpEditor(MCP_PRIMARY_CONFIG_PATH)}
+                      >
+                        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-border">
+                          <SquarePen className="h-3.5 w-3.5" aria-hidden />
+                        </span>
+                        <span className="flex flex-col">
+                          <span className="font-medium text-text-muted">编辑 JSON</span>
+                          <span className="text-[11px] text-text-faint">stdio 命令或高级字段</span>
+                        </span>
+                      </button>
+                    </div>
+                    ) : null}
+
+                    {capabilityLocks.allowLocalMcpInstall ? (
+                      <McpGatewayImportPanel
+                        configPath={MCP_PRIMARY_CONFIG_PATH}
+                        existingServerNames={new Set(mcpServers.map((s) => s.name))}
+                        onImported={async (msg) => {
+                          setMcpMessage(msg);
+                          if (sessionId) await onRefreshMcp(sessionId);
+                        }}
+                      />
+                    ) : null}
+                  </div>
+                </div>
+
+              </div>
+              );
+            })()}
+
+            {tab === "connectors" && (
+              <ConnectorsTab
+                sessionId={sessionId}
+                tapdConnected={mcpServers.some(
+                  (server) => server.name === "tapd" && server.connected,
+                )}
+                onRefreshMcp={onRefreshMcp}
+              />
+            )}
+            {SHOW_DESKTOP_GENERAL_EXPERT_CONTROLS && tab === "tools" ? (
+              <div className="space-y-4">
+                <ToolsTab ref={toolsTabRef} />
+              </div>
+            ) : null}
+
+            {/* === SKILLS TAB === */}
+            {tab === "skills" && (
+              <div className="space-y-4">
+                <RemoteBackendHintBanner />
+                <SkillsTab />
+                <SkillAdvancedPanel />
+              </div>
+            )}
+
+            {/* === KNOWLEDGE TAB === Plan-Id: ontology-kb-stage1-local-mvp */}
+            {LOCAL_KNOWLEDGE_ENABLED && tab === "knowledge" && (
+              <KnowledgeSettings ref={knowledgeRef} />
+            )}
+
+            {tab === "data_sources" && <DataSourcesSettings />}
+
+            {/* === MEMORY TAB === Plan-Id: ontology-memory-graph-graphiti */}
+            {tab === "memory" && (
+              <div className="space-y-4">
+                <Panel title="记忆说明">
+                  <p className="text-[11px] leading-relaxed text-text-subtle">
+                    记忆按<strong className="font-medium text-text-muted">主体</strong>隔离：元智能体、各专家、群聊各有文本 MEMORY 与图谱分区。全局用户偏好请在「显示 → 用户档案」维护；下方图谱与文本记忆仅覆盖 meta / 专家 / 群聊三类主体。
+                  </p>
+                </Panel>
+                <TurnArchiveSettingsPanel />
+                <MemoryGraphExplorer
+                  apiBase={apiBase}
+                  apiToken={apiToken}
+                  avatarId={memoryContextPane?.avatarId ?? null}
+                  sessionId={memoryContextPane?.sessionId ?? ""}
+                  layout="dashboard"
+                  showConfig
+                  initialScope="meta"
+                  providerOptions={providerNames}
+                />
+              </div>
+            )}
+
+            {/* === HOOKS TAB === */}
+            {tab === "hooks" && <HooksTab />}
+
+            {tab === "automation" && (
+              <div className="space-y-4">
+                <AutomationTab />
+              </div>
+            )}
+
+            {VOICE_UI_ENABLED && tab === "voice" && <VoiceSettingsPanel ref={voiceSettingsRef} />}
+
+            {/* === EMAIL TAB === */}
+            {tab === "email" && <EmailSettingsTab />}
+
+            {tab === "favorites" && (
+              <FavoritesTab
+                apiBase={apiBase}
+                apiToken={apiToken}
+                sessionId={sessionId}
+                panes={panes}
+                avatars={avatars}
+                groups={groups}
+                onForwardFavorite={onForwardFavorite}
+              />
+            )}
+
+            {tab === "server" && (
+              <div className="space-y-4">
+                <Panel title="连接模式">
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 text-sm text-text-subtle cursor-pointer">
+                      <input
+                        type="radio"
+                        name="server-mode"
+                        checked={serverMode === "local"}
+                        onChange={() => setServerMode("local")}
+                        className="accent-[var(--ui-btn-primary-bg)]"
+                      />
+                      本地 (默认)
+                    </label>
+                    <label className="flex items-center gap-2 text-sm text-text-subtle cursor-pointer">
+                      <input
+                        type="radio"
+                        name="server-mode"
+                        checked={serverMode === "remote"}
+                        onChange={() => setServerMode("remote")}
+                        className="accent-[var(--ui-btn-primary-bg)]"
+                      />
+                      远程服务器
+                    </label>
+                  </div>
+                  <p className="mt-2 text-xs text-text-faint">
+                    本地模式自动启动 agx serve；远程模式连接云主机上已部署的 agx serve 后端。
+                  </p>
+                </Panel>
+
+                <Panel title="远程服务器配置">
+                  <fieldset disabled={serverMode === "local"} className={serverMode === "local" ? "opacity-50" : ""}>
+                    <label className="block text-sm text-text-muted">
+                      服务器 URL
+                      <input
+                        className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                        placeholder="https://your-server:8080"
+                        value={serverUrl}
+                        onChange={(e) => setServerUrl(e.target.value)}
+                      />
+                    </label>
+                    <label className="mt-3 block text-sm text-text-muted">
+                      认证 Token
+                      <div className="relative mt-1">
+                        <input
+                          className="w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 pr-16 text-sm text-text-subtle"
+                          type={serverShowToken ? "text" : "password"}
+                          placeholder="与服务端 AGX_DESKTOP_TOKEN 一致"
+                          value={serverToken}
+                          onChange={(e) => setServerToken(e.target.value)}
+                        />
+                        <button
+                          type="button"
+                          className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs text-text-faint hover:text-text-subtle"
+                          onClick={() => setServerShowToken(!serverShowToken)}
+                        >
+                          {serverShowToken ? "隐藏" : "显示"}
+                        </button>
+                      </div>
+                    </label>
+                    <div className="mt-3 flex items-center gap-3">
+                      <button
+                        type="button"
+                        className="rounded-md border border-border px-3 py-1.5 text-sm text-text-subtle hover:bg-surface-hover disabled:opacity-50"
+                        disabled={!serverUrl.trim() || serverTestStatus === "testing"}
+                        onClick={async () => {
+                          setServerTestStatus("testing");
+                          setServerTestError("");
+                          try {
+                            const res = await window.agenticxDesktop.testRemoteServer({
+                              url: serverUrl.trim().replace(/\/+$/, ""),
+                              token: serverToken.trim(),
+                            });
+                            setServerTestStatus(res.ok ? "ok" : "fail");
+                            if (!res.ok) setServerTestError(res.error || `HTTP ${res.status}`);
+                          } catch (err) {
+                            setServerTestStatus("fail");
+                            setServerTestError(String(err));
+                          }
+                        }}
+                      >
+                        {serverTestStatus === "testing" ? "测试中..." : "测试连接"}
+                      </button>
+                      {serverTestStatus === "ok" && (
+                        <span className="text-sm text-green-500">连接成功</span>
+                      )}
+                      {serverTestStatus === "fail" && (
+                        <span className="text-sm text-red-400" title={serverTestError}>连接失败</span>
+                      )}
+                    </div>
+                  </fieldset>
+                </Panel>
+
+                <Panel title="飞书集成" className={SHOW_DESKTOP_EXTERNAL_IM ? "" : "hidden"}>
+                  {/* Tab switcher */}
+                  <div className="mb-4 flex gap-1 rounded-lg bg-surface-hover p-0.5">
+                    {(["feishu", "webhook"] as const).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        className={`flex-1 rounded-md px-3 py-1 text-xs font-medium transition ${
+                          imTab === t
+                            ? "bg-surface-panel text-text-strong shadow-sm"
+                            : "text-text-faint hover:text-text-subtle"
+                        }`}
+                        onClick={() => setImTab(t)}
+                      >
+                        {t === "feishu" ? "飞书长连接（推荐）" : "Webhook 模式"}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Feishu long-connection tab */}
+                  {imTab === "feishu" && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-text-faint">
+                        无需公网服务器，使用飞书官方 WebSocket 长连接接收消息，{APP_DISPLAY_NAME}启动后自动在后台运行。
+                      </p>
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-sm text-text-subtle">启用飞书机器人</span>
+                        <SettingsSwitch
+                          checked={feishuEnabled}
+                          onChange={setFeishuEnabled}
+                          aria-label="启用飞书长连接"
+                        />
+                      </div>
+                      {feishuEnabled && (
+                        <>
+                          <label className="block text-sm text-text-muted">
+                            App ID
+                            <input
+                              className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                              placeholder="cli_xxxxxxxxxxxxxx"
+                              value={feishuAppId}
+                              onChange={(e) => setFeishuAppId(e.target.value)}
+                            />
+                          </label>
+                          <label className="block text-sm text-text-muted">
+                            App Secret
+                            <div className="relative mt-1">
+                              <input
+                                className="w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 pr-16 text-sm text-text-subtle"
+                                type={feishuShowSecret ? "text" : "password"}
+                                placeholder="••••••••••••••••"
+                                value={feishuAppSecret}
+                                onChange={(e) => setFeishuAppSecret(e.target.value)}
+                              />
+                              <button
+                                type="button"
+                                className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs text-text-faint hover:text-text-subtle"
+                                onClick={() => setFeishuShowSecret(!feishuShowSecret)}
+                              >
+                                {feishuShowSecret ? "隐藏" : "显示"}
+                              </button>
+                            </div>
+                          </label>
+                          <p className="text-xs text-text-faint">
+                            保存后{APP_DISPLAY_NAME}自动在后台启动飞书长连接，无需额外开终端。
+                            飞书应用须开启「机器人」能力，订阅 <code className="rounded bg-surface-hover px-1">im.message.receive_v1</code> 长连接事件。
+                          </p>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Webhook mode tab */}
+                  {imTab === "webhook" && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-text-faint">
+                        需要公网可访问的服务器部署云端 Gateway，再通过扫码与{APP_DISPLAY_NAME}绑定。
+                      </p>
+                      <label className="block text-sm text-text-muted">
+                        网关地址
+                        <input
+                          className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                          placeholder="https://gateway.example.com"
+                          value={gwUrl}
+                          onChange={(e) => setGwUrl(e.target.value)}
+                        />
+                      </label>
+                      <label className="block text-sm text-text-muted">
+                        设备 ID
+                        <input
+                          className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                          placeholder="my-macbook"
+                          value={gwDeviceId}
+                          onChange={(e) => setGwDeviceId(e.target.value)}
+                        />
+                      </label>
+                      <label className="block text-sm text-text-muted">
+                        设备 Token
+                        <div className="relative mt-1">
+                          <input
+                            className="w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 pr-16 text-sm text-text-subtle"
+                            type={gwShowToken ? "text" : "password"}
+                            value={gwToken}
+                            onChange={(e) => setGwToken(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="absolute right-1 top-1/2 -translate-y-1/2 rounded px-2 py-0.5 text-xs text-text-faint hover:text-text-subtle"
+                            onClick={() => setGwShowToken(!gwShowToken)}
+                          >
+                            {gwShowToken ? "隐藏" : "显示"}
+                          </button>
+                        </div>
+                      </label>
+                    </div>
+                  )}
+                  {imTab === "webhook" && (
+                  <><div className="mt-3 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      className="rounded-md bg-btnPrimary px-3 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-50"
+                      disabled={!gwUrl.trim() || !gwDeviceId.trim() || !gwToken.trim()}
+                      onClick={() => setGwQrOpen(true)}
+                    >
+                      扫码连接（飞书/企微）
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-md border border-border px-3 py-1.5 text-sm text-text-subtle hover:bg-surface-hover disabled:opacity-50"
+                      disabled={!gwUrl.trim() || !gwDeviceId.trim() || !gwToken.trim() || gwBindingsLoading}
+                      onClick={() => void refreshGwBindings()}
+                    >
+                      {gwBindingsLoading ? "刷新中…" : "刷新已绑定账号"}
+                    </button>
+                  </div>
+                  {gwBindingsErr && (
+                    <p className="mt-2 text-xs text-red-400" title={gwBindingsErr}>
+                      无法拉取绑定列表：{gwBindingsErr.slice(0, 120)}
+                    </p>
+                  )}
+                  {gwBindings.length > 0 && (
+                    <ul className="mt-3 space-y-2 text-sm text-text-subtle">
+                      {gwBindings.map((b) => (
+                        <li
+                          key={`${b.platform}:${b.sender_id}`}
+                          className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-card px-2 py-1.5"
+                        >
+                          <span>
+                            <span className="text-text-muted">{b.platform}</span>
+                            <span className="mx-1 text-text-faint">·</span>
+                            <span className="font-mono text-xs">{b.sender_id}</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="shrink-0 rounded border border-border px-2 py-0.5 text-xs text-text-faint hover:bg-surface-hover hover:text-text-subtle"
+                            onClick={async () => {
+                              const base = gwUrl.trim().replace(/\/+$/, "");
+                              const did = gwDeviceId.trim();
+                              const tok = gwToken.trim();
+                              try {
+                                const r = await fetch(
+                                  `${base}/api/device/${encodeURIComponent(did)}/bindings?token=${encodeURIComponent(tok)}&platform=${encodeURIComponent(b.platform)}&sender_id=${encodeURIComponent(b.sender_id)}`,
+                                  { method: "DELETE" },
+                                );
+                                if (!r.ok) {
+                                  const t = await r.text();
+                                  throw new Error(t.slice(0, 120) || `HTTP ${r.status}`);
+                                }
+                                await refreshGwBindings();
+                              } catch (e) {
+                                alert(`解绑失败：${String(e)}`);
+                              }
+                            }}
+                          >
+                            解绑
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button
+                    type="button"
+                    className="mt-4 text-sm text-text-faint underline decoration-dotted hover:text-text-subtle"
+                    onClick={() => setGwAdvancedOpen(!gwAdvancedOpen)}
+                  >
+                    {gwAdvancedOpen ? "收起高级配置" : "展开高级配置"}
+                  </button>
+                  {gwAdvancedOpen && (
+                    <div className="mt-3 space-y-3 border-t border-border pt-3">
+                      <div className="flex items-center justify-between gap-4">
+                        <span className="text-sm text-text-subtle">
+                          启用网关客户端（agx serve 启动后连接 WebSocket）
+                        </span>
+                        <SettingsSwitch
+                          checked={gwEnabled}
+                          onChange={setGwEnabled}
+                          aria-label="启用网关客户端"
+                        />
+                      </div>
+                      <label className="block text-sm text-text-muted">
+                        本机 Studio 基址（留空则使用 http://127.0.0.1:当前端口）
+                        <input
+                          className="mt-1 w-full rounded-md border border-border bg-surface-panel px-2 py-1.5 text-sm text-text-subtle"
+                          placeholder="http://127.0.0.1:8000"
+                          value={gwStudioBase}
+                          onChange={(e) => setGwStudioBase(e.target.value)}
+                        />
+                      </label>
+                      <p className="mt-1 text-xs text-text-faint">
+                        修改后点底部「退出」统一生效；需重启{APP_DISPLAY_NAME} / agx serve。
+                      </p>
+                    </div>
+                  )}
+                  </>)}
+                </Panel>
+
+                <Panel title="微信集成" className={SHOW_DESKTOP_EXTERNAL_IM ? "" : "hidden"}>
+                  {wechatStatus === "idle" && !wechatBotId && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-text-faint">
+                        扫码绑定个人微信，绑定后可在微信中给{APP_DISPLAY_NAME}发消息触发 Agent 执行。基于微信官方 iLink 协议。
+                      </p>
+                      <button
+                        type="button"
+                        className="rounded-md bg-btnPrimary px-3 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover disabled:opacity-50"
+                        onClick={async () => {
+                          setWechatBindMsg("");
+                          try {
+                            const { port, running } = await window.agenticxDesktop.wechatSidecarPort();
+                            let sidecarPort = port;
+                            if (!running) {
+                              const startRes = await window.agenticxDesktop.wechatSidecarStart();
+                              sidecarPort = startRes.port;
+                              await new Promise((r) => setTimeout(r, 1500));
+                            }
+                            if (!sidecarPort) { setWechatBindMsg("Sidecar 未启动"); return; }
+                            const resp = await fetch(`http://127.0.0.1:${sidecarPort}/bind/start`, { method: "POST" });
+                            const data = await resp.json() as { session_id: string; qr_url?: string };
+                            const sid = String(data.session_id || "").trim();
+                            if (!sid) { setWechatBindMsg("会话创建失败，请重试"); return; }
+                            const proxyQrUrl = `http://127.0.0.1:${sidecarPort}/bind/${sid}/qr?ts=${Date.now()}`;
+                            setWechatBindSessionId(sid);
+                            setWechatBindSidecarPort(sidecarPort);
+                            setWechatQrFallbackUrl(String(data.qr_url || "").trim());
+                            setWechatQrUrl(proxyQrUrl);
+                            setWechatStatus("binding");
+                            const ws = new WebSocket(`ws://127.0.0.1:${sidecarPort}/bind/${sid}/ws`);
+                            ws.onmessage = (ev) => {
+                              const msg = JSON.parse(ev.data as string) as { event: string; status?: string; bot_id?: string; qr_url?: string; error?: string };
+                              if (msg.event === "status") {
+                                if (msg.status === "scanned") setWechatBindMsg("已扫码，请在手机上确认…");
+                                if (msg.status === "expired") {
+                                  const fallback = String(msg.qr_url || "").trim();
+                                  if (fallback) setWechatQrFallbackUrl(fallback);
+                                  setWechatQrUrl(`http://127.0.0.1:${sidecarPort}/bind/${sid}/qr?ts=${Date.now()}`);
+                                  setWechatBindMsg("二维码已刷新");
+                                }
+                                if (msg.status === "confirmed") {
+                                  setWechatStatus("connected");
+                                  setWechatBotId(msg.bot_id || "");
+                                  setWechatQrUrl("");
+                                  setWechatQrFallbackUrl("");
+                                  setWechatBindSessionId("");
+                                  setWechatBindSidecarPort(0);
+                                  setWechatBindMsg("");
+                                  ws.close();
+                                  void (async () => {
+                                    try {
+                                      const createRes = await window.agenticxDesktop.createSession({});
+                                      if (createRes.ok && createRes.session_id) {
+                                        await window.agenticxDesktop.saveWechatDesktopBinding({
+                                          sessionId: createRes.session_id,
+                                        });
+                                      }
+                                    } catch { /* noop */ }
+                                  })();
+                                }
+                                if (msg.status === "timeout") {
+                                  setWechatStatus("idle");
+                                  setWechatQrUrl("");
+                                  setWechatQrFallbackUrl("");
+                                  setWechatBindSessionId("");
+                                  setWechatBindSidecarPort(0);
+                                  setWechatBindMsg("绑定超时，请重试");
+                                  ws.close();
+                                }
+                              }
+                              if (msg.event === "error") { setWechatBindMsg(msg.error || "绑定出错"); }
+                            };
+                            ws.onerror = () => {
+                              setWechatBindMsg("WebSocket 连接失败");
+                              setWechatStatus("idle");
+                              setWechatQrUrl("");
+                              setWechatQrFallbackUrl("");
+                              setWechatBindSessionId("");
+                              setWechatBindSidecarPort(0);
+                            };
+                          } catch (e) {
+                            setWechatBindMsg(String(e));
+                            setWechatStatus("idle");
+                            setWechatQrFallbackUrl("");
+                            setWechatBindSessionId("");
+                            setWechatBindSidecarPort(0);
+                          }
+                        }}
+                      >
+                        绑定微信
+                      </button>
+                    </div>
+                  )}
+
+                  {wechatStatus === "binding" && wechatQrUrl && (
+                    <div className="space-y-3">
+                      <p className="text-xs text-text-faint">请使用微信扫描下方二维码：</p>
+                      <div className="flex justify-center">
+                        <img
+                          src={wechatQrUrl}
+                          alt="WeChat QR"
+                          className="h-48 w-48 rounded-md border border-border"
+                          onError={() => {
+                            const proxyPrefix = wechatBindSessionId && wechatBindSidecarPort
+                              ? `http://127.0.0.1:${wechatBindSidecarPort}/bind/${wechatBindSessionId}/qr`
+                              : "";
+                            const isProxySrc = proxyPrefix && wechatQrUrl.startsWith(proxyPrefix);
+                            const fallback = String(wechatQrFallbackUrl || "").trim();
+                            if (isProxySrc && fallback && fallback !== wechatQrUrl) {
+                              setWechatQrUrl(fallback);
+                              setWechatBindMsg("本地二维码代理不可用，已回退直连链接");
+                              return;
+                            }
+                            setWechatBindMsg("二维码加载失败，请重试");
+                          }}
+                        />
+                      </div>
+                      {wechatBindMsg && <p className="text-center text-xs text-text-subtle">{wechatBindMsg}</p>}
+                    </div>
+                  )}
+
+                  {(wechatStatus === "connected" || (wechatStatus === "idle" && wechatBotId) || wechatStatus === "stale" || wechatStatus === "recovering") && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className={`inline-block h-2 w-2 rounded-full ${wechatStatus === "connected" ? "bg-green-500" : wechatStatus === "recovering" ? "bg-[var(--status-warning)] animate-pulse" : wechatStatus === "stale" ? "bg-[var(--status-warning)]" : "bg-yellow-500"}`} />
+                        <span className={`text-sm ${wechatStatus === "stale" || wechatStatus === "recovering" ? "text-status-warning" : "text-text-subtle"}`}>
+                          {wechatStatus === "connected" ? "已连接" : wechatStatus === "recovering" ? "恢复中..." : wechatStatus === "stale" ? "连接已失效（可恢复）" : "已绑定（未连接）"}
+                        </span>
+                      </div>
+                      {wechatBotId && (
+                        <p className="text-xs text-text-faint">Bot ID: <code className="rounded bg-surface-hover px-1">{wechatBotId}</code></p>
+                      )}
+                      {wechatStatus === "recovering" && (
+                        <p className="text-xs text-status-warning">正在尝试重新连接微信 iLink，请稍候…</p>
+                      )}
+                      {wechatStatus === "stale" && (
+                        <p className="text-xs text-status-warning">通道已降级（凭证可能过期或连接中断），建议尝试恢复或重新绑定。</p>
+                      )}
+                      <div className="flex items-center gap-3 pt-1">
+                        {wechatStatus === "stale" && (
+                          <button
+                            type="button"
+                            className="rounded-md bg-btnPrimary px-3 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover"
+                            onClick={async () => {
+                              setWechatBindMsg("");
+                              setWechatStatus("recovering");
+                              try {
+                                let { port, running } = await window.agenticxDesktop.wechatSidecarPort();
+                                if (!running || !port) {
+                                  const started = await window.agenticxDesktop.wechatSidecarStart();
+                                  port = started.port;
+                                  await new Promise((r) => setTimeout(r, 1200));
+                                }
+                                if (port) {
+                                  const rc = await fetch(`http://127.0.0.1:${port}/reconnect`, { method: "POST" });
+                                  const j = await rc.json().catch(() => ({}));
+                                  if (j && j.ok) {
+                                    // Poll a couple of times with direct status check so we can give clear feedback.
+                                    // The "恢复中..." text is driven by wechatStatus === "recovering".
+                                    const doRefreshAndMaybeClear = async (delay: number, final: boolean) => {
+                                      await new Promise(r => setTimeout(r, delay));
+                                      try {
+                                        const p = await window.agenticxDesktop.wechatSidecarPort();
+                                        if (p.running && p.port) {
+                                          const s = await fetch(`http://127.0.0.1:${p.port}/status`);
+                                          if (s.ok) {
+                                            const d: any = await s.json();
+                                            const conn = !!d.connected;
+                                            const stl = !!d.stale;
+                                            if (conn && !stl) {
+                                              setWechatStatus("connected");
+                                              setWechatBotId(d.bot_id || "");
+                                              setWechatBindMsg("恢复成功，已连接");
+                                              setTimeout(() => setWechatBindMsg(""), 1800);
+                                              return true;
+                                            } else if (stl) {
+                                              setWechatStatus("stale");
+                                              setWechatBotId(d.bot_id || "");
+                                            }
+                                          }
+                                        }
+                                      } catch {}
+                                      if (final) {
+                                        setWechatStatus("stale");
+                                        setWechatBindMsg("恢复未成功，通道仍不可用");
+                                        setTimeout(() => setWechatBindMsg(""), 2200);
+                                      }
+                                      return false;
+                                    };
+                                    void doRefreshAndMaybeClear(1200, false);
+                                    void doRefreshAndMaybeClear(3800, true);
+                                    return;
+                                  }
+                                }
+                                setWechatStatus("stale");
+                                setWechatBindMsg("恢复失败，请尝试重新绑定");
+                              } catch (e) {
+                                setWechatStatus("stale");
+                                setWechatBindMsg("恢复出错：" + String(e));
+                              }
+                            }}
+                          >
+                            尝试恢复连接
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className="rounded-md bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition hover:bg-red-700"
+                          onClick={async () => {
+                            try {
+                              const { port, running } = await window.agenticxDesktop.wechatSidecarPort();
+                              if (running && port) await fetch(`http://127.0.0.1:${port}/unbind`, { method: "POST" });
+                            } catch { /* noop */ }
+                            try {
+                              await window.agenticxDesktop.saveWechatDesktopBinding({ sessionId: null });
+                            } catch { /* noop */ }
+                            // Ensure creds file cleared even if sidecar not running
+                            try {
+                              await window.agenticxDesktop.wechatClearCredentials?.();
+                            } catch {}
+                            setWechatStatus("idle");
+                            setWechatBotId("");
+                            setWechatQrUrl("");
+                            setWechatQrFallbackUrl("");
+                            setWechatBindSessionId("");
+                            setWechatBindSidecarPort(0);
+                            setWechatBindMsg("");
+                          }}
+                        >
+                          解绑微信
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {wechatStatus === "expired" && (
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-block h-2 w-2 rounded-full bg-red-500" />
+                        <span className="text-sm text-red-400">会话已过期</span>
+                      </div>
+                      <p className="text-xs text-text-faint">
+                        微信 iLink 会话已过期（超过 24 小时未活跃），请重新扫码绑定。
+                      </p>
+                      <button
+                        type="button"
+                        className="rounded-md bg-btnPrimary px-3 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover"
+                        onClick={() => {
+                          setWechatStatus("idle");
+                          setWechatBotId("");
+                          setWechatQrUrl("");
+                          setWechatQrFallbackUrl("");
+                          setWechatBindSessionId("");
+                          setWechatBindSidecarPort(0);
+                        }}
+                      >
+                        重新绑定
+                      </button>
+                    </div>
+                  )}
+
+                  {wechatBindMsg && wechatStatus !== "binding" && (
+                    <p className="mt-2 text-xs text-text-faint">{wechatBindMsg}</p>
+                  )}
+                </Panel>
+
+                <QrConnectModal
+                  open={gwQrOpen}
+                  gatewayBaseUrl={gwUrl.trim().replace(/\/+$/, "")}
+                  deviceId={gwDeviceId.trim()}
+                  token={gwToken.trim()}
+                  onClose={() => setGwQrOpen(false)}
+                  onBound={() => void refreshGwBindings()}
+                />
+
+                <div className="rounded-md border border-border bg-surface-card px-3 py-2.5 text-xs text-text-subtle space-y-1">
+                  <p>远程部署参考：</p>
+                  <p>1. 在云主机上安装 agenticx: <code className="text-text-muted">pip install agenticx</code></p>
+                  <p>2. 启动服务: <code className="text-text-muted">agx serve --host 0.0.0.0 --port 8080 --token YOUR_TOKEN</code></p>
+                  <p>3. 确保防火墙放行对应端口，生产环境建议配置 HTTPS (Nginx 反向代理)。</p>
+                  <p className="text-text-faint">修改后点底部「退出」统一生效；切换模式需重启{APP_DISPLAY_NAME}。</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {SHOW_DESKTOP_GENERAL_EXPERT_CONTROLS ? (
+            <div className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-4 py-2.5">
+              <span className="min-w-0 truncate text-[11px] text-text-faint">
+                开关类配置改动即时生效；需手动填写的项请用各区块内的「保存」。退出时会一并写入其它设置。
+              </span>
+              <button
+                className="shrink-0 rounded-md bg-btnPrimary px-4 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover"
+                onClick={handleSave}
+              >
+                退出
+              </button>
+            </div>
+          ) : null}
+        </div>
+        <div
+          className="agx-settings-panel-resize-handle"
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="拖拽调整设置窗口大小"
+          title="拖拽调整大小"
+          onMouseDown={onPanelResizeMouseDown}
+        />
+      </div>
+    </div>
+    {mcpErrorInspect ? (
+      <div
+        className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="mcp-error-inspect-title"
+        onClick={() => setMcpErrorInspect(null)}
+      >
+        <div
+          className="max-h-[min(70vh,32rem)] w-full max-w-lg overflow-hidden rounded-xl border border-border bg-surface-panel shadow-2xl"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="border-b border-border px-4 py-3">
+            <h2 id="mcp-error-inspect-title" className="text-sm font-semibold text-text-strong">
+              {mcpErrorInspect.title}
+            </h2>
+          </div>
+          <pre className="max-h-[50vh] overflow-auto whitespace-pre-wrap break-words px-4 py-3 text-xs text-text-subtle">
+            {mcpErrorInspect.body}
+          </pre>
+          <div className="flex justify-end border-t border-border px-4 py-2.5">
+            <button
+              type="button"
+              className="rounded-md bg-btnPrimary px-3 py-1.5 text-sm font-medium text-btnPrimary-text hover:bg-btnPrimary-hover"
+              onClick={() => setMcpErrorInspect(null)}
+            >
+              关闭
+            </button>
+          </div>
+        </div>
+      </div>
+    ) : null}
+    <Modal
+      open={capabilityLocks.allowLocalMcpInstall && Boolean(mcpDeleteConfirmServerName)}
+      onClose={() => setMcpDeleteConfirmServerName(null)}
+      panelClassName="w-full max-w-[min(92vw,560px)] bg-surface-panel"
+      footer={(
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            className="rounded-md border border-border px-4 py-1.5 text-sm text-text-subtle transition hover:bg-surface-hover hover:text-text-strong"
+            onClick={() => setMcpDeleteConfirmServerName(null)}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            className="rounded-md bg-btnPrimary px-4 py-1.5 text-sm font-medium text-btnPrimary-text transition hover:bg-btnPrimary-hover"
+            onClick={confirmDeleteMcpServer}
+          >
+            OK
+          </button>
+        </div>
+      )}
+    >
+      <div className="space-y-5 text-center">
+        <div className="relative mx-auto h-[120px] w-[120px]">
+          <svg
+            viewBox="0 0 120 120"
+            className="h-full w-full drop-shadow-[0_10px_24px_rgba(0,0,0,0.45)]"
+            aria-hidden
+          >
+            <path
+              d="M60 9 L110 100 H10 Z"
+              fill="#FACC15"
+              stroke="#F8FAFC"
+              strokeWidth="8"
+              strokeLinejoin="round"
+            />
+            <rect x="54" y="40" width="12" height="36" rx="6" fill="#F8FAFC" />
+            <circle cx="60" cy="88" r="6" fill="#F8FAFC" />
+          </svg>
+          <div className="absolute -bottom-1 -right-1 flex h-11 w-11 items-center justify-center overflow-hidden rounded-full border-2 border-[#0f172a] bg-[#0f172a] shadow-lg">
+            <img src={effectiveMetaAvatarUrl} alt="" className="h-full w-full object-cover" />
+          </div>
+        </div>
+        <p className="text-[38px] font-semibold leading-tight text-text-strong">
+          确认删除 MCP 服务「{mcpDeleteConfirmServerName ?? ""}」
+          <br />
+          吗？此操作会直接修改 mcp.json。
+        </p>
+      </div>
+    </Modal>
+    <MCPJsonEditorModal
+      open={capabilityLocks.allowLocalMcpInstall && mcpEditorOpen}
+      selectedPath={mcpEditorPath}
+      filePaths={mcpEditorFilePaths}
+      focusServerName={mcpEditorFocusServerName}
+      focusRequestToken={mcpEditorFocusToken}
+      onClose={() => {
+        setMcpEditorOpen(false);
+        setMcpEditorFocusServerName(undefined);
+      }}
+      onPickPath={setMcpEditorPath}
+      onLoad={async (path) => {
+        const result = await window.agenticxDesktop.mcpGetRaw({ path });
+        if (!result.ok) return { ok: false, error: result.error };
+        return {
+          ok: true,
+          text: result.text,
+          format: result.format,
+          parse_error: result.parse_error,
+        };
+      }}
+      onSave={async (path, text) => {
+        const result = await window.agenticxDesktop.mcpPutRaw({ path, text });
+        if (!result.ok) return { ok: false, error: result.error };
+        if (sessionId) await onRefreshMcp(sessionId);
+        return { ok: true };
+      }}
+    />
+    <McpRemoteServerModal
+      open={capabilityLocks.allowLocalMcpInstall && mcpRemoteModalOpen}
+      mode={mcpRemoteModalMode}
+      configPath={MCP_PRIMARY_CONFIG_PATH}
+      serverName={mcpRemoteEditName}
+      locateServerPath={locateMcpServerPath}
+      onClose={() => {
+        setMcpRemoteModalOpen(false);
+        setMcpRemoteEditName(undefined);
+      }}
+      onSaved={async (msg) => {
+        setMcpMessage(msg);
+        if (sessionId) await onRefreshMcp(sessionId);
+      }}
+    />
+    </>
+  );
+}

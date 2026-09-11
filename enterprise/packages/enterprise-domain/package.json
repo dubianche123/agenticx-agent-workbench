@@ -1,0 +1,29 @@
+{
+  "name": "@agenticx/enterprise-domain",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tenant-scoped enterprise action domain services",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./actions": "./src/actions.ts",
+    "./domain": "./src/domain.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agenticx/action-runtime": "workspace:*",
+    "@agenticx/db-schema": "workspace:*",
+    "@agenticx/iam-core": "workspace:*",
+    "drizzle-orm": "^0.45.2",
+    "ulid": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.9.2",
+    "vitest": "^4.1.5"
+  }
+}

@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+"""Runtime tests for durable, non-blocking session token notices.
+
+Author: Damon Li
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any
+from unittest.mock import MagicMock
+
+from agenticx.cli.studio import StudioSession
+from agenticx.runtime.agent_runtime import AgentRuntime, _serialize_scratchpad
+from agenticx.runtime.events import EventType
+from agenticx.runtime.token_budget import (
+    TOKEN_BUDGET_SCRATCHPAD_KEY,
+    TokenBudgetGuard,
+)
+
+
+class _UsageResponse:
+    def __init__(self, text: str, *, input_tokens: int, output_tokens: int) -> None:
+        self.content = text
+        self.tool_calls: list[dict[str, Any]] = []
+        self.token_usage = {
+            "prompt_tokens": input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+
+
+class _CountingUsageLLM:
+    def __init__(self, *, input_tokens: int, output_tokens: int, text: str = "done") -> None:
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.text = text
+        self.calls = 0
+
+    def invoke(self, *_args: Any, **_kwargs: Any) -> _UsageResponse:
+        self.calls += 1
+        return _UsageResponse(
+            self.text,
+            input_tokens=self.input_tokens,
+            output_tokens=self.output_tokens,
+        )
+
+
+async def _collect(
+    runtime: AgentRuntime,
+    session: StudioSession,
+    text: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    async for event in runtime.run_turn(text, session, tools=[]):
+        rows.append({"type": event.type, "data": event.data})
+    return rows
+
+
+def _runtime(
+    llm: Any,
+    *,
+    session_limit: int,
+    warning_limit: int = 500_000,
+) -> AgentRuntime:
+    runtime = AgentRuntime(llm=llm, confirm_gate=MagicMock())
+    runtime.token_budget = TokenBudgetGuard(
+        max_tokens_per_session=session_limit,
+        warning_tokens_per_session=warning_limit,
+        max_tokens_per_turn=2_000_000,
+    )
+    return runtime
+
+
+def test_turn_compress_hint_stays_internal_without_user_warning() -> None:
+    session = StudioSession()
+    llm = _CountingUsageLLM(input_tokens=48_000, output_tokens=1, text="completed result")
+    runtime = AgentRuntime(llm=llm, confirm_gate=MagicMock())
+    runtime.token_budget = TokenBudgetGuard(
+        max_tokens_per_session=1_000_000,
+        warning_tokens_per_session=500_000,
+        max_tokens_per_turn=50_000,
+    )
+
+    async def _compact(history: Any, *args: Any, force: bool = False, **kwargs: Any):
+        del args, kwargs
+        if not force:
+            return list(history), False, "", 0, ""
+        return (
+            [
+                {"role": "system", "content": "[compacted] summary"},
+                {"role": "user", "content": "finish"},
+            ],
+            True,
+            "summary",
+            6,
+            "",
+        )
+
+    runtime.compactor.maybe_compact = _compact  # type: ignore[method-assign]
+
+    events = asyncio.run(_collect(runtime, session, "finish this"))
+
+    assert events[-1]["type"] == EventType.FINAL.value
+    assert not any(
+        row["data"].get("detector") == "token_budget_compress" for row in events
+    )
+    assert not any(
+        "建议收口或新建会话" in str(row["data"].get("text", "")) for row in events
+    )
+
+
+def test_crossing_red_threshold_warns_once_and_never_blocks_next() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 900,
+        "cumulative_output": 0,
+        "warning_emitted": True,
+        "warning_emitted_at": 500,
+    }
+
+    crossing_llm = _CountingUsageLLM(input_tokens=120, output_tokens=20, text="completed result")
+    crossing_runtime = _runtime(crossing_llm, session_limit=1_000, warning_limit=500)
+    events = asyncio.run(_collect(crossing_runtime, session, "finish this"))
+
+    assert crossing_llm.calls == 1
+    assert events[-1]["type"] == EventType.FINAL.value
+    assert events[-1]["data"]["text"] == "completed result"
+    crossing_notices = [
+        row
+        for row in events
+        if row["data"].get("detector") == "token_budget_session_reached"
+    ]
+    assert len(crossing_notices) == 1
+    assert crossing_notices[0]["data"]["severity"] == "warning"
+    assert crossing_notices[0]["data"]["warning_level"] == "red"
+    assert crossing_notices[0]["data"]["blocking"] is False
+    assert "block_next_turn" not in crossing_notices[0]["data"]
+    assert "budget_exceeded" not in crossing_notices[0]["data"]
+    assert session.chat_history[-1]["role"] == "assistant"
+    assert session.chat_history[-1]["content"] == "completed result"
+    assert session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]["cumulative_input"] == 1_020
+    assert session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]["cumulative_output"] == 20
+
+    next_llm = _CountingUsageLLM(input_tokens=1, output_tokens=1, text="kept going")
+    next_runtime = _runtime(next_llm, session_limit=1_000, warning_limit=500)
+    next_events = asyncio.run(_collect(next_runtime, session, "one more request"))
+
+    assert next_llm.calls == 1
+    assert next_events[-1]["type"] == EventType.FINAL.value
+    assert next_events[-1]["data"]["text"] == "kept going"
+    assert not any(
+        row["data"].get("detector") == "token_budget_session_reached"
+        for row in next_events
+    )
+
+
+def test_current_thresholds_override_persisted_thresholds_without_blocking() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 1_020,
+        "cumulative_output": 20,
+        "warning_emitted": True,
+        "max_session": 1_000,
+    }
+    llm = _CountingUsageLLM(input_tokens=10, output_tokens=5, text="unlocked")
+    runtime = _runtime(llm, session_limit=2_000)
+
+    events = asyncio.run(_collect(runtime, session, "continue"))
+
+    assert llm.calls == 1
+    assert events[-1]["type"] == EventType.FINAL.value
+    assert events[-1]["data"]["text"] == "unlocked"
+    assert not any(row["data"].get("warning_level") == "red" for row in events)
+
+
+def test_500k_warning_is_emitted_once_across_runtime_instances() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 499_900,
+        "cumulative_output": 0,
+        "warning_emitted": False,
+    }
+
+    first_events = asyncio.run(
+        _collect(
+            _runtime(_CountingUsageLLM(input_tokens=100, output_tokens=1), session_limit=1_000_000),
+            session,
+            "first",
+        )
+    )
+    assert sum(
+        row["data"].get("detector") == "token_budget_warning" for row in first_events
+    ) == 1
+    assert next(
+        row for row in first_events if row["data"].get("detector") == "token_budget_warning"
+    )["data"]["warning_level"] == "yellow"
+    assert session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]["warning_emitted"] is True
+
+    second_events = asyncio.run(
+        _collect(
+            _runtime(_CountingUsageLLM(input_tokens=10, output_tokens=1), session_limit=1_000_000),
+            session,
+            "second",
+        )
+    )
+    assert not any(
+        row["data"].get("detector") == "token_budget_warning" for row in second_events
+    )
+
+
+def test_custom_warning_threshold_reaches_runtime_event_and_persistence() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 699_900,
+        "cumulative_output": 0,
+        "warning_emitted": False,
+        "warning_emitted_at": 0,
+    }
+
+    events = asyncio.run(
+        _collect(
+            _runtime(
+                _CountingUsageLLM(input_tokens=100, output_tokens=1),
+                session_limit=1_000_000,
+                warning_limit=700_000,
+            ),
+            session,
+            "cross custom warning",
+        )
+    )
+
+    notices = [
+        row for row in events if row["data"].get("detector") == "token_budget_warning"
+    ]
+    assert len(notices) == 1
+    assert notices[0]["data"]["warning_at"] == 700_000
+    persisted = session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]
+    assert persisted["warning_emitted"] is True
+    assert persisted["warning_emitted_at"] == 700_000
+    assert persisted["warning_tokens_per_session"] == 700_000
+
+
+def test_yellow_notice_is_not_skipped_by_a_large_paid_turn_below_red() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 499_900,
+        "cumulative_output": 0,
+        "warning_emitted": False,
+    }
+
+    events = asyncio.run(
+        _collect(
+            _runtime(
+                _CountingUsageLLM(input_tokens=450_100, output_tokens=1),
+                session_limit=1_000_000,
+            ),
+            session,
+            "large paid turn",
+        )
+    )
+
+    assert sum(
+        row["data"].get("detector") == "token_budget_warning" for row in events
+    ) == 1
+    assert session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]["warning_emitted"] is True
+
+
+def test_direct_jump_across_both_thresholds_emits_only_red_and_latches_both() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {
+        "version": 1,
+        "cumulative_input": 400,
+        "cumulative_output": 0,
+        "warning_emitted": False,
+    }
+
+    events = asyncio.run(
+        _collect(
+            _runtime(
+                _CountingUsageLLM(input_tokens=700, output_tokens=1),
+                session_limit=1_000,
+                warning_limit=500,
+            ),
+            session,
+            "large paid turn",
+        )
+    )
+
+    assert not any(
+        row["data"].get("detector") == "token_budget_warning" for row in events
+    )
+    red_notices = [
+        row
+        for row in events
+        if row["data"].get("detector") == "token_budget_session_reached"
+    ]
+    assert len(red_notices) == 1
+    assert red_notices[0]["data"]["warning_level"] == "red"
+    persisted = session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY]
+    assert persisted["yellow_emitted"] is True
+    assert persisted["red_emitted"] is True
+    assert persisted["yellow_emitted_at"] == 500
+    assert persisted["red_emitted_at"] == 1_000
+
+
+def test_internal_budget_state_is_not_serialized_for_the_model() -> None:
+    session = StudioSession()
+    session.scratchpad[TOKEN_BUDGET_SCRATCHPAD_KEY] = {"cumulative_input": 123}
+    assert _serialize_scratchpad(session) == "(empty)"
+
+    session.scratchpad["work_note"] = "visible"
+    rendered = _serialize_scratchpad(session)
+    assert "work_note: visible" in rendered
+    assert TOKEN_BUDGET_SCRATCHPAD_KEY not in rendered
