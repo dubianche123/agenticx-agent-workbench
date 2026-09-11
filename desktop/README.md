@@ -1,4 +1,4 @@
-# AgenticX Ontology Desktop — macOS Alpha Preview
+# AgenticX Ontology Desktop — macOS Preview
 
 > **注意：当前为 Alpha 预览版，macOS 签名/公证尚未接入，首次打开需要手动放行（见下方说明）。**
 
@@ -29,14 +29,9 @@
 若未使用自包含 DMG，AgenticX Ontology 需要 `agx` 命令行工具来运行本地 AI 服务。打开终端，运行：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/agenticx/agenticx/main/install.sh | bash
+python -m pip install agenticx
 ```
 
-或通过 pip 安装：
-
-```bash
-pip install agenticx
-```
 
 安装后验证：
 
@@ -132,9 +127,9 @@ SKIP_BACKEND=1 ./packaging/build_dmg.sh arm64
 |--------|-----|
 | `CSC_LINK` | `base64 -i ~/Documents/AppleCerts/DeveloperID.p12` 的完整输出 |
 | `CSC_KEY_PASSWORD` | `.p12` 导出密码 |
-| `APPLE_ID` | Apple ID 邮箱（如 `zli221@hawk.iit.edu`） |
+| `APPLE_ID` | Apple ID 邮箱（如 `developer@example.com`） |
 | `APPLE_ID_PASSWORD` | [App 专用密码](https://appleid.apple.com)（`xxxx-xxxx-xxxx-xxxx`）；CI 会同步注入为 `APPLE_APP_SPECIFIC_PASSWORD`（electron-builder 25 内置公证变量名） |
-| `APPLE_TEAM_ID` | `57B7L2XXTJ` |
+| `APPLE_TEAM_ID` | `YOUR_APPLE_TEAM_ID` |
 
 触发构建：推送 tag `desktop-v*` / `v*`，或在 Actions 页手动 **Run workflow**（`workflow_dispatch`）。产物在对应 run 的 **Artifacts**（`agenticx-ontology-arm64` / `agenticx-ontology-x64`）。
 

@@ -1,4 +1,4 @@
-# AgenticX
+# AgenticX Ontology
 
 <div align="center" markdown>
 ![AgenticX Logo](assets/agenticx-logo.png){ width="600" }
@@ -6,7 +6,7 @@
 
 **Unified Multi-Agent Framework** — production-ready, scalable, from simple automation to complex multi-agent collaboration.
 
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL%20v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/agenticx)](https://pypi.org/project/agenticx/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/agenticx)](https://pypi.org/project/agenticx/)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/dubianche123/Agenticx-ontology)
@@ -94,4 +94,4 @@ result = executor.run(task)
 
 ## Reference
 
-- [错误码体系：Machi 官网账号与设备登录（`AGX-AUTH-*`）](error-codes.md)
+- [错误码体系（`AGX-AUTH-*`）](error-codes.md)
