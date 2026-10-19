@@ -100,8 +100,8 @@ The Machi Desktop app is an Electron-based application that wraps the Studio UI 
 
 ### How can I contribute?
 
-See [CONTRIBUTING.md](https://github.com/dubianche123/Agenticx-ontology/blob/main/CONTRIBUTING.md) on GitHub.
+See [CONTRIBUTING.md](https://github.com/dubianche123/agenticx-agent-workbench/blob/main/CONTRIBUTING.md) on GitHub.
 
 ### How do I report a bug?
 
-Open an issue on [GitHub Issues](https://github.com/dubianche123/Agenticx-ontology/issues).
+Open an issue on [GitHub Issues](https://github.com/dubianche123/agenticx-agent-workbench/issues).

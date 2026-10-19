@@ -574,5 +574,5 @@ pattern_classes = {
 
 ## 📚 参考资料
 
-- [AgenticX项目主页](https://github.com/dubianche123/Agenticx-ontology)
+- [AgenticX项目主页](https://github.com/dubianche123/agenticx-agent-workbench)
 - [多Agent协作模式](https://arxiv.org/abs/2501.06322)

@@ -1,4 +1,6 @@
-# AgenticX Ontology · AI Agent Runtime / 智能体工作台
+# AgenticX Ontology · 智能体工作台
+
+[English](README.md) · **简体中文**
 
 <div align="center">
   <img src="assets/agenticx-logo.svg" alt="AgenticX Ontology" width="420" />
@@ -13,8 +15,6 @@
 AgenticX Ontology 是一套用于构建智能体产品的开源代码发行版。它把推理、工具调用、文档处理和受控工作区放在同一套抽象下，并同时提供 Python 运行时、Ontology Desktop 桌面端以及企业 Web 与网关应用。
 
 > **项目状态：** 当前为持续迭代的预览版。Python SDK 与核心运行时是最稳定的入口；桌面端和企业端仍在快速演进，接口、打包方式和工作流能力可能随版本调整。
-
-**Language / 语言：** [English](README.md) · [中文](README_ZN.md)
 
 面向智能体应用开发者：先从[Python 快速开始](#快速开始)或[桌面端指南](desktop/README.md)选择入口；企业身份、配额和网关配置见[企业端指南](enterprise/README.md)。
 
@@ -69,8 +69,8 @@ pip install agenticx
 从源码安装：
 
 ~~~bash
-git clone https://github.com/dubianche123/Agenticx-ontology.git
-cd Agenticx-ontology
+git clone https://github.com/dubianche123/agenticx-agent-workbench.git
+cd agenticx-agent-workbench
 pip install -e .
 ~~~
 

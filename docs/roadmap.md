@@ -30,4 +30,4 @@
 
 ## Community Requests
 
-Have a feature request? [Open an issue →](https://github.com/dubianche123/Agenticx-ontology/issues)
+Have a feature request? [Open an issue →](https://github.com/dubianche123/agenticx-agent-workbench/issues)

@@ -47,4 +47,4 @@ class Task(BaseModel):
 ```
 
 !!! tip "Full API Reference"
-    Auto-generated API docs from source code are coming soon. In the meantime, refer to the [source on GitHub](https://github.com/dubianche123/Agenticx-ontology/tree/main/agenticx/agents).
+    Auto-generated API docs from source code are coming soon. In the meantime, refer to the [source on GitHub](https://github.com/dubianche123/agenticx-agent-workbench/tree/main/agenticx/agents).

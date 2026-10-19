@@ -69,5 +69,5 @@ After upgrading, restart `admin-console` and `web-portal` so the sidebar brand s
 
 ## Links
 
-- Release page: https://github.com/dubianche123/Agenticx-ontology/releases/tag/enterprise-v0.2.2
-- Compare: https://github.com/dubianche123/Agenticx-ontology/compare/enterprise-v0.2.1...enterprise-v0.2.2
+- Release page: https://github.com/dubianche123/agenticx-agent-workbench/releases/tag/enterprise-v0.2.2
+- Compare: https://github.com/dubianche123/agenticx-agent-workbench/compare/enterprise-v0.2.1...enterprise-v0.2.2

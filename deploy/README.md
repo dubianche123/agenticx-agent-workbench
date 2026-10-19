@@ -31,8 +31,8 @@ deploy/
 
 ### 1. 克隆项目
 ```bash
-git clone <your-repo>
-cd AgenticX
+git clone https://github.com/dubianche123/agenticx-agent-workbench.git
+cd agenticx-agent-workbench
 ```
 
 ### 2. 配置环境变量

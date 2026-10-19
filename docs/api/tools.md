@@ -349,6 +349,6 @@ tool = UnifiedDocumentTool(router=router, cache_dir="./cache")
 
 ## See also
 
-- [Source tree: `agenticx/tools`](https://github.com/dubianche123/Agenticx-ontology/tree/main/agenticx/tools)
+- [Source tree: `agenticx/tools`](https://github.com/dubianche123/agenticx-agent-workbench/tree/main/agenticx/tools)
 - Safety layer: `agenticx.safety.layer.SafetyLayer`
 - Studio command isolation: `agenticx.runtime.command_sandbox`

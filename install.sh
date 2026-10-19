@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AgenticX Ontology CLI 一键安装脚本
-# 用法: curl -sSL https://raw.githubusercontent.com/agenticx/agenticx/main/install.sh | bash
+# 用法: curl -sSL https://raw.githubusercontent.com/dubianche123/agenticx-agent-workbench/main/install.sh | bash
 set -e
 
 BOLD='\033[1m'
@@ -146,4 +146,4 @@ fi
 
 echo ""
 info "安装完成！重新打开 AgenticX Ontology 即可使用。"
-info "如有问题，请访问：https://github.com/agenticx/agenticx"
+info "如有问题，请访问：https://github.com/dubianche123/agenticx-agent-workbench"

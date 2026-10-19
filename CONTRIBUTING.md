@@ -43,8 +43,8 @@ git checkout -b feat/my-feature
 **Python 3.10+** required.
 
 ```bash
-git clone https://github.com/dubianche123/Agenticx-ontology.git
-cd AgenticX
+git clone https://github.com/dubianche123/agenticx-agent-workbench.git
+cd agenticx-agent-workbench
 
 # Recommended
 pip install uv

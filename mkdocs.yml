@@ -1,8 +1,8 @@
 site_name: AgenticX
 site_description: Unified Multi-Agent Framework — production-ready, scalable, from simple automation to complex multi-agent collaboration.
 site_url: https://docs.example.com
-repo_url: https://github.com/dubianche123/Agenticx-ontology
-repo_name: dubianche123/Agenticx-ontology
+repo_url: https://github.com/dubianche123/agenticx-agent-workbench
+repo_name: dubianche123/agenticx-agent-workbench
 edit_uri: edit/main/docs/
 
 theme:
@@ -110,7 +110,7 @@ nav:
 extra:
   social:
     - icon: fontawesome/brands/github
-      link: https://github.com/dubianche123/Agenticx-ontology
+      link: https://github.com/dubianche123/agenticx-agent-workbench
     - icon: fontawesome/brands/python
       link: https://pypi.org/project/agenticx/
   analytics:

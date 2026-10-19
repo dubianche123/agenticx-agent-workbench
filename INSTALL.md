@@ -30,7 +30,7 @@ uv pip install -r requirements.lock
 一键脚本（从 PyPI 安装 CLI，非源码树）：
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/dubianche123/Agenticx-ontology/main/install.sh | bash
+curl -sSL https://raw.githubusercontent.com/dubianche123/agenticx-agent-workbench/main/install.sh | bash
 ```
 
 ## 系统级依赖

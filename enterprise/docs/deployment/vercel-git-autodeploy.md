@@ -1,12 +1,12 @@
 # Vercel Git 自动部署与 Ignored Build Step
 
-> 适用：`enterprise-admin-console`、`enterprise-web-portal` 两个独立 Project，仓库根为 `dubianche123/Agenticx-ontology`。
+> 适用：`enterprise-admin-console`、`enterprise-web-portal` 两个独立 Project，仓库根为 `dubianche123/agenticx-agent-workbench`。
 
 ## 1. 连接 Git（必做）
 
 在 Vercel 每个 Project → **Settings → Git**：
 
-1. **Connect Git Repository** → 选 `dubianche123/Agenticx-ontology`
+1. **Connect Git Repository** → 选 `dubianche123/agenticx-agent-workbench`
 2. **Production Branch** = `main`
 3. 确认未开启 **Pause Deployments**
 

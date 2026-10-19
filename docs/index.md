@@ -9,7 +9,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![PyPI version](https://img.shields.io/pypi/v/agenticx)](https://pypi.org/project/agenticx/)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/agenticx)](https://pypi.org/project/agenticx/)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/dubianche123/Agenticx-ontology)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/dubianche123/agenticx-agent-workbench)
 
 ---
 
@@ -90,7 +90,7 @@ result = executor.run(task)
 ```
 
 [Get Started →](getting-started/installation.md){ .md-button .md-button--primary }
-[View on GitHub →](https://github.com/dubianche123/Agenticx-ontology){ .md-button }
+[View on GitHub →](https://github.com/dubianche123/agenticx-agent-workbench){ .md-button }
 
 ## Reference
 

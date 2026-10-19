@@ -4,7 +4,7 @@ All notable changes to AgenticX are documented here.
 
 ## Latest
 
-See [GitHub Releases](https://github.com/dubianche123/Agenticx-ontology/releases) for the full changelog.
+See [GitHub Releases](https://github.com/dubianche123/agenticx-agent-workbench/releases) for the full changelog.
 
 ### Added
 

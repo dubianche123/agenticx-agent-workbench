@@ -217,11 +217,11 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/dubianche123/Agenticx-ontology"
+Homepage = "https://github.com/dubianche123/agenticx-agent-workbench"
 Documentation = "https://agenticx.ai/docs"
-Repository = "https://github.com/dubianche123/Agenticx-ontology"
-Issues = "https://github.com/dubianche123/Agenticx-ontology/issues"
-Discussions = "https://github.com/dubianche123/Agenticx-ontology/discussions"
+Repository = "https://github.com/dubianche123/agenticx-agent-workbench"
+Issues = "https://github.com/dubianche123/agenticx-agent-workbench/issues"
+Discussions = "https://github.com/dubianche123/agenticx-agent-workbench/discussions"
 
 [project.scripts]
 agenticx = "agenticx.cli.main:main"

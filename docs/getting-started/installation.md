@@ -52,8 +52,8 @@ background.
 ## Install from Source
 
 ```bash
-git clone https://github.com/dubianche123/Agenticx-ontology.git
-cd Agenticx-ontology
+git clone https://github.com/dubianche123/agenticx-agent-workbench.git
+cd agenticx-agent-workbench
 
 # Desktop / knowledge-base runtime (recommended)
 pip install -e ".[desktop-runtime]"
