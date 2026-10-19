@@ -1,4 +1,4 @@
-# AgenticX Ontology
+# AgenticX Ontology · AI Agent Runtime / 智能体工作台
 
 <div align="center">
   <img src="assets/agenticx-logo.svg" alt="AgenticX Ontology" width="420" />
@@ -15,6 +15,10 @@ AgenticX Ontology 是一套用于构建智能体产品的开源代码发行版�
 > **项目状态：** 当前为持续迭代的预览版。Python SDK 与核心运行时是最稳定的入口；桌面端和企业端仍在快速演进，接口、打包方式和工作流能力可能随版本调整。
 
 **Language / 语言：** [English](README.md) · [中文](README_ZN.md)
+
+面向智能体应用开发者：先从[Python 快速开始](#快速开始)或[桌面端指南](desktop/README.md)选择入口；企业身份、配额和网关配置见[企业端指南](enterprise/README.md)。
+
+**项目来源：** 本发行版基于 Ziran Li 与贡献者开发的 [AgenticX](https://github.com/DemonDamon/AgenticX)，保留上游 Apache-2.0 许可证与作者署名。本仓库提供 Ontology Desktop 与 Enterprise 的代码及运行入口。
 
 ## 仓库包含什么
 
@@ -53,7 +57,7 @@ AgenticX Ontology 是一套用于构建智能体产品的开源代码发行版�
 
 ### 1. 安装 Python 运行时
 
-要求 Python 3.10 及以上，以及 pip 或 uv。
+要求 Python 3.10 及以上，以及 pip 或 uv。下方 `agenticx` 包为上游 Python 运行时；要安装本仓库的 Ontology 发行版，请使用后面的源码安装方式。
 
 ~~~bash
 python -m venv .venv

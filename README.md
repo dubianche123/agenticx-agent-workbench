@@ -1,4 +1,4 @@
-# AgenticX Ontology
+# AgenticX Ontology · AI Agent Runtime / 智能体工作台
 
 <div align="center">
   <img src="assets/agenticx-logo.svg" alt="AgenticX Ontology" width="420" />
@@ -15,6 +15,10 @@ AgenticX Ontology is a source distribution for building agent products that can 
 > **Project status:** active preview. The Python SDK and core runtime are the most stable entry points. Desktop and Enterprise are evolving products; interfaces, packaging, and workflow capabilities may change between releases.
 
 **Language:** [English](README.md) · [中文](README_ZN.md)
+
+**中文速览：** 面向智能体应用开发者，提供 Python 运行时、本机桌面工作台与企业 Web / 网关预览。先从[Python 快速开始](#quick-start)或[桌面端指南](desktop/README.md)选择入口；[中文说明](README_ZN.md)介绍各组件与运行要求。
+
+**Origin:** This distribution builds on [AgenticX](https://github.com/DemonDamon/AgenticX) by Ziran Li and contributors. It retains the upstream Apache-2.0 license and author attribution; Ontology Desktop and Enterprise entry points are documented in this repository.
 
 ## What is included
 
@@ -53,7 +57,7 @@ The current workflow stack is deliberately high level. A workflow can describe a
 
 ### 1. Install the Python runtime
 
-Requirements: Python 3.10 or newer and pip or uv.
+Requirements: Python 3.10 or newer and pip or uv. The `agenticx` package below is the upstream Python runtime; use the source checkout to install this Ontology distribution.
 
 ~~~bash
 python -m venv .venv
