@@ -1,10 +1,10 @@
-# AgenticX Ontology · 智能体工作台
+# AgenticX Workbench · 智能体工作台
 
 [English](README.md) · **简体中文**
 
 <div align="center">
-  <img src="assets/agenticx-logo.svg" alt="AgenticX Ontology" width="420" />
-  <p><strong>开源智能体运行时、本机优先桌面工作台与企业控制面。</strong></p>
+  <img src="assets/agenticx-logo.svg" alt="AgenticX Workbench" width="420" />
+  <p><strong>把 Python 智能体运行时、本机优先桌面工作台与企业控制面放在同一套代码树里。</strong></p>
 
   [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
   [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
@@ -12,13 +12,15 @@
   [![Enterprise](https://img.shields.io/badge/Enterprise-Portal%20%2B%20Gateway-0F766E.svg)](enterprise/)
 </div>
 
-AgenticX Ontology 是一套用于构建智能体产品的开源代码发行版。它把推理、工具调用、文档处理和受控工作区放在同一套抽象下，并同时提供 Python 运行时、Ontology Desktop 桌面端以及企业 Web 与网关应用。
+做智能体产品时，往往要同时面对三层需求：底层需要一个能跑 ReAct 循环、调工具、解析文档的 Python 运行时；个人日常使用需要一个带本地工作区和终端的桌面客户端；到了团队落地阶段，又需要一套管身份、配额、模型路由和审计日志的网关与后台。
 
-> **项目状态：** 当前为持续迭代的预览版。Python SDK 与核心运行时是最稳定的入口；桌面端和企业端仍在快速演进，接口、打包方式和工作流能力可能随版本调整。
+**AgenticX Workbench** 基于 Ziran Li 与贡献者开发的 [AgenticX](https://github.com/DemonDamon/AgenticX)（保留上游 Apache-2.0 许可与作者署名），把这三种形态整合在同一个预览发行版仓库里：
 
-面向智能体应用开发者：先从[Python 快速开始](#快速开始)或[桌面端指南](desktop/README.md)选择入口；企业身份、配额和网关配置见[企业端指南](enterprise/README.md)。
+- **想在自己的服务或脚本里写 Agent**：直接从 [Python 快速开始](#快速开始)（`agenticx/`）入手。
+- **想体验本机优先的多智能体桌面工作台**：查看 [Ontology Desktop 指南](desktop/README.md)（`desktop/`）。
+- **想了解企业门户、Go AI 网关、配额与审计链路**：查看 [AgenticX Enterprise 指南](enterprise/README.md)（`enterprise/`）。
 
-**项目来源：** 本发行版基于 Ziran Li 与贡献者开发的 [AgenticX](https://github.com/DemonDamon/AgenticX)，保留上游 Apache-2.0 许可证与作者署名。本仓库提供 Ontology Desktop 与 Enterprise 的代码及运行入口。
+> **当前状态：** Python SDK 与核心运行时是最稳定的入口；桌面端（Ontology Desktop）与企业端（Enterprise）处于持续演进的预览阶段，打包方式、连接器执行器与工作流画布仍在快速迭代中。
 
 ## 仓库包含什么
 

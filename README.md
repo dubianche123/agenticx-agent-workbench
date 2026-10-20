@@ -1,10 +1,10 @@
-# AgenticX Ontology · AI Agent Workbench
+# AgenticX Workbench · AI Agent Workbench
 
 **English** · [简体中文](README_ZN.md)
 
 <div align="center">
-  <img src="assets/agenticx-logo.svg" alt="AgenticX Ontology" width="420" />
-  <p><strong>An open-source agent runtime, local-first desktop workspace, and enterprise control plane.</strong></p>
+  <img src="assets/agenticx-logo.svg" alt="AgenticX Workbench" width="420" />
+  <p><strong>An open-source agent runtime, local-first desktop workspace, and enterprise control plane in one codebase.</strong></p>
 
   [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
   [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB.svg)](https://www.python.org/)
@@ -12,13 +12,15 @@
   [![Enterprise](https://img.shields.io/badge/Enterprise-Portal%20%2B%20Gateway-0F766E.svg)](enterprise/)
 </div>
 
-AgenticX Ontology is a source distribution for building agent products that can reason, call tools, work with documents, and operate inside controlled workspaces. The repository contains the shared Python runtime, Ontology Desktop, and the enterprise web and gateway applications in one place.
+When building agent applications, you usually end up stitching together three separate pieces: a Python runtime for tool loops and document parsing, a local desktop UI for day-to-day multi-agent workspaces, and a gateway/control plane when teams need auth, quotas, and audit logs.
 
-> **Project status:** active preview. The Python SDK and core runtime are the most stable entry points. Desktop and Enterprise are evolving products; interfaces, packaging, and workflow capabilities may change between releases.
+**AgenticX Workbench** brings those three surfaces together in a single preview distribution built on [AgenticX](https://github.com/DemonDamon/AgenticX) (by Ziran Li and contributors, Apache-2.0):
 
-For agent application developers: start with the [Python quick start](#quick-start) or the [desktop guide](desktop/README.md). See the [enterprise guide](enterprise/README.md) for identity, quotas and gateway setup.
+- **If you want to embed agents in code**, start with the [Python quick start](#quick-start) (`agenticx/`).
+- **If you want a local-first desktop workspace**, jump to [Ontology Desktop](desktop/README.md) (`desktop/`).
+- **If you are exploring team governance, RBAC, and Go gateway routing**, see [AgenticX Enterprise](enterprise/README.md) (`enterprise/`).
 
-**Origin:** This distribution builds on [AgenticX](https://github.com/DemonDamon/AgenticX) by Ziran Li and contributors. It retains the upstream Apache-2.0 license and author attribution; Ontology Desktop and Enterprise entry points are documented in this repository.
+> **Status note:** The Python SDK and core runtime are the most mature entry points. Desktop and Enterprise are active preview surfaces where packaging, connector execution, and workflow editors continue to evolve.
 
 ## What is included
 
